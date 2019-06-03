@@ -1,3 +1,7 @@
+# VIM files
+*.swo
+*.swp
+
 # Prerequisites
 *.d
 
