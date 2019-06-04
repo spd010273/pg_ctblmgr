@@ -33,7 +33,7 @@
 #define WORKER_TYPE_CHILD 2
 
 bool daemonize;
-char * conn_info;
+char * conninfo;
 FILE * log_file;
 
 sig_atomic_t got_sighup;

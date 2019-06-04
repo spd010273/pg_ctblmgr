@@ -22,7 +22,7 @@ Usage: pg_ctblmgr\n \
     -v VERSION\n \
     -? HELP ]\n";
 
-void parse_args( int argc, char ** argv )
+void _parse_args( int argc, char ** argv )
 {
     int c = 0;
     char * username = NULL;
@@ -30,7 +30,7 @@ void parse_args( int argc, char ** argv )
     char * port     = NULL;
     char * hostname = NULL;
 
-    operr = 0;
+    opterr = 0;
 
     while( ( c = getopt( argc, argv, "U:p:d:h:Dv?" ) ) != -1 )
     {
@@ -145,7 +145,7 @@ void _log( unsigned short log_level, char * message, ... )
 
     gettimeofday( &tv, NULL );
     strftime(
-        bufftime,
+        buff_time,
         sizeof( buff_time ) / sizeof( *buff_time ),
         "%Y-%m-%d %H:%M:%S",
         gmtime( &tv.tv_sec )
@@ -331,7 +331,7 @@ void _set_process_title(
     {
         size = 0;
 
-        for( i = 0; i < argv; i++ )
+        for( i = 0; i < argc; i++ )
         {
             if( argv[i] == NULL )
             {

@@ -1,4 +1,4 @@
-#include "query.h";
+#include "query.h"
 
 PGresult * _execute_query( struct worker * me, char * query, char ** params, unsigned int param_count )
 {
@@ -7,7 +7,6 @@ PGresult * _execute_query( struct worker * me, char * query, char ** params, uns
     char *       temp_last_sql_state = NULL;
     unsigned int retry_counter       = 0;
     unsigned int last_backoff_time   = 1;
-    unsigned int i                   = 0;
 
     if( me == NULL )
     {
@@ -73,7 +72,7 @@ PGresult * _execute_query( struct worker * me, char * query, char ** params, uns
                 ) == 0
              || strcmp(
                     last_sql_state,
-                    SQL_STATE_SQLCLIENT_UNABLE_TO_ESTABLISH_CONNECTION
+                    SQL_STATE_SQLCLIENT_UNABLE_TO_ESTABLISH_SQLCONNECTION
                 ) == 0
              || strcmp(
                     last_sql_state,
@@ -92,13 +91,13 @@ PGresult * _execute_query( struct worker * me, char * query, char ** params, uns
             // We've made one pass, and our state is not null
             if( me->tx_in_progress == true )
             {
-                me->tx_in_progress == false;
+                me->tx_in_progress = false;
             }
 
             me->conn = NULL;
             db_connect( me );
 
-            last_backoff_time = 1
+            last_backoff_time = 1;
             return NULL;
         }
 
@@ -169,7 +168,7 @@ PGresult * _execute_query( struct worker * me, char * query, char ** params, uns
             retry_counter++;
             sleep( last_backoff_time );
             last_backoff_time = (int) ( 10 * ( ( double ) rand() / ( double ) RAND_MAX ) )
-                              + last_Backoff_time;
+                              + last_backoff_time;
         }
         else
         {
@@ -179,7 +178,7 @@ PGresult * _execute_query( struct worker * me, char * query, char ** params, uns
 
     if( last_sql_state != NULL )
     {
-        free( last_sql_state )
+        free( last_sql_state );
         last_sql_state = NULL;
     }
 
@@ -279,7 +278,7 @@ bool _begin_transaction( struct worker * me )
     return true;
 }
 
-bool _commit_transaction( struct worker * worker )
+bool _commit_transaction( struct worker * me )
 {
     PGresult * result = NULL;
 
@@ -371,7 +370,7 @@ bool _rollback_transaction( struct worker * me )
         _log(
             LOG_LEVEL_ERROR,
             "Failed to rollback transaction: %s",
-            PQerrorMEssage( me->conn )
+            PQerrorMessage( me->conn )
         );
         PQclear( result );
         return false;
