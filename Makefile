@@ -16,7 +16,7 @@ PGXS            = $(shell $(PG_CONFIG) --pgxs)
 PG_CPPFLAGS     = $(PG_CFLAGS)
 EXTRA_CLEAN     = src/*.o src/*.so *.so *.o sql/$(EXTENSION)--$(EXTVERSION).sql
 PROGRAM			= pg_ctblmgr
-
+MODULES			= pg_ctblmgr_decoder
 #all: sql/$(EXTENSION)--$(EXTVERSION).sql
 
 #sql/$(EXTENSION)--$(EXTVERSION).sql: $(sort $(wildcard sql/tables/*.sql)) $(sort $(wildcard sql/functions/*.sql))
