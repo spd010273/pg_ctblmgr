@@ -9,7 +9,7 @@ PGLIBDIR        = $(shell $(PG_CONFIG) --libdir)
 PGXS            = $(shell $(PG_CONFIG) --pgxs)
 DEBUG			= -g -DDEBUG
 CC              = gcc
-EXTRA_CLEAN     = src/*.o src/*.so *.so *.o sql/$(EXTENSION)--$(EXTVERSION).sql
+EXTRA_CLEAN     = src/*.o src/*.so *.so *.o
 
 PG_CFLAGS		= $(DEBUG)
 SRCS			= $(wildcard src/*.c)

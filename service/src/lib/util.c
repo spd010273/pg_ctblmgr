@@ -5,12 +5,16 @@
 
 extern char ** environ; // declared in unistd.h
 
+struct worker ** workers       = NULL;
+struct worker *  parent        = NULL;
+char *           conninfo      = NULL;
+FILE *           log_file      = NULL;
+unsigned int     max_argv_size = 0;
+bool             daemonize     = false;
+
 sig_atomic_t got_sighup  = false;
 sig_atomic_t got_sigint  = false;
 sig_atomic_t got_sigterm = false;
-
-FILE * log_file = NULL;
-unsigned int max_argv_size = 0;
 
 static const char * usage_string = "\
 Usage: pg_ctblmgr\n \
@@ -260,8 +264,213 @@ struct worker * new_worker(
     result->conn           = NULL;
     result->my_argc        = 0;
     result->my_argv        = NULL;
+    result->change_buffer  = NULL;
 
     return result;
+}
+
+bool parent_init( int argc, char ** argv )
+{
+
+    if( daemonize )
+    {
+        if( daemon( 1, 1 ) != 0 )
+        {
+            _log(
+                LOG_LEVEL_FATAL,
+                "Daemonization failed"
+            );
+        }
+
+        log_file = fopen( LOG_FILE_NAME, "a" );
+
+        if( log_file == NULL )
+        {
+            return false;
+        }
+    }
+
+    parent = new_worker( WORKER_TYPE_PARENT, argc, argv, NULL );
+
+    if( parent == NULL )
+    {
+        return false;
+    }
+
+    if( !create_pid_file() )
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool create_pid_file( void )
+{
+    unsigned int    string_offset  = 0;
+    unsigned int    total_size     = 0;
+    char            path[PATH_MAX] = {0};
+    struct passwd * pw             = NULL;
+    DIR *           dir            = NULL;
+    FILE *          pfh            = NULL;
+    char *          pid_path       = NULL;
+    char *          my_pid         = NULL;
+    char *          pid_file       = "pg_ctblmgr.pid";
+    struct stat     statbuffer     = {0};
+
+    dir = opendir( "/var/run" );
+    // Try /var/run
+    if( dir != NULL )
+    {
+        closedir( dir ); // We have permissions to this directory
+        pfh = fopen( "/var/run/__test.pid", "w" );
+
+        if( pfh != NULL )
+        {
+            fclose( pfh );
+            remove( "/var/run/__test.pid" );
+            pfh = NULL;
+            strncpy( path, "/var/run", 8 );
+        }
+    }
+
+    // Try ~/
+    if( strlen( path ) == 0 )
+    {
+        if( getenv( "HOME" ) != NULL )
+        {
+            strncpy( path, getenv( "HOME" ), sizeof( path ) );
+        }
+    }
+
+    // Try current working dir
+    if( strlen( path ) == 0 )
+    {
+        pw = getpwuid( geteuid() );
+
+        if( pw != NULL )
+        {
+            strncpy( path, pw->pw_dir, sizeof( path ) );
+        }
+    }
+
+    if( strlen( path ) == 0 )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to determine location for PID file"
+        );
+
+        return false;
+    }
+
+    pfh = NULL;
+
+    if( path[strlen( path ) - 1] != '/' )
+    {
+        string_offset = 1;
+    }
+
+    total_size = strlen( path )
+               + strlen( pid_file )
+               + string_offset + 1;
+
+    pid_path = ( char * ) calloc(
+        sizeof( char ),
+        total_size
+    );
+
+    if( pid_path == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to allocate memory for PID file path"
+        );
+
+        return false;
+    }
+
+    if( total_size > PATH_MAX )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "PATH_MAX not large enough to prevent buffer overflow"
+        );
+
+        return false;
+    }
+
+    strncpy( pid_path, path, total_size );
+
+    if( string_offset == 1 )
+    {
+        strncat( pid_path, "/", 1 );
+    }
+
+    strncat( pid_path, pid_file, strlen( pid_file ) );
+
+    pid_path[total_size - 1] = '\0';
+
+    _log(
+        LOG_LEVEL_DEBUG,
+        "Opening pid file %s",
+        pid_path
+    );
+
+    // Does the file we've selected already exist?
+    if( stat( pid_path, &statbuffer ) >= 0 )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "PID file %s already exists, is pg_ctblmgr already running?",
+            pid_path
+        );
+        free( pid_path );
+        return false;
+    }
+
+    // Prepare pid string
+    total_size = ( unsigned int ) ceil( log10( ( int ) getpid() ) + 3 );
+
+    my_pid = ( char * ) calloc(
+        sizeof( char ),
+        total_size
+    );
+
+    if( my_pid == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to allocate memory for PID string"
+        );
+
+        free( pid_path );
+        return false;
+    }
+
+    snprintf( my_pid, total_size, "%d\n", ( int ) getpid() );
+
+    pfh = fopen( pid_path, "w" );
+
+    if( pfh == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to open file '%s' for writing",
+            pid_path
+        );
+
+        free( pid_path );
+        free( my_pid );
+        return false;
+    }
+
+    fprintf( pfh, "%s", my_pid );
+    parent->pidfile = pid_path;
+    fclose( pfh );
+    free( my_pid );
+
+    return true;
 }
 
 void free_worker( struct worker * worker )
@@ -350,4 +559,44 @@ void _set_process_title(
 
     memset( argv[0], '\0', size );
     strncpy( argv[0], title, size );
+}
+
+bool _wait_and_set_mutex( bool * mutex )
+{
+    time_t lock_acquire_start = 0;
+    double random_backoff     = 0.0;
+    double last_backoff       = 0.0;
+
+    lock_acquire_start = time( NULL );
+
+    last_backoff = 1.0;
+
+    while( *mutex == true || __test_and_set( mutex ) == true )
+    {
+        if( difftime( time( NULL ), lock_acquire_start ) > MAX_LOCK_WAIT )
+        {
+            _log(
+                LOG_LEVEL_WARNING,
+                "Max lock wait time %d exceeded",
+                MAX_LOCK_WAIT
+            );
+
+            return false;
+        }
+
+        sleep( last_backoff + random_backoff );
+        last_backoff   = last_backoff + random_backoff;
+        random_backoff = 2 * ( ( double ) rand() / ( double ) RAND_MAX );
+    }
+
+    *mutex = true;
+    return true;
+}
+
+bool __test_and_set( bool * mutex )
+{
+    bool initial = true;
+    initial = *mutex;
+    *mutex = true;
+    return initial;
 }

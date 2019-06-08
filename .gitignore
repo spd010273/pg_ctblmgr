@@ -1,3 +1,4 @@
+service/pg_ctblmgr
 # VIM files
 *.swo
 *.swp

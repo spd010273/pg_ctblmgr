@@ -32,6 +32,18 @@
 #define WORKER_TYPE_PARENT 1
 #define WORKER_TYPE_CHILD 2
 
+#define WORKER_STATUS_DEAD 0
+#define WORKER_STATUS_STARTUP 1
+#define WORKER_STATUS_IDLE 2
+#define WORKER_STATUS_UPDATE 3
+#define WORKER_STATUS_REFRESH 4
+
+#define MAX_LOCK_WAIT 5 // seconds
+
+#define WORKER_TITLE_PARENT "pg_ctblmgr logical receiver"
+#define WORKER_TITLE_CHILD "pg_ctblmgr subscriber"
+#define LOG_FILE_NAME "/var/log/pg_ctblmgr/pg_ctblmgr.log"
+
 bool daemonize;
 char * conninfo;
 FILE * log_file;
@@ -40,6 +52,13 @@ sig_atomic_t got_sighup;
 sig_atomic_t got_sigint;
 sig_atomic_t got_sigterm;
 
+struct change_buffer {
+    unsigned long  size;
+    unsigned long  num_entries;
+    char **        entries;
+    bool           _locked;
+};
+
 struct worker {
     unsigned short type;
     PGconn *       conn;
@@ -47,7 +66,12 @@ struct worker {
     bool           tx_in_progress;
     int            my_argc;
     char **        my_argv;
+    char *         pidfile;  // used by parent to remove pid file on term
+    void *         change_buffer;
 };
+
+struct worker ** workers;
+struct worker * parent;
 
 extern void _parse_args( int, char ** );
 extern void _usage( char * ) __attribute__ ((noreturn));
@@ -60,7 +84,12 @@ struct worker * new_worker(
     struct worker *
 );
 
+bool parent_init( int, char ** );
 void free_worker( struct worker * );
+bool create_pid_file( void );
+
+struct change_buffer * new_change_buffer( void );
+bool resize_change_buffer( struct change_buffer *, unsigned int );
 
 void __sigterm( int ) __attribute__ ((noreturn));
 void __sigint( int ) __attribute__ ((noreturn));
@@ -69,5 +98,8 @@ void __term( void ) __attribute__ ((noreturn));
 
 void * create_shared_memory( size_t );
 void _set_process_title( char **, int, char *, unsigned int * );
+
+bool _wait_and_set_mutex( bool * );
+bool __test_and_set( bool * );
 
 #endif // UTIL_H
