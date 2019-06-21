@@ -29,8 +29,8 @@ CREATE TABLE @extschema@.tb_driver
 );
 
 INSERT INTO @extschema@.tb_driver( driver, name )
-     VALUES ( 1, 'SQL' ),
-            ( 2, 'memcached' );
+     VALUES ( 1, 'postgresql' ), -- Default driver, builtin
+            ( 2, 'memcached' );  -- Extra driver, example code
 
 
 CREATE SEQUENCE @extschema@.sq_pk_location;

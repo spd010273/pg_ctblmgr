@@ -40,6 +40,8 @@
 
 #define MAX_LOCK_WAIT 5 // seconds
 
+#define DEFAULT_BUFFER_SIZE 16
+
 #define WORKER_TITLE_PARENT "pg_ctblmgr logical receiver"
 #define WORKER_TITLE_CHILD "pg_ctblmgr subscriber"
 #define LOG_FILE_NAME "/var/log/pg_ctblmgr/pg_ctblmgr.log"
@@ -61,6 +63,7 @@ struct change_buffer {
 
 struct worker {
     unsigned short type;
+    unsigned short status;
     PGconn *       conn;
     pid_t          pid;
     bool           tx_in_progress;
@@ -73,9 +76,9 @@ struct worker {
 struct worker ** workers;
 struct worker * parent;
 
-extern void _parse_args( int, char ** );
-extern void _usage( char * ) __attribute__ ((noreturn));
-extern void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
+void _parse_args( int, char ** );
+void _usage( char * ) __attribute__ ((noreturn));
+void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
 
 struct worker * new_worker(
     unsigned short,
@@ -88,9 +91,6 @@ bool parent_init( int, char ** );
 void free_worker( struct worker * );
 bool create_pid_file( void );
 
-struct change_buffer * new_change_buffer( void );
-bool resize_change_buffer( struct change_buffer *, unsigned int );
-
 void __sigterm( int ) __attribute__ ((noreturn));
 void __sigint( int ) __attribute__ ((noreturn));
 void __sighup( int );
@@ -101,5 +101,8 @@ void _set_process_title( char **, int, char *, unsigned int * );
 
 bool _wait_and_set_mutex( bool * );
 bool __test_and_set( bool * );
+
+struct change_buffer * new_change_buffer( void );
+bool resize_change_buffer( struct change_buffer *, long int );
 
 #endif // UTIL_H

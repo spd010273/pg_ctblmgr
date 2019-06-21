@@ -271,7 +271,6 @@ struct worker * new_worker(
 
 bool parent_init( int argc, char ** argv )
 {
-
     if( daemonize )
     {
         if( daemon( 1, 1 ) != 0 )
@@ -599,4 +598,112 @@ bool __test_and_set( bool * mutex )
     initial = *mutex;
     *mutex = true;
     return initial;
+}
+
+struct change_buffer * new_change_buffer( void )
+{
+    struct change_buffer * cb = NULL;
+
+    cb = ( struct change_buffer * ) create_shared_memory(
+        sizeof( struct change_buffer )
+    );
+
+    if( cb == NULL )
+    {
+        return NULL;
+    }
+
+    cb->size        = DEFAULT_BUFFER_SIZE;
+    cb->num_entries = 0;
+    cb->_locked     = false;
+    cb->entries     = ( char ** ) create_shared_memory(
+        sizeof( char * ) * DEFAULT_BUFFER_SIZE
+    );
+
+    if( cb->entries == NULL )
+    {
+        munmap( cb, sizeof( struct change_buffer ) );
+        return NULL;
+    }
+
+    return cb;
+}
+
+bool resize_change_buffer( struct change_buffer * cb, long int num_entries )
+{
+    char **       temp              = NULL;
+    unsigned long num_allocations   = 0;
+    unsigned long i                 = 0;
+    long int      delta             = 0;
+    long int      offset            = 0;
+
+    if( cb == NULL || ( cb->entries == NULL && cb->num_entries != 0 ) )
+    {
+        return NULL;
+    }
+
+    if( num_entries == cb->num_entries )
+    {
+        return true;
+    }
+
+    delta = cb->num_entries - num_entries;
+
+    if( delta > 0 )
+    {
+        num_allocations = cb->size + ( ceil(
+            ( double ) delta / ( double ) DEFAULT_BUFFER_SIZE
+        ) * DEFAULT_BUFFER_SIZE );
+    }
+    else if( delta < 0 )
+    {
+        num_allocations = cb->size - ( floor(
+            ( double ) delta / ( double ) DEFAULT_BUFFER_SIZE
+        ) * DEFAULT_BUFFER_SIZE );
+
+        if( num_allocations < cb->num_entries )
+        {
+            return false;
+        }
+    }
+
+    temp = ( char ** ) create_shared_memory(
+        sizeof( char * ) * num_allocations
+    );
+
+    if( temp == NULL )
+    {
+        return false;
+    }
+
+    if( !_wait_and_set_mutex( &(cb->_locked) ) )
+    {
+        munmap( temp, sizeof( char * ) * num_allocations );
+        return false;
+    }
+
+    for( i = 0; i < cb->num_entries; i++ )
+    {
+        if( cb->entries[i] == NULL )
+        {
+            offset++;
+        }
+
+        if( delta < 0 && i > num_allocations )
+        {
+            // We won't truncate the buffer
+            munmap( temp, sizeof( char * ) * num_allocations );
+            return false;
+        }
+
+        temp[i] = cb->entries[i+offset];
+    }
+
+    cb->num_entries = cb->num_entries - offset;
+    munmap( cb->entries, sizeof( char * ) * cb->size );
+    cb->entries = temp;
+    cb->size    = num_allocations;
+    cb->_locked = false;
+
+    return true;
 }
