@@ -11,5 +11,14 @@ int main( int argc, char ** argv )
             "Failed to initialize parent process"
         );
     }
+
+    if( !db_connect( parent ) )
+    {
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to connect to database"
+        );
+    }
+
     return 0;
 }
