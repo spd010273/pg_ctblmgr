@@ -2,6 +2,7 @@
 #define PG_CTBLMGR_DECODER_H
 
 #include "postgres.h"
+#include "miscadmin.h"
 #include "replication/logical.h"
 #include "replication/output_plugin.h"
 #include "access/genam.h"
@@ -16,10 +17,34 @@
 #include "utils/rel.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/guc_tables.h"
+#include "utils/guc.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif
+
+// XID interface
+#include "access/xlog.h"
+#include "access/xact.h"
+#include "access/transam.h"
+
+// Defined in src/backend/utils/adt/txid.c
+typedef uint64 txid;
+typedef struct {
+    TransactionId last_xid;
+    uint32        epoch;
+} TxidEpoch;
+
+// GUC Records
+typedef struct guc_change {
+    const char *    name;
+    const char *    value;
+    pid_t           backend_pid;
+    TransactionId * xid;
+};
+
+extern bool should_forward_guc_to_wal( const char * );
 
 extern void _PG_init( void );
 extern void PGDLLEXPORT _PG_output_plugin_init( OutputPluginCallbacks * );

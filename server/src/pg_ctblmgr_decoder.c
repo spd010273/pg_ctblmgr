@@ -4,6 +4,7 @@ void _PG_init( void )
 {
     // this is a stub for now, we may need to read in GUCs
     // that determine whether minimal JSON records are output or not
+    // NOTE: We'll need to set up a queue of guc_change entries in SHM
     return;
 }
 
@@ -29,9 +30,9 @@ static void pg_ctblmgr_decode_startup(
     bool                     is_init
 )
 {
-    decode_data * data         = NULL;
+    decode_data * data = NULL;
 
-    data = palloc0( sizeof( decode_data ) );
+    data = ( decode_data * ) palloc0( sizeof( decode_data ) );
 
     if( data == NULL )
     {
@@ -65,11 +66,12 @@ static void pg_ctblmgr_decode_shutdown( LogicalDecodingContext * context )
 {
     decode_data * data = NULL;
 
-    data = context->output_plugin_private;
+    data = ( decode_data * ) context->output_plugin_private;
     MemoryContextDelete( data->context );
     return;
 }
 
+#if PG_VERSION_NUM >= 90600
 static void pg_ctblmgr_decode_message(
     LogicalDecodingContext * context,
     ReorderBufferTXN *       txn,
@@ -83,12 +85,16 @@ static void pg_ctblmgr_decode_message(
     // this is a stub for now
     return;
 }
+#endif
 
-static void pg_ctblmgr_decode_begin_tx( LogicalDecodingContext * context, ReorderBufferTXN * txn )
+static void pg_ctblmgr_decode_begin_tx(
+    LogicalDecodingContext * context,
+    ReorderBufferTXN *       txn
+)
 {
     decode_data * data = NULL;
 
-    data = context->output_plugin_private;
+    data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = false;
     
     OutputPluginPrepareWrite( context, true );
@@ -97,7 +103,9 @@ static void pg_ctblmgr_decode_begin_tx( LogicalDecodingContext * context, Reorde
         transaction_boundary,
         "BEGIN",
         txn->xid,
-        timestamptz_to_str( txn->commit_time )
+        timestamptz_to_str(
+            txn->commit_time
+        )
     );
 
     OutputPluginWrite( context, true );
@@ -133,6 +141,25 @@ static void pg_ctblmgr_decode_commit_tx(
  * and old versions of the tuple. This can be further used to identify records
  * downstream that need to be updated via a NATURAL, or FULL OUTER join on all
  * relation attributes.
+ *
+ * TODO: We need to figure out a way to read the session GUCs while decoding,
+ * which may require us to pull it from the transaction / backend memory.
+ * AFAICT, this information is not stored in the ReorderBufferTXN or
+ * ReorderBufferChange structs, ~~but~~ it may be derivable from those
+ * structs. We will be looking for PGC_S_SESSION gucs. This may need to be done
+ * by hooing src/backend/utils/misc/guc.c:SetConfigOption. For x86_64,
+ * CentOS 7.6 this function is 48 bytes long (it is hookable), and merely wraps
+ * set_config_option() within the same file (to provide a consistent interface).
+ *
+ * We could hook this function, but we also need the XID at the time the hook is
+ * performed. Then again, the decoder may be running within the backend and have
+ * access to the GUC stack as well as the current XID in which it was changed in
+ * the session.
+ *
+ * More than likely - the best place to intercept this is at the tcop, because it
+ * has access to xid information as well as directing the SET command to guc.c
+ * routines, a good starting point is the standard_ProcessUtility in
+ * backend/tcop/utility.c
  */
 static void pg_ctblmgr_decode_change(
     LogicalDecodingContext * context,
@@ -156,7 +183,7 @@ static void pg_ctblmgr_decode_change(
     unsigned int      i                = 0;
     unsigned int      j                = 0;
 
-    data = context->output_plugin_private;
+    data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = true;
 
     class_form       = RelationGetForm( relation );
@@ -176,10 +203,14 @@ static void pg_ctblmgr_decode_change(
         return;
     }
 
-    if(      change->action == REORDER_BUFFER_CHANGE_INSERT ) { dml_type = "INSERT";  }
-    else if( change->action == REORDER_BUFFER_CHANGE_UPDATE ) { dml_type = "UPDATE";  }
-    else if( change->action == REORDER_BUFFER_CHANGE_DELETE ) { dml_type = "DELETE";  }
-    else                                                      { dml_type = "UNKNOWN"; }
+    if(      change->action == REORDER_BUFFER_CHANGE_INSERT )
+        dml_type = "INSERT";
+    else if( change->action == REORDER_BUFFER_CHANGE_UPDATE )
+        dml_type = "UPDATE";
+    else if( change->action == REORDER_BUFFER_CHANGE_DELETE )
+        dml_type = "DELETE";
+    else
+        dml_type = "UNKNOWN";
 
     old_context = MemoryContextSwitchTo( data->context );
 
@@ -352,8 +383,8 @@ static void append_literal_value(
     char *     output
 )
 {
-    const char * value;
-    char character;
+    const char * value     = NULL;
+    char         character = '\0';
 
     switch( type_id )
     {
@@ -459,4 +490,101 @@ static void append_tuple(
     }
 
     return;
+}
+
+Datum _hook_set_config_by_name( PG_FUNCTION_ARGS )
+{
+    char *        name      = NULL;
+    char *        value     = NULL;
+    char *        new_value = NULL;
+    bool          is_local  = false;
+    txid          val       = 0;
+    TxidEpoch     state     = {0}; // struct: { TransactionId last_xid; uint32 epoch; }
+    TransactionId xid       = {0};
+
+    if( PG_ARGISNULL(0) )
+    {
+        ereport(
+            ERROR,
+            (
+                errcode( ERRCODE_NULL_VALUE_NOT_ALLOWED ),
+                errmsg( "SET requires parameter name" )
+            )
+        );
+    }
+
+    name = TextDatumGetCString( PG_GETARG_DATUM(0) );
+
+    if( PG_ARGISNULL(1) )
+    {
+        value = NULL;
+    }
+    else
+    {
+        value = TextDatumGetCString( PG_GETARG_DATUM(1) );
+    }
+
+    if( PG_ARGISNULL(2) )
+    {
+        is_local = false;
+    }
+    else
+    {
+        is_local = PG_GETARG_BOOL(2);
+    }
+
+    ( void ) set_config_option(
+        name,
+        value,
+        ( superuser() ? PGC_SUSET : PGC_USERSET ),
+        PGC_S_SESSION,
+        is_local ? GUC_ACTION_LOCAL : GUC_ACTION_SET,
+        true,
+        0,
+        false
+    );
+
+    // Hook for pg_ctlbmgr to record session GUCs we're interested in replicating downstream
+    if( should_forward_guc_to_wal( name ) ) // need to check if the guc name is what we're interested in
+    { // copied from txid_current()
+        PreventCommandDuringRecovery( "txid_current()" );
+        GetNextXidAndEpoch( &state->last_xid, &state->epoch );
+        xid = GetTopTransactionId();
+        // Jacked from txid.c:convert_xid()
+        if( !TransactionIdIsNormal( xid ) )
+        {
+            val = (txid) xid;
+        }
+        else
+        {
+            epoch = (uint64) state->epoch;
+
+            if(
+                   xid > state->last_xid
+                && TransactionIdPreceds( xid, state->last_xid )
+              )
+            {
+                epoch--;
+            }
+            else if( 
+                       xid < state->last_xid
+                    && TransactionIdFollows( xid, state->last_xid )
+                   )
+            {
+                epoch++;
+            }
+
+            val = ( epoch << 32 ) | xid;
+        }
+        // val will be a uint64
+    }
+
+    new_value = GetConfigOptionByName( name, NULL, false );
+
+    PG_RETURN_TEXT_P( cstring_to_text( new_value ) );
+}
+
+bool should_foward_guc_to_wal( const char * name )
+{
+
 }
