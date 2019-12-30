@@ -1,0 +1,21 @@
+CREATE SEQUENCE @extschema@.sq_pk_maintenance_object;
+
+CREATE TABLE IF NOT EXISTS @extschema@.tb_maintenance_object
+(
+    maintenance_object INTEGER PRIMARY KEY DEFAULT nextval( '@extschema@.sq_pk_maintenance_object' ),
+    maintenance_group  INTEGER NOT NULL,
+    definition         TEXT NOT NULL,
+    namespace          VARCHAR NOT NULL DEFAULT 'public',
+    name               VARCHAR NOT NULL,
+    driver             INTEGER NOT NULL,
+    location           INTEGER NOT NULL,
+    datamap            JSONB NOT NULL
+);
+
+COMMENT ON TABLE @extschema@.tb_maintenance_object IS 'Definition of object which pg_ctblmgr is maintaining';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.maintenance_group IS 'Which group this object belongs to';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.definition IS 'Definition for the object';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.namespace IS 'Which namespace (memcached) or schema (PostgreSQL) this object belongs to';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.name IS 'Canonical name of the object within its respective store';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.driver IS 'Driver used to maintain this object';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.location IS 'The location of this object';
