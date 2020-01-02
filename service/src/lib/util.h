@@ -64,6 +64,7 @@ struct pgc_conf {
     char    channel[MAX_CHANNEL_LENGTH];
     char *  filter_tables;
     char    wal_level;
+    bool    include_transactions;
 };
 
 struct worker {
@@ -93,9 +94,9 @@ extern struct worker * new_worker(
     char **,
     void (*)( void * ),
     struct worker *,
-    char *,
-    char *,
-    char
+    char *, // channel
+    char *, // filter_tables
+    char   // wal_level
 );
 
 extern void worker_set_config( struct worker *, char *, char *, char );

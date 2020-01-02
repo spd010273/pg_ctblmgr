@@ -2,7 +2,7 @@
 EXTENSION       = pg_ctblmgr
 EXTVERSION      = $(shell grep default_version $(EXTENSION).control | \
                   sed -e "s/default_version[[:space:]]*=[[:space:]]*'\([^']*\)'/\1/" )
-DOCS			= README.md
+DOCS			= ../README.md
 PG_CONFIG      ?= pg_config
 PGINCLUDEDIR    = $(shell $(PG_CONFIG) --includedir-server)
 PGLIBDIR        = $(shell $(PG_CONFIG) --libdir)

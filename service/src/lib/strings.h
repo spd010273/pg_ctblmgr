@@ -19,6 +19,8 @@ const char * replication_seek = "\
                $2, \
                'filter-tables' \
                $3 \
+               'include-transactions' \
+               FALSE \
            ) ";
 
 const char * get_worker_list = "\

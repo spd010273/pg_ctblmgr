@@ -172,7 +172,7 @@ static void worker_entrypoint( void * data )
 {
     struct worker *   me         = NULL;
     PGresult *        wal_result = NULL;
-    char *            params[3]  = {NULL};
+    char *            params[4]  = {NULL};
     unsigned long int i          = 0;
 
     if( data == NULL )
@@ -257,6 +257,7 @@ static void worker_entrypoint( void * data )
 
     params[1] = &(me->config.wal_level);
     params[2] = me->config.filter_tables;
+
     // Start main program
     me->status = WORKER_STATUS_IDLE;
 
@@ -271,7 +272,7 @@ static void worker_entrypoint( void * data )
             me,
             ( char * ) replication_seek,
             params,
-            1
+            4
         );
 
         if( wal_result == NULL )

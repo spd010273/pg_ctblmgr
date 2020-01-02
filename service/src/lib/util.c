@@ -374,7 +374,7 @@ void worker_set_config(
         worker->config.filter_tables[strlen(filter_tables) + 1] = '\0';
     }
 
-    worker->config.wal_level = wal_level;
+    worker->config.wal_level            = wal_level;
 
     return;
 }
