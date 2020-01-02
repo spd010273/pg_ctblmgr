@@ -9,12 +9,12 @@ PGLIBDIR        = $(shell $(PG_CONFIG) --libdir)
 PGXS            = $(shell $(PG_CONFIG) --pgxs)
 DEBUG			= -g -DDEBUG
 CC              = gcc
-EXTRA_CLEAN     = src/*.o src/*.so *.so *.o
+EXTRA_CLEAN     = src/*.o src/*.so *.so *.o $(wildcard sql/${EXTENSION}--*.sql)
 
 PG_CFLAGS		= $(DEBUG)
 SRCS			= $(wildcard src/*.c)
 OBJS			= $(SRCS:.c=.o)
-MODULE_big		= pg_ctblmgr_decoder
+MODULE_big		= pg_ctblmgr
 
 all: sql/$(EXTENSION)--$(EXTVERSION).sql
 

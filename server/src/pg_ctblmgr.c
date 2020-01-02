@@ -1,4 +1,4 @@
-#include "pg_ctblmgr_decoder.h"
+#include "pg_ctblmgr.h"
 
 void _PG_init( void )
 {
@@ -370,6 +370,7 @@ static void pg_ctblmgr_decode_change(
     char *                dml_type         = NULL;
     unsigned int          i                = 0;
     unsigned int          j                = 0;
+    bool                  found            = false;
 
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = true;
@@ -418,13 +419,20 @@ static void pg_ctblmgr_decode_change(
                   )
               )
             {
-                // Table is not in our filter list
-                return;
+                found = true;
             }
         }
     }
 
+    if( found == false )
+    {
+        // Table is not in our filter list
+        elog( DEBUG1, "Table %s has been filtered out", table->table_name );
+        return;
+    }
+
     old_context = MemoryContextSwitchTo( data->context );
+    OutputPluginPrepareWrite( context, true );
 
     switch( data->wal_level )
     {
@@ -453,6 +461,7 @@ static void pg_ctblmgr_decode_change(
             appendStringInfo(
                 context->out,
                 dml_preamble_minimal,
+                dml_type[0],
                 txn->xid,
                 schema_name,
                 table_name
@@ -461,6 +470,7 @@ static void pg_ctblmgr_decode_change(
         default:
             MemoryContextSwitchTo( old_context );
             MemoryContextReset( data->context );
+            elog( DEBUG1, "Invalid WAL level" );
             // May need to tear down the memory context
             return;
     }
@@ -491,8 +501,11 @@ static void pg_ctblmgr_decode_change(
         for( i = 0; i < index->rd_index->indnatts; i++ )
         {
             j              = index->rd_index->indkey.values[i];
+#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605 ) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509)|| (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
             attribute_form = tuple_descriptor->attrs[j - 1];
-
+#else
+            attribute_form = *(TupleDescAttr( tuple_descriptor, j - 1 ));
+#endif
             if( i > 0 )
             {
                 appendStringInfoChar( context->out, ',' );
@@ -500,7 +513,7 @@ static void pg_ctblmgr_decode_change(
 
             appendStringInfo(
                 context->out,
-                "\"%s\"",
+                "\"%s\":",
                 NameStr( attribute_form.attname )
             );
 
@@ -569,10 +582,15 @@ static void append_tuple_value(
     Oid                   type_id                 = {0};
     Datum                 value                   = {0};
 
+    elog( DEBUG1, "Getting attr index %lu of %lu", index, tuple_descriptor->natts );
+#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605 ) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509)|| (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
     attribute_form = tuple_descriptor->attrs[index];
+#else
+    attribute_form = *(TupleDescAttr( tuple_descriptor, index ));
+#endif
     original_value = fastgetattr(
         tuple,
-        index,
+        index + 1,
         tuple_descriptor,
         &is_null
     );
@@ -709,8 +727,11 @@ static void append_tuple(
 
     for( i = 0; i < tuple_descriptor->natts; i++ )
     {
+#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605 ) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509)|| (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
         attribute_form = tuple_descriptor->attrs[i];
-
+#else
+        attribute_form = *(TupleDescAttr( tuple_descriptor, i ));
+#endif
         if(
               attribute_form.attisdropped
            || attribute_form.attnum < 0
@@ -727,9 +748,9 @@ static void append_tuple(
             )
         );
 
-        append_tuple_value( string, tuple_descriptor, tuple, i - 1 );
+        append_tuple_value( string, tuple_descriptor, tuple, i );
 
-        if( i < tuple_descriptor->natts - 1 )
+        if( i < tuple_descriptor->natts )
         {
             appendStringInfoChar( string, ',' );
         }

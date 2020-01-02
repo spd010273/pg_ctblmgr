@@ -157,15 +157,15 @@ BEGIN
                )
             ON i.indrelid = c.oid
            AND i.indisunique IS TRUE
-      GROUP BY c.relname::VARCHAR
+      GROUP BY c_n.nspname::VARCHAR,
+               c.relname::VARCHAR
     ),
     tt_dependencies AS
     (
-        SELECT tt.schema_name,
-               tt.table_name
+        SELECT tt.schema_name || '.' || tt.table_name AS object
           FROM tt_pk_locator tt
          UNION
-        SELECT COALESCE( jet->>'schema', 'public' ) || jet.key AS object
+        SELECT COALESCE( ( jet.value::JSONB )->>'schema', 'public' ) || '.' || jet.key AS object
           FROM @extschema@.tb_maintenance_object mo
     INNER JOIN pg_catalog.jsonb_each_text( mo.datamap ) jet
             ON TRUE
@@ -284,7 +284,7 @@ CREATE OR REPLACE FUNCTION @extschema@.fn_manage_publication()
 RETURNS TRIGGER AS
  $_$
 BEGIN
-    IF( TG_OP == 'UPDATE' ) THEN
+    IF( TG_OP = 'UPDATE' ) THEN
         IF(
                 NEW.definition IS NOT DISTINCT FROM OLD.definition
             AND NEW.namespace IS NOT DISTINCT FROM OLD.namespace
@@ -305,7 +305,7 @@ BEGIN
                             NEW.namespace,
                             NEW.name;
         END IF;
-    ELSIF( TG_OP == 'DELETE' ) THEN
+    ELSIF( TG_OP = 'DELETE' ) THEN
         -- Drop replication slot, if exists
         PERFORM *
            FROM pg_replication_slots
@@ -336,21 +336,6 @@ BEGIN
         RETURN OLD;
     END IF;
 
-    PERFORM *
-       FROM pg_create_logical_replication_slot(
-                @extschema@.fn_get_replication_slot_name(
-                    NEW.namespace,
-                    NEW.name
-                ),
-                'pg_ctblmgr'
-            );
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Failed to create replication slot for object %.%',
-            NEW.namespace,
-            NEW.name;
-    END IF;
-
     INSERT INTO @extschema@.__pgctblmgr_repl_slot
                 (
                     id,
@@ -360,14 +345,12 @@ BEGIN
          VALUES
                 (
                     NEW.maintenance_object,
-                    @extschema.fn_get_replication_slot_name(
+                    @extschema@.fn_get_replication_slot_name(
                         NEW.namespace,
                         NEW.name
                     ),
                     @extschema@.fn_get_dependencies( NEW.maintenance_object )
                 );
-    PERFORM @extschema@.fn_notify_service( 'new_table', NEW.maintenance_object );
-    PERFORM @extschema@.fn_notify_maintenance_channel( NEW.maintenance_object, 'full_refresh' );
     RETURN NEW;
 END
  $_$

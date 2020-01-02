@@ -73,15 +73,15 @@ BEGIN
                )
             ON i.indrelid = c.oid
            AND i.indisunique IS TRUE
-      GROUP BY c.relname::VARCHAR
+      GROUP BY c_n.nspname::VARCHAR,
+               c.relname::VARCHAR
     ),
     tt_dependencies AS
     (
-        SELECT tt.schema_name,
-               tt.table_name
+        SELECT tt.schema_name || '.' || tt.table_name AS object
           FROM tt_pk_locator tt
          UNION
-        SELECT COALESCE( jet->>'schema', 'public' ) || jet.key AS object
+        SELECT COALESCE( ( jet.value::JSONB )->>'schema', 'public' ) || '.' || jet.key AS object
           FROM @extschema@.tb_maintenance_object mo
     INNER JOIN pg_catalog.jsonb_each_text( mo.datamap ) jet
             ON TRUE

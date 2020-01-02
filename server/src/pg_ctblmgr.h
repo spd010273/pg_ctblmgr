@@ -77,18 +77,19 @@ const char * dml_preamble_full = "{\
 \"xid\":\"%u\",\
 \"timestamp\":\"%s\",\
 \"schema_name\":\"%s\",\
-\"table_name\":\"%s\",";
+\"table_name\":\"%s\"";
 
 const char * dml_preamble_reduced = "{\
 \"type\":\"%s\",\
 \"xid\":\"%u\",\
 \"schema_name\":\"%s\",\
-\"table_name\":\"%s\",";
-
+\"table_name\":\"%s\"";
+/* {"d":<dml_type>,"x":<xid>,"s":<schema>","t":<table>...} */
 const char * dml_preamble_minimal = "{\
+\"d\":\"%s\",\
 \"x\":\"%u\",\
 \"s\":\"%s\",\
-\"t\":\"%s\",";
+\"t\":\"%s\"";
 
 
 typedef struct {
