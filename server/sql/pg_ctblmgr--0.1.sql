@@ -7,6 +7,18 @@ BEGIN
 END
  $_$
     LANGUAGE 'plpgsql';
+CREATE TABLE IF NOT EXISTS @extschema@.__pgctblmgr_repl_slot
+(
+    id      INTEGER NOT NULL,
+    name    VARCHAR NOT NULL,
+    filter  VARCHAR NOT NULL,
+    UNIQUE( id )
+);
+
+COMMENT ON TABLE @extschema@.__pgctblmgr_repl_slot IS 'Stores mapping of replication slots to their accompanying maintenance_objects';
+COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.id IS 'The maintenance_object PK that this replication slot maps to';
+COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.name IS 'Name of the replication slot and LISTEN/NOTIFY maintenance channel';
+COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.filter IS 'Comma-delimited list of base objects for this table';
 CREATE SEQUENCE @extschema@.sq_pk_driver;
 
 CREATE TABLE IF NOT EXISTS @extschema@.tb_driver
@@ -70,7 +82,31 @@ COMMENT ON COLUMN @extschema@.tb_maintenance_object.namespace IS 'Which namespac
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.name IS 'Canonical name of the object within its respective store';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.driver IS 'Driver used to maintain this object';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.location IS 'The location of this object';
-CREATE OR REPLACE FUNCTION public.fn_get_dependent_tables( in_query TEXT )
+CREATE OR REPLACE FUNCTION @extschema@.fn_get_dependencies
+(
+    in_maintenance_object INTEGER
+)
+RETURNS VARCHAR AS
+ $_$
+    WITH tt_dependencies AS
+    (
+        SELECT dt.schema_name || '.' || dt.table_name AS object
+          FROM @extschema@.tb_maintenance_object mo
+    INNER JOIN @extschema@.fn_get_dependent_tables( mo.definition ) dt
+            ON TRUE
+         WHERE mo.maintenance_object = in_maintenance_object
+         UNION
+        SELECT COALESCE( jet->>'schema', 'public' ) || jet.key AS object
+          FROM @extschema.tb_maintenance_object mo
+    INNER JOIN jsonb_each_text( mo.datamap ) jet
+            ON TRUE
+         WHERE mo.maintenance_object = in_maintenance_object
+    )
+        SELECT array_to_string( array_agg( tt.object ), ',' )
+          FROM tt_dependencies tt
+ $_$
+    LANGUAGE SQL STABLE PARALLEL SAFE;
+CREATE OR REPLACE FUNCTION @extschema@.fn_get_dependent_tables( in_query TEXT )
 RETURNS TABLE
 (
     table_name  VARCHAR,
@@ -153,3 +189,147 @@ BEGIN
 END
  $_$
     LANGUAGE 'plpgsql' VOLATILE;
+CREATE OR REPLACE FUNCTION @extschema@.fn_get_replication_slot_name
+(
+    in_schema_name VARCHAR,
+    in_table_name  VARCHAR
+)
+RETURNS VARCHAR AS
+ $_$
+    SELECT '__pg_ctblmgr_' || in_schema_name || '_' || in_table_name;
+ $_$
+    LANGUAGE SQL IMMUTABLE PARALLEL SAFE;
+/*
+ * This trigger maintains the state of logical replication slots used to feed
+ * changes made in WAL to pg_ctblmgr forked processes.
+ */
+
+CREATE OR REPLACE FUNCTION @extschema@.fn_manage_publication()
+RETURNS TRIGGER AS
+ $_$
+BEGIN
+    IF( TG_OP == 'UPDATE' ) THEN
+        IF(
+                NEW.definition IS NOT DISTINCT FROM OLD.definition
+            AND NEW.namespace IS NOT DISTINCT FROM OLD.namespace
+            AND NEW.name IS NOT DISTINCT FROM OLD.name
+          ) THEN
+            -- Avoid dummy updates
+            RETURN NEW;
+        END IF;
+
+        IF(
+                NEW.namespace IS DISTINCT FROM OLD.namespace
+             OR NEW.name IS DISTINCT FROM OLD.name
+          ) THEN
+            /* Prevent renaming of a resource, this would change the replication slot name
+               and detach the worker from its WAL source */
+            RAISE EXCEPTION 'Cannot rename a replication slot for %.% - you'
+                            ' need to drop this object then create it',
+                            NEW.namespace,
+                            NEW.name;
+        END IF;
+    ELSIF( TG_OP == 'DELETE' ) THEN
+        -- Drop replication slot, if exists
+        PERFORM *
+           FROM pg_replication_slots
+          WHERE slot_name = @extschema@.fn_get_replication_slot_name(
+                                OLD.namespace,
+                                OLD.name
+                            );
+
+        IF FOUND THEN
+            PERFORM pg_drop_replication_slot(
+                @extschema@.fn_get_replication_slot_name(
+                    OLD.namespace,
+                    OLD.name
+                )
+            );
+        ELSE
+            RAISE EXCEPTION 'Could not locate replication slot for object %.%',
+                OLD.namespace,
+                OLD.name;
+        END IF;
+
+        PERFORM @extschema@.fn_notify_maintenance_channel(
+            OLD.maintenance_object,
+            'object_remove'
+        );
+        DELETE FROM @extschema@.__pgctblmgr_repl_slot
+              WHERE id = OLD.maintenance_object;
+        RETURN OLD;
+    END IF;
+
+    PERFORM *
+       FROM pg_create_logical_replication_slot(
+                @extschema@.fn_get_replication_slot_name(
+                    NEW.namespace,
+                    NEW.name
+                ),
+                'pg_ctblmgr'
+            );
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Failed to create replication slot for object %.%',
+            NEW.namespace,
+            NEW.name;
+    END IF;
+
+    INSERT INTO @extschema@.__pgctblmgr_repl_slot
+                (
+                    id,
+                    name,
+                    filter
+                )
+         VALUES
+                (
+                    NEW.maintenance_object,
+                    @extschema.fn_get_replication_slot_name(
+                        NEW.namespace,
+                        NEW.name
+                    ),
+                    @extschema@.fn_get_dependencies( NEW.maintenance_object )
+                );
+    PERFORM @extschema@.fn_notify_service( 'new_table', NEW.maintenance_object );
+    PERFORM @extschema@.fn_notify_maintenance_channel( NEW.maintenance_object, 'full_refresh' );
+    RETURN NEW;
+END
+ $_$
+    LANGUAGE 'plpgsql' VOLATILE PARALLEL UNSAFE;
+CREATE OR REPLACE FUNCTION @extschema@.fn_notify_maintenace_channel
+(
+    in_maintenance_object INTEGER
+    in_command VARCHAR
+)
+RETURNS VOID AS
+ $_$
+    SELECT pg_notify( rs.name, in_command )
+      FROM @extschema@.tb_maintenance_object mo
+INNER JOIN @extschema@.__pgctblmgr_repl_slot rs
+        ON rs.id = mo.maintenance_object
+     WHERE in_command IN(
+            'index_update',
+            'definition_update',
+            'object_remove'
+            'full_refresh'
+           )
+       AND mo.maintenance_object = in_maintenance_object;
+ $_$
+    LANGUAGE SQL VOLATILE PARALLEL UNSAFE;
+CREATE OR REPLACE FUNCTION @extschema@.fn_notify_service
+(
+    in_command   VARCHAR,
+    in_object_id INTEGER
+)
+RETURNS VOID AS
+ $_$
+    SELECT pg_notify( '__pg_ctblmgr', in_command )
+     WHERE in_command IN(
+               'new_table'
+           );
+ $_$
+    LANGUAGE SQL VOLATILE PARALLEL UNSAFE;
+CREATE TRIGGER tr_manage_publication
+    AFTER INSERT OR DELETE OR UPDATE OF definition, namespace, name
+    ON @extschema@.tb_maintenance_object
+    FOR EACH ROW EXECUTE PROCEDURE @extschema@.fn_manage_publication;

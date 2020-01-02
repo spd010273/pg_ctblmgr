@@ -21,6 +21,7 @@ all: sql/$(EXTENSION)--$(EXTVERSION).sql
 sql/$(EXTENSION)--$(EXTVERSION).sql: $(sort $(wildcard sql/checks/*.sql)) \
 									 $(sort $(wildcard sql/tables/*.sql)) \
 									 $(sort $(wildcard sql/functions/*.sql)) \
+									 $(sort $(wildcard sql/triggers/*.sql)) \
 									 $(sort $(wildcard sql/permissions/*.sql))
 	cat $^ > $@
 

@@ -7,6 +7,7 @@ extern char ** environ; // declared in unistd.h
 
 struct worker ** workers       = NULL;
 struct worker *  parent        = NULL;
+unsigned int     num_workers   = 0;
 char *           conninfo      = NULL;
 FILE *           log_file      = NULL;
 unsigned int     max_argv_size = 0;
@@ -228,15 +229,19 @@ void _log( unsigned short log_level, char * message, ... )
 }
 
 struct worker * new_worker(
-    unsigned short  type,
-    int             my_argc,
-    char **         my_argv,
-    struct worker * workerslot
+    unsigned short    type,
+    unsigned long int id,
+    int               my_argc,
+    char **           my_argv,
+    void (*function)( void * ),
+    struct worker *   workerslot,
+    char *            channel,
+    char *            filter_tables,
+    char              wal_level
 )
 {
     struct worker * result = NULL;
     pid_t           pid    = 0;
-    size_t          size   = 0;
 
     if( workerslot == NULL )
     {
@@ -260,13 +265,118 @@ struct worker * new_worker(
     }
 
     result->tx_in_progress = false;
-    result->pid            = 0;
+    result->pid            = getpid();
     result->conn           = NULL;
-    result->my_argc        = 0;
-    result->my_argv        = NULL;
-    result->change_buffer  = NULL;
+    result->my_argc        = my_argc;
+    result->my_argv        = my_argv;
+    result->type           = type;
+    worker_set_config(
+        result,
+        channel,
+        filter_tables,
+        wal_level
+    );
+
+    if( type == WORKER_TYPE_PARENT )
+    {
+        parent = result;
+        signal( SIGHUP, __sighup );
+        signal( SIGTERM, __sigterm );
+        signal( SIGINT, __sigint );
+        _set_process_title(
+            my_argv,
+            my_argc,
+            WORKER_TITLE_PARENT,
+            &max_argv_size
+        );
+
+        return result;
+    }
+
+    workers[id] = result;
+    pid = fork();
+
+    if( pid == 0 ) // child
+    {
+        result->pid = getpid();
+        signal( SIGHUP, __sighup );
+        signal( SIGTERM, __sigterm );
+        signal( SIGINT, __sigint );
+        _set_process_title(
+            my_argv,
+            my_argc,
+            WORKER_TITLE_CHILD,
+            &max_argv_size
+        );
+        result->status = WORKER_STATUS_STARTUP;
+        function( ( void * ) workers[id] );
+        exit( 0 );
+    }
+    else if( pid < 0 )
+    {
+        return NULL;
+    }
 
     return result;
+}
+
+void worker_set_config(
+    struct worker * worker,
+    char *          channel,
+    char *          filter_tables,
+    char            wal_level
+)
+{
+    if( worker == NULL  )
+    {
+        return;
+    }
+
+    if( wal_level != 'R' || wal_level != 'F' || wal_level != 'M' )
+    {
+        return;
+    }
+
+    if( worker->config.filter_tables != NULL )
+    {
+        free( worker->config.filter_tables );
+    }
+
+    if( channel != NULL )
+    {
+        strncpy(
+            worker->config.channel,
+            channel,
+            strnlen( channel, MAX_CHANNEL_LENGTH )
+        );
+
+        worker->config.channel[MAX_CHANNEL_LENGTH] = '\0';
+    }
+
+    if( filter_tables != NULL )
+    {
+        worker->config.filter_tables = calloc(
+            sizeof( char ),
+            strlen( filter_tables ) + 1
+        );
+
+        if( worker->config.filter_tables == NULL )
+        {
+             return;
+        }
+
+        strncpy(
+            worker->config.filter_tables,
+            filter_tables,
+            strlen( filter_tables )
+        );
+
+        worker->config.filter_tables[strlen(filter_tables) + 1] = '\0';
+    }
+
+    worker->config.wal_level = wal_level;
+
+    return;
 }
 
 bool parent_init( int argc, char ** argv )
@@ -289,7 +399,17 @@ bool parent_init( int argc, char ** argv )
         }
     }
 
-    parent = new_worker( WORKER_TYPE_PARENT, argc, argv, NULL );
+    parent = new_worker(
+        WORKER_TYPE_PARENT,
+        0,
+        argc,
+        argv,
+        NULL,
+        NULL,
+        MAIN_CHANNEL,
+        NULL,
+        'F'
+    );
 
     if( parent == NULL )
     {
@@ -558,6 +678,7 @@ void _set_process_title(
 
     memset( argv[0], '\0', size );
     strncpy( argv[0], title, size );
+    return;
 }
 
 bool _wait_and_set_mutex( bool * mutex )
@@ -600,110 +721,54 @@ bool __test_and_set( bool * mutex )
     return initial;
 }
 
-struct change_buffer * new_change_buffer( void )
+void __sigterm( int sig )
 {
-    struct change_buffer * cb = NULL;
-
-    cb = ( struct change_buffer * ) create_shared_memory(
-        sizeof( struct change_buffer )
-    );
-
-    if( cb == NULL )
-    {
-        return NULL;
-    }
-
-    cb->size        = DEFAULT_BUFFER_SIZE;
-    cb->num_entries = 0;
-    cb->_locked     = false;
-    cb->entries     = ( char ** ) create_shared_memory(
-        sizeof( char * ) * DEFAULT_BUFFER_SIZE
-    );
-
-    if( cb->entries == NULL )
-    {
-        munmap( cb, sizeof( struct change_buffer ) );
-        return NULL;
-    }
-
-    return cb;
+    exit(1);
 }
 
-bool resize_change_buffer( struct change_buffer * cb, long int num_entries )
+void __sigint( int sig )
 {
-    char **       temp              = NULL;
-    unsigned long num_allocations   = 0;
-    unsigned long i                 = 0;
-    long int      delta             = 0;
-    long int      offset            = 0;
+    exit(1);
+}
 
-    if( cb == NULL || ( cb->entries == NULL && cb->num_entries != 0 ) )
+void __sighup( int sig )
+{
+    return;
+}
+
+struct worker * get_worker_by_channel( char * channel )
+{
+    struct worker * worker = NULL;
+    unsigned int    i      = 0;
+
+    if( channel == NULL || workers == NULL || num_workers == 0 )
     {
         return NULL;
     }
 
-    if( num_entries == cb->num_entries )
+    for( i = 0; i < num_workers; i++ )
     {
-        return true;
-    }
+        worker = workers[i];
 
-    delta = cb->num_entries - num_entries;
-
-    if( delta > 0 )
-    {
-        num_allocations = cb->size + ( ceil(
-            ( double ) delta / ( double ) DEFAULT_BUFFER_SIZE
-        ) * DEFAULT_BUFFER_SIZE );
-    }
-    else if( delta < 0 )
-    {
-        num_allocations = cb->size - ( floor(
-            ( double ) delta / ( double ) DEFAULT_BUFFER_SIZE
-        ) * DEFAULT_BUFFER_SIZE );
-
-        if( num_allocations < cb->num_entries )
+        if( worker == NULL )
         {
-            return false;
+            return NULL;
+        }
+
+        if(
+            strncmp(
+                worker->config.channel,
+                channel,
+                MIN(
+                    strnlen( worker->config.channel, MAX_CHANNEL_LENGTH ),
+                    strnlen( channel, MAX_CHANNEL_LENGTH )
+                )
+            ) == 0
+          )
+        {
+            return worker;
         }
     }
 
-    temp = ( char ** ) create_shared_memory(
-        sizeof( char * ) * num_allocations
-    );
-
-    if( temp == NULL )
-    {
-        return false;
-    }
-
-    if( !_wait_and_set_mutex( &(cb->_locked) ) )
-    {
-        munmap( temp, sizeof( char * ) * num_allocations );
-        return false;
-    }
-
-    for( i = 0; i < cb->num_entries; i++ )
-    {
-        if( cb->entries[i] == NULL )
-        {
-            offset++;
-        }
-
-        if( delta < 0 && i > num_allocations )
-        {
-            // We won't truncate the buffer
-            munmap( temp, sizeof( char * ) * num_allocations );
-            return false;
-        }
-
-        temp[i] = cb->entries[i+offset];
-    }
-
-    cb->num_entries = cb->num_entries - offset;
-    munmap( cb->entries, sizeof( char * ) * cb->size );
-    cb->entries = temp;
-    cb->size    = num_allocations;
-    cb->_locked = false;
-
-    return true;
+    return NULL;
 }

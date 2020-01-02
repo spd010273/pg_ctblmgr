@@ -37,14 +37,20 @@
 #define WORKER_STATUS_IDLE 2
 #define WORKER_STATUS_UPDATE 3
 #define WORKER_STATUS_REFRESH 4
+#define WORKER_STATUS_PROCESS_WAL 5
 
 #define MAX_LOCK_WAIT 5 // seconds
 
 #define DEFAULT_BUFFER_SIZE 16
-
-#define WORKER_TITLE_PARENT "pg_ctblmgr logical receiver"
-#define WORKER_TITLE_CHILD "pg_ctblmgr subscriber"
+#define EXTENSION_NAME "pg_ctblmgr"
+#define MAIN_CHANNEL "__pg_ctblmgr"
+#define PLUGIN_NAME "pg_ctblmgr"
+#define WORKER_TITLE_PARENT "pg_ctblmgr main process"
+#define WORKER_TITLE_CHILD "pg_ctblmgr logical receiver"
 #define LOG_FILE_NAME "/var/log/pg_ctblmgr/pg_ctblmgr.log"
+
+#define MIN(x,y) (x>y?y:x)
+#define MAX_CHANNEL_LENGTH 64
 
 bool daemonize;
 char * conninfo;
@@ -54,55 +60,60 @@ sig_atomic_t got_sighup;
 sig_atomic_t got_sigint;
 sig_atomic_t got_sigterm;
 
-struct change_buffer {
-    unsigned long  size;
-    unsigned long  num_entries;
-    char **        entries;
-    bool           _locked;
+struct pgc_conf {
+    char    channel[MAX_CHANNEL_LENGTH];
+    char *  filter_tables;
+    char    wal_level;
 };
 
 struct worker {
-    unsigned short type;
-    unsigned short status;
-    PGconn *       conn;
-    pid_t          pid;
-    bool           tx_in_progress;
-    int            my_argc;
-    char **        my_argv;
-    char *         pidfile;  // used by parent to remove pid file on term
-    void *         change_buffer;
+    unsigned short  type;
+    unsigned short  status;
+    PGconn *        conn;
+    pid_t           pid;
+    bool            tx_in_progress;
+    int             my_argc;
+    char **         my_argv;
+    char *          pidfile;  // used by parent to remove pid file on term
+    struct pgc_conf config;
 };
 
 struct worker ** workers;
 struct worker * parent;
+unsigned int num_workers;
 
 void _parse_args( int, char ** );
 void _usage( char * ) __attribute__ ((noreturn));
 void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
 
-struct worker * new_worker(
+extern struct worker * new_worker(
     unsigned short,
+    unsigned long int,
     int,
     char **,
-    struct worker *
+    void (*)( void * ),
+    struct worker *,
+    char *,
+    char *,
+    char
 );
 
-bool parent_init( int, char ** );
-void free_worker( struct worker * );
-bool create_pid_file( void );
+extern void worker_set_config( struct worker *, char *, char *, char );
 
-void __sigterm( int ) __attribute__ ((noreturn));
-void __sigint( int ) __attribute__ ((noreturn));
-void __sighup( int );
-void __term( void ) __attribute__ ((noreturn));
+extern bool parent_init( int, char ** );
+extern void free_worker( struct worker * );
+extern bool create_pid_file( void );
 
-void * create_shared_memory( size_t );
-void _set_process_title( char **, int, char *, unsigned int * );
+extern void __sigterm( int ) __attribute__ ((noreturn));
+extern void __sigint( int ) __attribute__ ((noreturn));
+extern void __sighup( int );
+extern void __term( void ) __attribute__ ((noreturn));
 
-bool _wait_and_set_mutex( bool * );
-bool __test_and_set( bool * );
+extern void * create_shared_memory( size_t );
+extern void _set_process_title( char **, int, char *, unsigned int * );
 
-struct change_buffer * new_change_buffer( void );
-bool resize_change_buffer( struct change_buffer *, long int );
+extern bool _wait_and_set_mutex( bool * );
+extern bool __test_and_set( bool * );
 
+extern struct worker * get_worker_by_channel( char * );
 #endif // UTIL_H

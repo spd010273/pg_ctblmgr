@@ -20,4 +20,7 @@ extern bool db_connect( struct worker * );
 extern bool _begin_transaction( struct worker * );
 extern bool _commit_transaction( struct worker * );
 extern bool _rollback_transaction( struct worker * );
+
+extern char * get_column_value( int, PGresult *, char * );
+extern bool is_column_null( int, PGresult *, char * );
 #endif // QUERY_H

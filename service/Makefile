@@ -22,4 +22,5 @@ pg_ctblmgr: $(OBJS)
 
 .PHONY: clean
 clean:
-	rm -f $(OBJS) pg_ctblmgr
+	rm -f $(OBJS)
+	rm -f pg_ctblmgr

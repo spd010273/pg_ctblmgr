@@ -379,3 +379,39 @@ bool _rollback_transaction( struct worker * me )
     PQclear( result );
     return true;
 }
+
+char * get_column_value( int row, PGresult * result, char * column_name )
+{
+    if( is_column_null( row, result, column_name ) )
+    {
+        return NULL;
+    }
+
+    return PQgetvalue(
+        result,
+        row,
+        PQfnumber(
+            result,
+            column_name
+        )
+    );
+}
+
+bool is_column_null( int row, PGresult * result, char * column_name )
+{
+    if(
+        PQgetisnull(
+            result,
+            row,
+            PQfnumber(
+                result,
+                column_name
+            )
+        )
+      )
+    {
+        return true;
+    }
+
+    return false;
+}

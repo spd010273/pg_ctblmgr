@@ -19,4 +19,4 @@ install: all
 clean:
 	$(MAKE) -C service clean
 	$(MAKE) -C server clean
-	rm pg_ctblmgr
+	rm -f pg_ctblmgr

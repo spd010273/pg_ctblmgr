@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION public.fn_get_dependent_tables( in_query TEXT )
+CREATE OR REPLACE FUNCTION @extschema@.fn_get_dependent_tables( in_query TEXT )
 RETURNS TABLE
 (
     table_name  VARCHAR,

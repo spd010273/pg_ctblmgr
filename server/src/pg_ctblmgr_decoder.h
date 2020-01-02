@@ -96,7 +96,7 @@ typedef struct {
     unsigned long               num_changes;
     bool                        wrote_tx_changes;
     List *                      filter_tables;
-    enum pg_ctblmgr_wal_level   wal_level;    
+    enum pg_ctblmgr_wal_level   wal_level;
     bool                        include_transaction;
     bool                        enable_data_write;
 } decode_data;

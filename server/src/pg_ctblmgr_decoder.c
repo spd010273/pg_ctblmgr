@@ -35,10 +35,10 @@ static void pg_ctblmgr_decode_startup(
     bool                     is_init
 )
 {
-    decode_data *      data       = NULL;
-    ListCell *         cell       = NULL;
-    DefElem *          element    = NULL; 
-    char *             raw_string = NULL;
+    decode_data * data       = NULL;
+    ListCell *    cell       = NULL;
+    DefElem *     element    = NULL;
+    char *        raw_string = NULL;
 
     data = ( decode_data * ) palloc0( sizeof( decode_data ) );
 
@@ -105,6 +105,68 @@ static void pg_ctblmgr_decode_startup(
                 pfree( raw_string );
             }
         }
+        else if( strcmp( element->defname, "include-transaction" ) == 0 )
+        {
+            if( element->arg == NULL )
+            {
+                data->include_transaction = true;
+            }
+            else
+            {
+                if( !parse_bool( strVal( element->arg ), &(data->include_transaction) ) )
+                {
+                    ereport(
+                        ERROR,
+                        (
+                            errcode( ERRCODE_INVALID_PARAMETER_VALUE ),
+                            errmsg(
+                                "Could not parse setting \"%s\" for include-transaction",
+                                strVal( element->arg )
+                            )
+                        )
+                    );
+                }
+            }
+        }
+        else if( strcmp( element->defname, "wal-level" ) == 0 )
+        {
+            if( element->arg == NULL )
+            {
+                data->wal_level = PGC_WAL_FULL;
+            }
+            else
+            {
+                raw_string = pstrdup( strVal( element->arg ) );
+
+                if( strncmp( raw_string, "F", 1 ) == 0 )
+                {
+                    data->wal_level = PGC_WAL_FULL;
+                }
+                else if( strncmp( raw_string, "R", 1 ) == 0 )
+                {
+                    data->wal_level = PGC_WAL_REDUCED;
+                }
+                else if( strncmp( raw_string, "M", 1 ) == 0 )
+                {
+                    data->wal_level = PGC_WAL_MINIMAL;
+                }
+                else
+                {
+                    ereport(
+                        ERROR,
+                        (
+                            errcode( ERRCODE_INVALID_PARAMETER_VALUE ),
+                            errmsg(
+                                "Invalid WAL level specified '%s'",
+                                strVal( element->arg )
+                            )
+                        )
+                    );
+                }
+
+                pfree( raw_string );
+            }
+        }
     }
 
     context->output_plugin_private = data;
@@ -161,7 +223,12 @@ static void pg_ctblmgr_decode_begin_tx(
 
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = false;
-    
+
+    if( !data->include_transaction )
+    {
+        return;
+    }
+
     OutputPluginPrepareWrite( context, true );
 
     switch( data->wal_level )
@@ -209,6 +276,11 @@ static void pg_ctblmgr_decode_commit_tx(
     decode_data * data = NULL;
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = true;
+
+    if( !data->include_transaction )
+    {
+        return;
+    }
 
     OutputPluginPrepareWrite( context, true );
 
@@ -312,7 +384,7 @@ static void pg_ctblmgr_decode_change(
                 relation
             )
         )
-    ); 
+    );
 
     if( strncmp( table_name, "pg_temp_", 8 ) == 0 )
     {
@@ -327,7 +399,7 @@ static void pg_ctblmgr_decode_change(
         dml_type = "DELETE";
     else
         dml_type = "UNKNOWN";
-    
+
     // Check if our WAL'd table is in the list of tables we care about
     if( list_length( data->filter_tables ) > 0 )
     {
@@ -398,7 +470,7 @@ static void pg_ctblmgr_decode_change(
         old_tuple = &change->data.tp.oldtuple->tuple;
         tuple     = old_tuple; // Set tuple for deletes
     }
-    
+
     if( change->data.tp.newtuple != NULL )
     {
         new_tuple = &change->data.tp.newtuple->tuple;
@@ -415,7 +487,7 @@ static void pg_ctblmgr_decode_change(
         // we may need to cache the index entries - though this should be
         // cached already on most databases
         index = index_open( relation->rd_replidindex, ShareLock );
-    
+
         for( i = 0; i < index->rd_index->indnatts; i++ )
         {
             j              = index->rd_index->indkey.values[i];
@@ -584,11 +656,11 @@ static void append_literal_value(
             {
                 appendStringInfoString( string, "false" );
             }
-            
+
             break;
         default:
             appendStringInfoChar( string, '"' );
-            
+
             for( value = output; *value; value++ )
             {
                 //escape characters
@@ -638,9 +710,9 @@ static void append_tuple(
     for( i = 0; i < tuple_descriptor->natts; i++ )
     {
         attribute_form = tuple_descriptor->attrs[i];
-        
+
         if(
-              attribute_form.attisdropped    
+              attribute_form.attisdropped
            || attribute_form.attnum < 0
           )
         {
@@ -656,7 +728,7 @@ static void append_tuple(
         );
 
         append_tuple_value( string, tuple_descriptor, tuple, i - 1 );
-        
+
         if( i < tuple_descriptor->natts - 1 )
         {
             appendStringInfoChar( string, ',' );
@@ -925,7 +997,7 @@ Datum _hook_set_config_by_name( PG_FUNCTION_ARGS )
             {
                 epoch--;
             }
-            else if( 
+            else if(
                        xid < state->last_xid
                     && TransactionIdFollows( xid, state->last_xid )
                    )
