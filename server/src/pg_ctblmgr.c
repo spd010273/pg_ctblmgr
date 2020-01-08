@@ -35,10 +35,11 @@ static void pg_ctblmgr_decode_startup(
     bool                     is_init
 )
 {
-    decode_data * data       = NULL;
-    ListCell *    cell       = NULL;
-    DefElem *     element    = NULL;
-    char *        raw_string = NULL;
+    struct pgc_table * table      = NULL;
+    decode_data *      data       = NULL;
+    ListCell *         cell       = NULL;
+    DefElem *          element    = NULL;
+    char *             raw_string = NULL;
 
     data = ( decode_data * ) palloc0( sizeof( decode_data ) );
 
@@ -58,7 +59,7 @@ static void pg_ctblmgr_decode_startup(
     data->wal_level           = PGC_WAL_FULL;
     data->include_transaction = true;
     data->wrote_tx_changes    = false;
-    data->filter_tables       = NULL;
+    data->filter_tables       = NIL;
     data->context             = AllocSetContextCreate(
         TopMemoryContext,
         "pg_ctblmgr decoder context",
@@ -167,6 +168,14 @@ static void pg_ctblmgr_decode_startup(
                 pfree( raw_string );
             }
         }
+    }
+
+    if( data->filter_tables == NIL )
+    {
+        table = ( struct pgc_table * ) palloc0( sizeof( struct pgc_table ) );
+        table->all_schemas = true;
+        table->all_tables = true;
+        data->filter_tables = lappend( NIL, table );
     }
 
     context->output_plugin_private = data;
@@ -358,6 +367,8 @@ static void pg_ctblmgr_decode_change(
     ListCell *            cell             = NULL;
     struct pgc_table *    table            = NULL;
     Relation              index            = {0};
+    Oid                   index_oid        = InvalidOid;
+    Oid                   oid              = InvalidOid;
     Form_pg_class         class_form       = {0};
     FormData_pg_attribute attribute_form   = {0};
     TupleDesc             tuple_descriptor = {0};
@@ -423,11 +434,14 @@ static void pg_ctblmgr_decode_change(
             }
         }
     }
+    else
+    {
+        elog( DEBUG1, "Filter tables list empty" );
+    }
 
     if( found == false )
     {
         // Table is not in our filter list
-        elog( DEBUG1, "Table %s has been filtered out", table->table_name );
         return;
     }
 
@@ -470,7 +484,7 @@ static void pg_ctblmgr_decode_change(
         default:
             MemoryContextSwitchTo( old_context );
             MemoryContextReset( data->context );
-            elog( DEBUG1, "Invalid WAL level" );
+            elog( WARNING, "Invalid WAL level" );
             // May need to tear down the memory context
             return;
     }
@@ -491,17 +505,77 @@ static void pg_ctblmgr_decode_change(
     appendStringInfoString( context->out, ",\"key\":{" );
     RelationGetIndexList( relation );
 
-    // search relation for a natural or surrogate key
-    if( OidIsValid( relation->rd_replidindex ) )
+    switch( relation->rd_rel->relreplident )
+    {
+        case REPLICA_IDENTITY_DEFAULT:
+            if( OidIsValid( relation->rd_pkindex ) )
+                index_oid = relation->rd_pkindex;
+            break;
+        case REPLICA_IDENTITY_INDEX:
+            if( OidIsValid( relation->rd_replidindex ) )
+                index_oid = relation->rd_replidindex;
+            break;
+        case REPLICA_IDENTITY_FULL:
+        case REPLICA_IDENTITY_NOTHING:
+        default:
+            if( OidIsValid( relation->rd_replidindex ) )
+                index_oid = relation->rd_replidindex;
+    }
+
+    if( !OidIsValid( index_oid ) )
+    {
+        // Last-ditch attempt to find an suitable unique index
+        foreach( cell, relation->rd_indexlist )
+        {
+            oid = ( Oid ) lfirst_oid( cell );
+
+            if( OidIsValid( oid ) )
+            {
+                index = index_open( oid, AccessShareLock );
+
+                if(
+                        index->rd_index != NULL
+                     && index->rd_index->indisunique
+                     && index->rd_index->indimmediate
+                     && RelationGetIndexPredicate( index ) == NIL
+                     && IndexIsValid( index->rd_index )
+                     && index->rd_rel->relam == BTREE_AM_OID
+                     && index->rd_index->indnatts > 0
+                  )
+                {
+                    index_oid = oid;
+                }
+
+                index_close( index, NoLock );
+            }
+        }
+    }
+
+    if( !OidIsValid( index_oid ) )
+    {
+        elog(
+            DEBUG1,
+            "Cannot find key\nOID Valid: %s, Replication Identity: %s\n",
+            OidIsValid( relation->rd_replidindex ) ? "T" : "F",
+            relation->rd_rel->relreplident == REPLICA_IDENTITY_FULL ? "FULL" :
+            relation->rd_rel->relreplident == REPLICA_IDENTITY_DEFAULT ? "DEFAULT" :
+            relation->rd_rel->relreplident == REPLICA_IDENTITY_NOTHING ? "NONE" :
+            relation->rd_rel->relreplident == REPLICA_IDENTITY_INDEX ? "INDEX" : "N/A"
+        );
+        appendStringInfoString( context->out, "\"ERROR\":\"ERROR\"" );
+    }
+    else
     {
         // we may need to cache the index entries - though this should be
         // cached already on most databases
-        index = index_open( relation->rd_replidindex, ShareLock );
+        index = index_open( index_oid, ShareLock );
 
         for( i = 0; i < index->rd_index->indnatts; i++ )
         {
-            j              = index->rd_index->indkey.values[i];
-#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605 ) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509)|| (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
+            j = index->rd_index->indkey.values[i];
+#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) \
+ || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) \
+ || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
             attribute_form = tuple_descriptor->attrs[j - 1];
 #else
             attribute_form = *(TupleDescAttr( tuple_descriptor, j - 1 ));
@@ -521,21 +595,18 @@ static void pg_ctblmgr_decode_change(
                 context->out,
                 tuple_descriptor,
                 tuple,
-                j
+                j - 1
             );
         }
 
         index_close( index, NoLock );
     }
-    else
-    {
-        appendStringInfoString( context->out, "\"ERROR\":\"ERROR\"" );
-        // Shouldnt get here
-    }
+
+    appendStringInfoChar( context->out, '}' );
 
     if( data->enable_data_write || data->wal_level == PGC_WAL_FULL )
     {
-        appendStringInfoString( context->out, "},\"data\":{" );
+        appendStringInfoString( context->out, ",\"data\":{" );
 
         if( new_tuple != NULL )
         {
@@ -555,6 +626,8 @@ static void pg_ctblmgr_decode_change(
             append_tuple( context->out, tuple_descriptor, old_tuple );
             appendStringInfoChar( context->out, '}' );
         }
+
+        appendStringInfoChar( context->out, '}' );
     }
 
     appendStringInfoChar( context->out, '}' );
@@ -583,7 +656,9 @@ static void append_tuple_value(
     Datum                 value                   = {0};
 
     elog( DEBUG1, "Getting attr index %lu of %lu", index, tuple_descriptor->natts );
-#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605 ) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509)|| (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
+#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) \
+ || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) \
+ || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
     attribute_form = tuple_descriptor->attrs[index];
 #else
     attribute_form = *(TupleDescAttr( tuple_descriptor, index ));
@@ -727,7 +802,9 @@ static void append_tuple(
 
     for( i = 0; i < tuple_descriptor->natts; i++ )
     {
-#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605 ) || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509)|| (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
+#if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) \
+ || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) \
+ || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
         attribute_form = tuple_descriptor->attrs[i];
 #else
         attribute_form = *(TupleDescAttr( tuple_descriptor, i ));
@@ -750,7 +827,7 @@ static void append_tuple(
 
         append_tuple_value( string, tuple_descriptor, tuple, i );
 
-        if( i < tuple_descriptor->natts )
+        if( i < ( tuple_descriptor->natts - 1 ) )
         {
             appendStringInfoChar( string, ',' );
         }

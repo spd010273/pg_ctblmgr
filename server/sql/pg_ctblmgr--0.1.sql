@@ -355,7 +355,7 @@ BEGIN
 END
  $_$
     LANGUAGE 'plpgsql' VOLATILE PARALLEL UNSAFE;
-CREATE OR REPLACE FUNCTION @extschema@.fn_notify_maintenace_channel
+CREATE OR REPLACE FUNCTION @extschema@.fn_notify_maintenance_channel
 (
     in_maintenance_object INTEGER,
     in_command VARCHAR

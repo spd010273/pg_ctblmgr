@@ -19,6 +19,7 @@
 #include "utils/memutils.h"
 #include "utils/guc_tables.h"
 #include "utils/guc.h"
+#include "catalog/pg_am.h" 
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
