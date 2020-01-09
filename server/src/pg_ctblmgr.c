@@ -88,7 +88,12 @@ static void pg_ctblmgr_decode_startup(
             {
                 raw_string = pstrdup( strVal( element->arg ) );
 
-                if( !config_to_filter_table( raw_string, &(data->filter_tables) ) )
+                if(
+                    !config_to_filter_table(
+                        raw_string,
+                        &(data->filter_tables)
+                    )
+                  )
                 {
                     pfree( raw_string );
                     ereport(
@@ -114,14 +119,20 @@ static void pg_ctblmgr_decode_startup(
             }
             else
             {
-                if( !parse_bool( strVal( element->arg ), &(data->include_transaction) ) )
+                if(
+                    !parse_bool(
+                        strVal( element->arg ),
+                        &(data->include_transaction)
+                    )
+                  )
                 {
                     ereport(
                         ERROR,
                         (
                             errcode( ERRCODE_INVALID_PARAMETER_VALUE ),
                             errmsg(
-                                "Could not parse setting \"%s\" for include-transaction",
+                                "Could not parse setting \"%s\""\
+                                " for include-transaction",
                                 strVal( element->arg )
                             )
                         )
@@ -233,7 +244,7 @@ static void pg_ctblmgr_decode_begin_tx(
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = false;
 
-    if( !data->include_transaction )
+    if( !data->include_transaction || data->wal_level == PGC_WAL_MINIMAL )
     {
         return;
     }
@@ -286,7 +297,7 @@ static void pg_ctblmgr_decode_commit_tx(
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = true;
 
-    if( !data->include_transaction )
+    if( !data->include_transaction || data->wal_level == PGC_WAL_MINIMAL )
     {
         return;
     }
@@ -316,7 +327,6 @@ static void pg_ctblmgr_decode_commit_tx(
             appendStringInfo(
                 context->out,
                 transaction_boundary_minimal,
-                "COMMIT",
                 txn->xid
             );
             break;
@@ -351,9 +361,9 @@ static void pg_ctblmgr_decode_commit_tx(
  * access to the GUC stack as well as the current XID in which it was changed in
  * the session.
  *
- * More than likely - the best place to intercept this is at the tcop, because it
- * has access to xid information as well as directing the SET command to guc.c
- * routines, a good starting point is the standard_ProcessUtility in
+ * More than likely - the best place to intercept this is at the tcop, because
+ * it has access to xid information as well as directing the SET command to
+ * guc.c routines, a good starting point is the standard_ProcessUtility in
  * backend/tcop/utility.c
  */
 static void pg_ctblmgr_decode_change(
@@ -403,14 +413,56 @@ static void pg_ctblmgr_decode_change(
         return;
     }
 
-    if(      change->action == REORDER_BUFFER_CHANGE_INSERT )
-        dml_type = "INSERT";
-    else if( change->action == REORDER_BUFFER_CHANGE_UPDATE )
-        dml_type = "UPDATE";
-    else if( change->action == REORDER_BUFFER_CHANGE_DELETE )
-        dml_type = "DELETE";
-    else
-        dml_type = "UNKNOWN";
+    old_context = MemoryContextSwitchTo( data->context );
+    RelationGetIndexList( relation );
+
+    switch( change->action )
+    {
+        case REORDER_BUFFER_CHANGE_INSERT:
+            if( change->data.tp.newtuple == NULL )
+            {
+                elog(
+                    WARNING,
+                    "No tupledata for new tuple in INSERT for %s.%s",
+                    schema_name,
+                    table_name
+                );
+                return;
+            }
+
+            dml_type  = "INSERT";
+            new_tuple = &(change->data.tp.newtuple->tuple);
+            tuple     = new_tuple;
+            break;
+        case REORDER_BUFFER_CHANGE_UPDATE:
+            if( change->data.tp.newtuple == NULL )
+            {
+                elog(
+                    WARNING,
+                    "No tupledata for new tuple in UPDATE for %s.%s",
+                    schema_name,
+                    table_name
+                );
+                return;
+            }
+
+            dml_type  = "UPDATE";
+            old_tuple = change->data.tp.oldtuple != NULL ?
+                        &(change->data.tp.oldtuple->tuple) :
+                        NULL;
+            new_tuple = &(change->data.tp.newtuple->tuple);
+            tuple     = new_tuple;
+            break;
+        case REORDER_BUFFER_CHANGE_DELETE:
+            dml_type  = "DELETE";
+            old_tuple = change->data.tp.oldtuple != NULL ?
+                        &(change->data.tp.oldtuple->tuple) :
+                        NULL;
+            tuple     = old_tuple; 
+            break;
+        default:
+            dml_type = "UNKNOWN";
+    }
 
     // Check if our WAL'd table is in the list of tables we care about
     if( list_length( data->filter_tables ) > 0 )
@@ -442,10 +494,11 @@ static void pg_ctblmgr_decode_change(
     if( found == false )
     {
         // Table is not in our filter list
+        MemoryContextSwitchTo( old_context );
+        MemoryContextReset( data->context );
         return;
     }
 
-    old_context = MemoryContextSwitchTo( data->context );
     OutputPluginPrepareWrite( context, true );
 
     switch( data->wal_level )
@@ -488,136 +541,126 @@ static void pg_ctblmgr_decode_change(
             // May need to tear down the memory context
             return;
     }
-
-    if( change->data.tp.oldtuple != NULL )
-    {
-        old_tuple = &change->data.tp.oldtuple->tuple;
-        tuple     = old_tuple; // Set tuple for deletes
-    }
-
-    if( change->data.tp.newtuple != NULL )
-    {
-        new_tuple = &change->data.tp.newtuple->tuple;
-        tuple     = new_tuple; // Set tuple for update / insert
-    }
-
+    
     // Append key information
-    appendStringInfoString( context->out, ",\"key\":{" );
-    RelationGetIndexList( relation );
-
-    switch( relation->rd_rel->relreplident )
+    if( tuple != NULL )
     {
-        case REPLICA_IDENTITY_DEFAULT:
-            if( OidIsValid( relation->rd_pkindex ) )
-                index_oid = relation->rd_pkindex;
-            break;
-        case REPLICA_IDENTITY_INDEX:
-            if( OidIsValid( relation->rd_replidindex ) )
-                index_oid = relation->rd_replidindex;
-            break;
-        case REPLICA_IDENTITY_FULL:
-        case REPLICA_IDENTITY_NOTHING:
-        default:
-            if( OidIsValid( relation->rd_replidindex ) )
-                index_oid = relation->rd_replidindex;
-    }
+        appendStringInfoString( context->out, ",\"key\":{" );
 
-    if( !OidIsValid( index_oid ) )
-    {
-        // Last-ditch attempt to find an suitable unique index
-        foreach( cell, relation->rd_indexlist )
+        switch( relation->rd_rel->relreplident )
         {
-            oid = ( Oid ) lfirst_oid( cell );
+            case REPLICA_IDENTITY_DEFAULT:
+                if( OidIsValid( relation->rd_pkindex ) )
+                    index_oid = relation->rd_pkindex;
+                break;
+            case REPLICA_IDENTITY_INDEX:
+                if( OidIsValid( relation->rd_replidindex ) )
+                    index_oid = relation->rd_replidindex;
+                break;
+            case REPLICA_IDENTITY_FULL:
+            case REPLICA_IDENTITY_NOTHING:
+            default:
+                if( OidIsValid( relation->rd_replidindex ) )
+                    index_oid = relation->rd_replidindex;
+        }
 
-            if( OidIsValid( oid ) )
+        if( !OidIsValid( index_oid ) )
+        {
+            // Last-ditch attempt to find an suitable unique index
+            foreach( cell, relation->rd_indexlist )
             {
-                index = index_open( oid, AccessShareLock );
+                oid = ( Oid ) lfirst_oid( cell );
 
-                if(
-                        index->rd_index != NULL
-                     && index->rd_index->indisunique
-                     && index->rd_index->indimmediate
-                     && RelationGetIndexPredicate( index ) == NIL
-                     && IndexIsValid( index->rd_index )
-                     && index->rd_rel->relam == BTREE_AM_OID
-                     && index->rd_index->indnatts > 0
-                  )
+                if( OidIsValid( oid ) )
                 {
-                    index_oid = oid;
-                }
+                    index = index_open( oid, AccessShareLock );
 
-                index_close( index, NoLock );
+                    if(
+                            index->rd_index != NULL
+                         && index->rd_index->indisunique
+                         && index->rd_index->indimmediate
+                         && RelationGetIndexPredicate( index ) == NIL
+                         && IndexIsValid( index->rd_index )
+                         && index->rd_rel->relam == BTREE_AM_OID
+                         && index->rd_index->indnatts > 0
+                      )
+                    {
+                        index_oid = oid;
+                    }
+
+                    index_close( index, NoLock );
+                }
             }
         }
-    }
 
-    if( !OidIsValid( index_oid ) )
-    {
-        elog(
-            DEBUG1,
-            "Cannot find key\nOID Valid: %s, Replication Identity: %s\n",
-            OidIsValid( relation->rd_replidindex ) ? "T" : "F",
-            relation->rd_rel->relreplident == REPLICA_IDENTITY_FULL ? "FULL" :
-            relation->rd_rel->relreplident == REPLICA_IDENTITY_DEFAULT ? "DEFAULT" :
-            relation->rd_rel->relreplident == REPLICA_IDENTITY_NOTHING ? "NONE" :
-            relation->rd_rel->relreplident == REPLICA_IDENTITY_INDEX ? "INDEX" : "N/A"
-        );
-        appendStringInfoString( context->out, "\"ERROR\":\"ERROR\"" );
-    }
-    else
-    {
-        // we may need to cache the index entries - though this should be
-        // cached already on most databases
-        index = index_open( index_oid, ShareLock );
-
-        for( i = 0; i < index->rd_index->indnatts; i++ )
+        if( !OidIsValid( index_oid ) )
         {
-            j = index->rd_index->indkey.values[i];
+            appendStringInfoString( context->out, "\"ERROR\":\"ERROR\"" );
+        }
+        else
+        {
+            // we may need to cache the index entries - though this should be
+            // cached already on most databases
+            index = index_open( index_oid, ShareLock );
+
+            for( i = 0; i < index->rd_index->indnatts; i++ )
+            {
+                j = index->rd_index->indkey.values[i];
 #if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) \
  || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) \
  || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
-            attribute_form = tuple_descriptor->attrs[j - 1];
+                attribute_form = tuple_descriptor->attrs[j - 1];
 #else
-            attribute_form = *(TupleDescAttr( tuple_descriptor, j - 1 ));
+                attribute_form = *(TupleDescAttr( tuple_descriptor, j - 1 ));
 #endif
-            if( i > 0 )
-            {
-                appendStringInfoChar( context->out, ',' );
+                if( i > 0 )
+                {
+                    appendStringInfoChar( context->out, ',' );
+                }
+
+                appendStringInfo(
+                    context->out,
+                    "\"%s\":",
+                    NameStr( attribute_form.attname )
+                );
+
+                append_tuple_value(
+                    context->out,
+                    tuple_descriptor,
+                    tuple,
+                    j
+                );
             }
 
-            appendStringInfo(
-                context->out,
-                "\"%s\":",
-                NameStr( attribute_form.attname )
-            );
-
-            append_tuple_value(
-                context->out,
-                tuple_descriptor,
-                tuple,
-                j - 1
-            );
+            index_close( index, NoLock );
         }
 
-        index_close( index, NoLock );
+        appendStringInfoChar( context->out, '}' );
     }
-
-    appendStringInfoChar( context->out, '}' );
 
     if( data->enable_data_write || data->wal_level == PGC_WAL_FULL )
     {
         appendStringInfoString( context->out, ",\"data\":{" );
 
-        if( new_tuple != NULL )
+        if(
+               change->action == REORDER_BUFFER_CHANGE_INSERT
+            || change->action == REORDER_BUFFER_CHANGE_UPDATE
+          )
         {
             appendStringInfoString( context->out, "\"new\":{" );
             append_tuple( context->out, tuple_descriptor, new_tuple );
             appendStringInfoChar( context->out, '}' );
         }
 
-        if( old_tuple != NULL )
+        if(
+               (
+                   change->action == REORDER_BUFFER_CHANGE_UPDATE
+                || change->action == REORDER_BUFFER_CHANGE_DELETE
+               )
+            && old_tuple != NULL
+          )
         {
-            if( new_tuple != NULL )
+            if( change->action == REORDER_BUFFER_CHANGE_UPDATE )
             {
                 appendStringInfoChar( context->out, ',' );
             }
@@ -655,17 +698,16 @@ static void append_tuple_value(
     Oid                   type_id                 = {0};
     Datum                 value                   = {0};
 
-    elog( DEBUG1, "Getting attr index %lu of %lu", index, tuple_descriptor->natts );
 #if (PG_VERSION_NUM >= 90600 && PG_VERSION_NUM < 90605) \
  || (PG_VERSION_NUM >= 90500 && PG_VERSION_NUM < 90509) \
  || (PG_VERSION_NUM >= 90400 && PG_VERSION_NUM < 90414)
-    attribute_form = tuple_descriptor->attrs[index];
+    attribute_form = tuple_descriptor->attrs[index - 1];
 #else
-    attribute_form = *(TupleDescAttr( tuple_descriptor, index ));
+    attribute_form = *(TupleDescAttr( tuple_descriptor, index - 1 ));
 #endif
     original_value = fastgetattr(
         tuple,
-        index + 1,
+        index,
         tuple_descriptor,
         &is_null
     );
@@ -825,7 +867,7 @@ static void append_tuple(
             )
         );
 
-        append_tuple_value( string, tuple_descriptor, tuple, i );
+        append_tuple_value( string, tuple_descriptor, tuple, i + 1 );
 
         if( i < ( tuple_descriptor->natts - 1 ) )
         {
@@ -934,8 +976,7 @@ static bool parse_table_identifier( List * qual_tables, List ** table_list )
     foreach( cell, qual_tables )
     {
         string = ( char * ) lfirst( cell );
-
-        table = ( struct pgc_table * ) palloc0( sizeof( struct pgc_table ) );
+        table  = ( struct pgc_table * ) palloc0( sizeof( struct pgc_table ) );
 
         if( string[0] == '*' && string[1] == '.' )
         {
@@ -1028,7 +1069,8 @@ Datum _hook_set_config_by_name( PG_FUNCTION_ARGS )
     char *        new_value = NULL;
     bool          is_local  = false;
     txid          val       = 0;
-    TxidEpoch     state     = {0}; // struct: { TransactionId last_xid; uint32 epoch; }
+    // struct: { TransactionId last_xid; uint32 epoch; }
+    TxidEpoch     state     = {0};
     TransactionId xid       = {0};
 
     if( PG_ARGISNULL(0) )
@@ -1074,7 +1116,8 @@ Datum _hook_set_config_by_name( PG_FUNCTION_ARGS )
     );
 
     // Hook for pg_ctlbmgr to record session GUCs we're interested in replicating downstream
-    if( should_forward_guc_to_wal( name ) ) // need to check if the guc name is what we're interested in
+    if( should_forward_guc_to_wal( name ) )
+      // need to check if the guc name is what we're interested in
     { // copied from txid_current()
         PreventCommandDuringRecovery( "txid_current()" );
         GetNextXidAndEpoch( &state->last_xid, &state->epoch );

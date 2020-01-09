@@ -1,0 +1,7 @@
+DELETE FROM tb_a;
+DELETE FROM tb_b;
+DELETE FROM tb_c;
+DELETE FROM tb_d;
+DELETE FROM tb_e;
+DELETE FROM tb_f;
+

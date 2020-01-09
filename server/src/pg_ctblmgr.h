@@ -1,5 +1,5 @@
-#ifndef PG_CTBLMGR_DECODER_H
-#define PG_CTBLMGR_DECODER_H
+#ifndef PG_CTBLMGR_H
+#define PG_CTBLMGR_H
 
 #include "postgres.h"
 #include "miscadmin.h"
@@ -87,11 +87,10 @@ const char * dml_preamble_reduced = "{\
 \"table_name\":\"%s\"";
 /* {"d":<dml_type>,"x":<xid>,"s":<schema>","t":<table>...} */
 const char * dml_preamble_minimal = "{\
-\"d\":\"%s\",\
+\"d\":\"%c\",\
 \"x\":\"%u\",\
 \"s\":\"%s\",\
 \"t\":\"%s\"";
-
 
 typedef struct {
     MemoryContext               context;
@@ -102,7 +101,6 @@ typedef struct {
     bool                        include_transaction;
     bool                        enable_data_write;
 } decode_data;
-
 
 struct pgc_table {
     char * schema_name;
@@ -167,4 +165,4 @@ static void append_literal_value( StringInfo, Oid, char * );
 static void append_tuple( StringInfo, TupleDesc, HeapTuple );
 static bool config_to_filter_table( char *, List ** );
 static bool parse_table_identifier( List *, List ** );
-#endif // PG_CTBLMGR_DECODER_H
+#endif // PG_CTBLMGR_H
