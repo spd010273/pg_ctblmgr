@@ -2,8 +2,6 @@
 
 static struct buffer_pin * _new_buffer_pin( void );
 static struct buffer * _new_buffer( void );
-static inline bool _test_and_set( bool * );
-static bool _test_and_set_mutex( bool * );
 
 void new_buffer( struct buffer ** b, char * qual_name, void * wal_data )
 {
@@ -29,11 +27,11 @@ struct buffer_pin * buffer_get_pin_by_name( struct buffer * b, char * qual_name 
     if( b == NULL || qual_name == NULL )
         return NULL;
 
-    if( !_test_and_set_mutex( &(b->in_use) ) )
+    if( !__TNS_MUTEX( (&(b->in_use)) ) )
         return NULL;
 
     data = trie_search( b->trie, qual_name );
-    b->in_use = false;
+    __C_MUTEX( (&(b->in_use)) );
 
     if( data != NULL )
     {
@@ -52,7 +50,7 @@ bool buffer_add( struct buffer * b, char * qual_name, void * wal_data )
     if( b == NULL || qual_name == NULL || wal_data == NULL )
         return false;
 
-    if( !_test_and_set_mutex( &(b->in_use) ) )
+    if( !__TNS_MUTEX( (&(b->in_use)) ) )
         return false;
 
     data = trie_search( b->trie, qual_name );
@@ -63,13 +61,13 @@ bool buffer_add( struct buffer * b, char * qual_name, void * wal_data )
 
         if( bp == NULL )
         {
-            b->in_use = false;
+            __C_MUTEX( (&(b->in_use)) );
             return false;
         }
 
         if( !trie_insert( &(b->trie), qual_name, ( void * ) bp ) )
         {
-            b->in_use = false;
+            __C_MUTEX( (&(b->in_use)) );
             return false;
         }
 
@@ -80,18 +78,18 @@ bool buffer_add( struct buffer * b, char * qual_name, void * wal_data )
         bp = ( struct buffer_pin * ) data;
     }
 
-    b->in_use = false;
+    __C_MUTEX( (&(b->in_use)) );
 
-    if( !_test_and_set_mutex( &(bp->in_use) ) )
+    if( !__TNS_MUTEX( (&(bp->in_use)) ) )
         return false;
 
     if( !slpq_push( bp->slpq, wal_data ) )
     {
-        bp->in_use = false;
+        __C_MUTEX( (&(bp->in_use)) );
         return false;
     }
 
-    bp->in_use = false;
+    __C_MUTEX( (&(bp->in_use)) );
     return true;
 }
 
@@ -104,11 +102,11 @@ void * buffer_pin_pop( struct buffer_pin * bp )
         return NULL;
     }
 
-    if( !_test_and_set_mutex( &(bp->in_use) ) )
+    if( !__TNS_MUTEX( (&(bp->in_use)) ) )
         return NULL;
 
     data = slpq_pop( bp->slpq );
-    bp->in_use = false;
+    __C_MUTEX( (&(bp->in_use)) );
     return data;
 }
 
@@ -119,16 +117,16 @@ bool buffer_pin_push( struct buffer_pin * bp, void * data )
         return false;
     }
 
-    if( !_test_and_set_mutex( &(bp->in_use) ) )
+    if( !__TNS_MUTEX( (&(bp->in_use)) ) )
         return false;
 
     if( !slpq_push( bp->slpq, data ) )
     {
-        bp->in_use = false;
+        __C_MUTEX( (&(bp->in_use)) );
         return false;
     }
 
-    bp->in_use = false;
+    __C_MUTEX( (&(bp->in_use)) );
     return true;
 }
 
@@ -141,28 +139,28 @@ bool remove_buffer_pin_by_name( struct buffer * b, char * qual_name )
         return false;
     }
 
-    if( !_test_and_set_mutex( &(b->in_use) ) )
+    if( !__TNS_MUTEX( (&(b->in_use)) ) )
         return false;
 
     bp = ( struct buffer_pin * ) trie_search( b->trie, qual_name );
 
     if( bp == NULL )
     {
-        b->in_use = false;
+        __C_MUTEX( (&(b->in_use)) );
         return true;
     }
     else
     {
-        if( !_test_and_set_mutex( &(bp->in_use) ) )
+        if( !__TNS_MUTEX( (&(bp->in_use)) ) )
         {
-            b->in_use = false;
+            __C_MUTEX( (&(b->in_use)) );
             return false;
         }
 
         if( bp->slpq->size != 0 )
         {
-            bp->in_use = false;
-            b->in_use  = false;
+            __C_MUTEX( (&(bp->in_use)) );
+            __C_MUTEX( (&(b->in_use)) );
             return false;
         }
 
@@ -172,7 +170,7 @@ bool remove_buffer_pin_by_name( struct buffer * b, char * qual_name )
             _BUFFER_FREE( bp );
 
         b->entries--;
-        b->in_use = false;
+        __C_MUTEX( (&(b->in_use)) );
         return true;
     }
 }
@@ -206,17 +204,24 @@ static struct buffer * _new_buffer( void )
     return b;
 }
 
+#ifdef __BUF_NO_ATOMICS__
 static inline bool _test_and_set( bool * mutex )
 {
     bool initial = true;
     initial = *mutex;
-    *mutex  = true;
+    *mutex = true;
     return initial;
 }
 
 static bool _test_and_set_mutex( bool * mutex )
 {
     while( *mutex == true || _test_and_set( mutex ) == true );
-    *mutex = true;
     return true;
 }
+
+static void _clear_mutex( bool * mutex )
+{
+    *mutex = false;
+    return;
+}
+#endif // __BUF_NO_ATOMICS__
