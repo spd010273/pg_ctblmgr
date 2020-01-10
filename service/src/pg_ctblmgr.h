@@ -4,6 +4,7 @@
 #include "lib/util.h"
 #include "lib/query.h"
 #include "lib/strings.h"
+#include "lib/buffer.h"
 
 int main( int, char ** );
 static int start_workers( void );
