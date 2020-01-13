@@ -5,7 +5,7 @@ CREATE OR REPLACE FUNCTION @extschema@.fn_notify_maintenance_channel
 )
 RETURNS VOID AS
  $_$
-    SELECT pg_notify( rs.name, in_command )
+    SELECT pg_notify( rs.maintenance_channel, in_command )
       FROM @extschema@.tb_maintenance_object mo
 INNER JOIN @extschema@.__pgctblmgr_repl_slot rs
         ON rs.id = mo.maintenance_object

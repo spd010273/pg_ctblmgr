@@ -1,4 +1,4 @@
-CREATE OR REPLACE FUNCTION @extschema@.fn_get_replication_slot_name
+CREATE OR REPLACE FUNCTION @extschema@.fn_get_maintenance_channel_name
 (
     in_schema_name VARCHAR,
     in_table_name  VARCHAR

@@ -1,5 +1,50 @@
 DO
  $_$
+DECLARE
+    my_current_count INTEGER := 0;
+    my_enabled_count INTEGER := 0;
+    my_wal_level     VARCHAR := 0;
+BEGIN
+    SELECT COUNT(*)
+      INTO my_current_count
+      FROM pg_catalog.pg_replication_slots
+     WHERE slot_type = 'logical';
+
+    SELECT current_setting( 'max_replication_slots' )
+      INTO my_enabled_count;
+
+    IF( my_current_count > 0 AND my_current_count = my_enabled_count ) THEN
+        RAISE EXCEPTION 'No available logical replication slots. Please increase max_replication_slots by at least 1';
+    END IF;
+
+    IF( my_enabled_count = 0 ) THEN
+        RAISE EXCEPTION 'No available logical replication slots. max_replication_slots must be >= 0 with at least one available slot';
+    END IF;
+
+    SELECT current_setting( 'wal_level' )
+      INTO my_wal_level;
+    
+    IF( my_wal_level != 'logical' ) THEN
+        RAISE EXCEPTION 'A WAL Level of ''logical'' is required for logical decoding';
+    END IF;
+    
+    PERFORM slot_name
+       FROM pg_replication_slots
+      WHERE slot_type = 'logical'
+        AND plugin = 'pg_ctblmgr'
+        AND database::VARCHAR = current_database();
+
+    IF FOUND THEN
+        RAISE EXCEPTION 'There is already a pg_ctblmgr replication slot for this database';
+    END IF;
+END
+ $_$
+    LANGUAGE 'plpgsql';
+
+-- We'll have the service control this
+--SELECT pg_create_logical_replication_slot( '__pg_ctblmgr', 'pg_ctblmgr' );
+DO
+ $_$
 BEGIN
     IF( pg_catalog.regexp_matches( version(), 'PostgreSQL (\d+)\.(\d+)\.?(\d+)?'::VARCHAR )::INTEGER[] < ARRAY[9,4]::INTEGER[] ) THEN
         RAISE EXCEPTION 'pg_ctblmgr requires PostgreSQL 9.4 or better';
@@ -9,15 +54,15 @@ END
     LANGUAGE 'plpgsql';
 CREATE TABLE IF NOT EXISTS @extschema@.__pgctblmgr_repl_slot
 (
-    id      INTEGER NOT NULL,
-    name    VARCHAR NOT NULL,
-    filter  VARCHAR NOT NULL,
+    id                  INTEGER NOT NULL,
+    maintenance_channel VARCHAR NOT NULL,
+    filter              VARCHAR NOT NULL,
     UNIQUE( id )
 );
 
 COMMENT ON TABLE @extschema@.__pgctblmgr_repl_slot IS 'Stores mapping of replication slots to their accompanying maintenance_objects';
 COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.id IS 'The maintenance_object PK that this replication slot maps to';
-COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.name IS 'Name of the replication slot and LISTEN/NOTIFY maintenance channel';
+COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.maintenance_channel IS 'Name of the LISTEN/NOTIFY maintenance channel used to notify workers of changes to the object';
 COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.filter IS 'Comma-delimited list of base objects for this table';
 CREATE SEQUENCE @extschema@.sq_pk_driver;
 
@@ -82,6 +127,13 @@ COMMENT ON COLUMN @extschema@.tb_maintenance_object.namespace IS 'Which namespac
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.name IS 'Canonical name of the object within its respective store';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.driver IS 'Driver used to maintain this object';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.location IS 'The location of this object';
+/*
+ * This function feeds the tables used by a maintenance object to
+ * __pgctblmgr_repl_slot.filter. Additionally, we set or upgrade the replica
+ * identity of the table so that pg_ctblmgr can extract approprate information
+ * about modified tuples from WAL. We try to be mindful that a replica ident
+ * already exists, and dont 'downgrade'
+ */
 CREATE OR REPLACE FUNCTION @extschema@.fn_get_dependencies
 (
     in_maintenance_object INTEGER
@@ -363,7 +415,7 @@ BEGIN
 END
  $_$
     LANGUAGE 'plpgsql' VOLATILE;
-CREATE OR REPLACE FUNCTION @extschema@.fn_get_replication_slot_name
+CREATE OR REPLACE FUNCTION @extschema@.fn_get_maintenance_channel_name
 (
     in_schema_name VARCHAR,
     in_table_name  VARCHAR
@@ -404,27 +456,6 @@ BEGIN
                             NEW.name;
         END IF;
     ELSIF( TG_OP = 'DELETE' ) THEN
-        -- Drop replication slot, if exists
-        PERFORM *
-           FROM pg_replication_slots
-          WHERE slot_name = @extschema@.fn_get_replication_slot_name(
-                                OLD.namespace,
-                                OLD.name
-                            );
-
-        IF FOUND THEN
-            PERFORM pg_drop_replication_slot(
-                @extschema@.fn_get_replication_slot_name(
-                    OLD.namespace,
-                    OLD.name
-                )
-            );
-        ELSE
-            RAISE EXCEPTION 'Could not locate replication slot for object %.%',
-                OLD.namespace,
-                OLD.name;
-        END IF;
-
         PERFORM @extschema@.fn_notify_maintenance_channel(
             OLD.maintenance_object,
             'object_remove'
@@ -437,13 +468,13 @@ BEGIN
     INSERT INTO @extschema@.__pgctblmgr_repl_slot
                 (
                     id,
-                    name,
+                    maintenance_channel,
                     filter
                 )
          VALUES
                 (
                     NEW.maintenance_object,
-                    @extschema@.fn_get_replication_slot_name(
+                    @extschema@.fn_get_maintenance_channel_name(
                         NEW.namespace,
                         NEW.name
                     ),
@@ -460,7 +491,7 @@ CREATE OR REPLACE FUNCTION @extschema@.fn_notify_maintenance_channel
 )
 RETURNS VOID AS
  $_$
-    SELECT pg_notify( rs.name, in_command )
+    SELECT pg_notify( rs.maintenance_channel, in_command )
       FROM @extschema@.tb_maintenance_object mo
 INNER JOIN @extschema@.__pgctblmgr_repl_slot rs
         ON rs.id = mo.maintenance_object

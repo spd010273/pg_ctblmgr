@@ -29,27 +29,6 @@ BEGIN
                             NEW.name;
         END IF;
     ELSIF( TG_OP = 'DELETE' ) THEN
-        -- Drop replication slot, if exists
-        PERFORM *
-           FROM pg_replication_slots
-          WHERE slot_name = @extschema@.fn_get_replication_slot_name(
-                                OLD.namespace,
-                                OLD.name
-                            );
-
-        IF FOUND THEN
-            PERFORM pg_drop_replication_slot(
-                @extschema@.fn_get_replication_slot_name(
-                    OLD.namespace,
-                    OLD.name
-                )
-            );
-        ELSE
-            RAISE EXCEPTION 'Could not locate replication slot for object %.%',
-                OLD.namespace,
-                OLD.name;
-        END IF;
-
         PERFORM @extschema@.fn_notify_maintenance_channel(
             OLD.maintenance_object,
             'object_remove'
@@ -62,13 +41,13 @@ BEGIN
     INSERT INTO @extschema@.__pgctblmgr_repl_slot
                 (
                     id,
-                    name,
+                    maintenance_channel,
                     filter
                 )
          VALUES
                 (
                     NEW.maintenance_object,
-                    @extschema@.fn_get_replication_slot_name(
+                    @extschema@.fn_get_maintenance_channel_name(
                         NEW.namespace,
                         NEW.name
                     ),

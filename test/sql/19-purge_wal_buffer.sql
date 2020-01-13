@@ -1,1 +1,1 @@
-SELECT * FROM pg_catalog.pg_logical_slot_get_changes( '__pg_ctblmgr_public_ct_test', NULL, NULL );
+SELECT * FROM pg_catalog.pg_logical_slot_get_changes( '__pg_ctblmgr', NULL, NULL );

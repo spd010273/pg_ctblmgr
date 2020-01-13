@@ -4,7 +4,7 @@ CREATE TEMP TABLE tt_all_xact AS
            xid,
            data::JSONB as output
       FROM pg_catalog.pg_logical_slot_peek_changes(
-               '__pg_ctblmgr_public_ct_test',
+               '__pg_ctblmgr',
                NULL,
                NULL,
                'wal-level',
