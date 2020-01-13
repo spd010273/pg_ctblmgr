@@ -30,6 +30,13 @@ int main( int argc, char ** argv )
         );
     }
 
+    setup_replication_slot( parent );
+
+    if( !initialize_buffer( parent ) )
+    {
+        return 1;
+    }
+
     worker_count = start_workers();
 
     if( worker_count < 0 )
@@ -51,10 +58,11 @@ static int start_workers( void )
     PGresult *        result       = NULL;
     struct worker **  temp         = NULL;
     char *            channel      = NULL;
-    char *            filter       = NULL;
+    char **           filter       = NULL;
     char *            wal_level    = NULL;
     unsigned long int i            = 0;
     unsigned long int worker_count = 0;
+    unsigned int      num_tables   = 0;
 
     if( parent == NULL || parent->type != WORKER_TYPE_PARENT )
     {
@@ -101,8 +109,7 @@ static int start_workers( void )
 
     for( i = 0; i < worker_count; i++ )
     {
-        channel   = get_column_value( (int) i, result, "slot_name" );
-        filter    = get_column_value( (int) i, result, "filter" );
+        channel   = get_column_value( (int) i, result, "maintenance_channel" );
         wal_level = get_column_value( (int) i, result, "wal_level" );
 
         if( get_worker_by_channel( channel ) == NULL )
@@ -111,6 +118,13 @@ static int start_workers( void )
             {
                 if( workers[i] == NULL )
                 {
+                    get_filter_tables_by_channel( parent, channel, &filter, &num_tables );
+                    
+                    if( num_tables == 0 )
+                    {
+                        return -1;
+                    }
+
                     workers[i] = new_worker(
                         WORKER_TYPE_CHILD,
                         i,
@@ -120,6 +134,7 @@ static int start_workers( void )
                         NULL,
                         channel,
                         filter,
+                        num_tables,
                         wal_level[0]
                     );
 
@@ -170,10 +185,8 @@ static bool extension_installed( void )
 
 static void worker_entrypoint( void * data )
 {
-    struct worker *   me         = NULL;
-    PGresult *        wal_result = NULL;
-    char *            params[4]  = {NULL};
-    unsigned long int i          = 0;
+    struct worker *   me        = NULL;
+    PGresult *        result    = NULL;
 
     if( data == NULL )
     {
@@ -196,67 +209,21 @@ static void worker_entrypoint( void * data )
         return;
     }
 
-    wal_result = _execute_query(
+    result = _execute_query(
         me,
         "SELECT 1",
         NULL,
         0
     );
 
-    if( wal_result == NULL || me->conn == NULL )
+    if( result == NULL || me->conn == NULL )
     {
         // no conn
         me->status = WORKER_STATUS_DEAD;
         return;
     }
 
-    PQclear( wal_result );
-    params[0] = me->config.channel;
-
-    // Verify that our target replication slot exists
-    wal_result = _execute_query(
-        me,
-        ( char * ) replication_check,
-        params,
-        1
-    );
-
-    if( wal_result == NULL )
-    {
-        // Could not get slot status
-        me->status = WORKER_STATUS_DEAD;
-        return;
-    };
-
-    if(
-            strcmp(
-                get_column_value(
-                    1,
-                    wal_result,
-                    "plugin"
-                ),
-                PLUGIN_NAME
-            ) != 0
-         || strcmp(
-                get_column_value(
-                    1,
-                    wal_result,
-                    "slot_type"
-                ),
-                "logical"
-           ) != 0
-      )
-    {
-        // Slot doesnt exist or is not logical
-        me->status = WORKER_STATUS_DEAD;
-        PQclear( wal_result );
-        return;
-    }
-
-    PQclear( wal_result );
-
-    params[1] = &(me->config.wal_level);
-    params[2] = me->config.filter_tables;
+    PQclear( result );
 
     // Start main program
     me->status = WORKER_STATUS_IDLE;
@@ -268,31 +235,178 @@ static void worker_entrypoint( void * data )
             db_connect( me );
         }
 
-        wal_result = _execute_query(
-            me,
-            ( char * ) replication_seek,
-            params,
-            4
-        );
-
-        if( wal_result == NULL )
-        {
-            continue;
-        }
-
-        if( PQntuples( wal_result ) > 0 )
-        {
-            me->status = WORKER_STATUS_PROCESS_WAL;
-
-            for( i = 0; i < PQntuples( wal_result ); i++ )
-            {
-
-            }
-        }
-
-        PQclear( wal_result );
+        // Start looking at buffer
     }
 
     me->status = WORKER_STATUS_DEAD;
+    return;
+}
+
+static bool setup_replication_slot( struct worker * me )
+{
+    PGresult *      result    = NULL;
+    char *          params[1] = {NULL};
+
+    if( me == NULL || me->type != WORKER_TYPE_PARENT )
+        return false;
+
+    params[0] = MAIN_CHANNEL;
+
+    result = _execute_query(
+        me,
+        ( char * ) replication_check,
+        params,
+        1
+    );
+
+    if( result == NULL || me->conn == NULL )
+        return false;
+   
+    if( PQntuples( result ) > 1 )
+        return false; // slot already exists
+
+    PQclear( result );
+
+    result = _execute_query(
+        me,
+        ( char * ) replication_slot_create,
+        NULL,
+        0
+    );
+
+    if( result == NULL || me->conn == NULL )
+        return false;
+
+    PQclear( result );
+    return true;
+}
+
+/*
+ * Go ahead and allocate memory for our data structure,
+ * as well as prepolulate the Trie section with the distinct
+ * tables we will be using
+ */
+static bool initialize_buffer( struct worker * me )
+{
+    struct buffer * buff          = NULL;
+    char **         filter_tables = NULL;
+    unsigned int    num_tables    = 0;
+    unsigned int    i             = 0;
+
+    if( me == NULL || me->type != WORKER_TYPE_PARENT )
+        return false;
+
+    new_buffer( &buff, NULL, NULL ); 
+
+    get_filter_tables_by_channel(
+        me,
+        NULL,
+        &filter_tables,
+        &num_tables
+    );
+
+    if( num_tables == 0 )
+    {
+        return false;
+    }
+
+    buffer_populate_trie(
+        &(me->buffer),
+        filter_tables,
+        num_tables
+    );
+
+    for( i = 0; i < num_tables; i++ )
+    {
+        free( filter_tables[i] );
+    }
+
+    free( filter_tables );
+
+    return true;
+}
+
+static void get_filter_tables_by_channel(
+    struct worker * me,
+    char * channel,
+    char *** filter,
+    unsigned int * num_tables
+)
+{
+    PGresult *   filter_result = NULL;
+    char *       params[1]     = {NULL};
+    unsigned int i             = 0;
+    char *       table         = NULL;
+
+    if( me == NULL || me->conn == NULL )
+        return;
+
+    if( channel == NULL )
+    {
+        filter_result = _execute_query(
+            me,
+            ( char * ) get_distinct_filter_tables,
+            NULL,
+            0
+        );
+    }
+    else
+    {
+        params[0] = channel;
+
+        filter_result = _execute_query(
+            me,
+            ( char * ) get_slot_filter_tables,
+            params,
+            1
+        );
+    }
+
+    if( filter_result == NULL || me->conn == NULL )
+    {
+        *num_tables = 0;
+        return;
+    }
+
+    if( PQntuples( filter_result ) == 0 )
+    {
+        *num_tables = 0;
+        PQclear( filter_result );
+        return;
+    }
+
+    *num_tables = PQntuples( filter_result );
+    (*filter) = ( char ** ) calloc(
+        sizeof( char * ),
+        PQntuples( filter_result )
+    );
+
+    if( *filter == NULL )
+    {
+        *num_tables = 0;
+        PQclear( filter_result );
+        return;
+    }
+
+    for( i = 0; i < PQntuples( filter_result ); i++ )
+    {
+        table = get_column_value( (int) i, filter_result, "filter_table" );
+        (*filter)[i] = ( char * ) calloc(
+            sizeof( char ),
+            strlen( table ) + 1
+        );
+          
+        if( (*filter)[i] == NULL )
+        {
+            *num_tables = 0;
+            PQclear( filter_result );
+            return;
+        }
+
+        strncpy( (*filter)[i], table, strlen( table ) );
+        (*filter)[i][strlen(table) + 1] = '\0';
+    }
+
+    PQclear( filter_result );
     return;
 }

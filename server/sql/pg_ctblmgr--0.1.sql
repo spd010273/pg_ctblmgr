@@ -56,14 +56,14 @@ CREATE TABLE IF NOT EXISTS @extschema@.__pgctblmgr_repl_slot
 (
     id                  INTEGER NOT NULL,
     maintenance_channel VARCHAR NOT NULL,
-    filter              VARCHAR NOT NULL,
+    filter              VARCHAR[] NOT NULL,
     UNIQUE( id )
 );
 
 COMMENT ON TABLE @extschema@.__pgctblmgr_repl_slot IS 'Stores mapping of replication slots to their accompanying maintenance_objects';
 COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.id IS 'The maintenance_object PK that this replication slot maps to';
 COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.maintenance_channel IS 'Name of the LISTEN/NOTIFY maintenance channel used to notify workers of changes to the object';
-COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.filter IS 'Comma-delimited list of base objects for this table';
+COMMENT ON COLUMN @extschema@.__pgctblmgr_repl_slot.filter IS 'array of base objects for this table';
 CREATE SEQUENCE @extschema@.sq_pk_driver;
 
 CREATE TABLE IF NOT EXISTS @extschema@.tb_driver
@@ -138,11 +138,11 @@ CREATE OR REPLACE FUNCTION @extschema@.fn_get_dependencies
 (
     in_maintenance_object INTEGER
 )
-RETURNS VARCHAR AS
+RETURNS VARCHAR[] AS
  $_$
 DECLARE
     my_query             TEXT;
-    my_result            VARCHAR;
+    my_result            VARCHAR[];
     my_schema            VARCHAR;
     my_table             VARCHAR;
     my_current_replident VARCHAR;
@@ -234,7 +234,7 @@ BEGIN
                table_name
           FROM tt_dependencies tt
                               ) LOOP
-        my_result := my_schema || '.' || my_table || ',';
+        my_result := my_result::VARCHAR[] || ( quote_ident( my_schema ) || '.' || quote_ident( my_table ) )::VARCHAR;
         -- Verify that the table has a unique constraint or
         -- some kind of replica identity set
          SELECT CASE WHEN c.relreplident = 'n' AND c_pk.oid IS NOT NULL
@@ -326,7 +326,6 @@ BEGIN
         END IF;
     END LOOP;
 
-    my_result := regexp_replace( my_result, ',$', '' );
     DROP VIEW tt_vw_column_check;
     RETURN my_result;
 END

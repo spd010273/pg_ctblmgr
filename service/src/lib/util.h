@@ -23,6 +23,8 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include "buffer.h"
+
 #define LOG_LEVEL_DEBUG 1
 #define LOG_LEVEL_INFO 2
 #define LOG_LEVEL_WARNING 3
@@ -61,10 +63,11 @@ sig_atomic_t got_sigint;
 sig_atomic_t got_sigterm;
 
 struct pgc_conf {
-    char    channel[MAX_CHANNEL_LENGTH];
-    char *  filter_tables;
-    char    wal_level;
-    bool    include_transactions;
+    char         channel[MAX_CHANNEL_LENGTH];
+    char **      filter_tables;
+    unsigned int num_tables;
+    char         wal_level;
+    bool         include_transactions;
 };
 
 struct worker {
@@ -77,6 +80,7 @@ struct worker {
     char **         my_argv;
     char *          pidfile;  // used by parent to remove pid file on term
     struct pgc_conf config;
+    struct buffer * buffer;
 };
 
 struct worker ** workers;
@@ -95,11 +99,18 @@ extern struct worker * new_worker(
     void (*)( void * ),
     struct worker *,
     char *, // channel
-    char *, // filter_tables
+    char **, // filter_tables
+    unsigned int, // num_tables
     char   // wal_level
 );
 
-extern void worker_set_config( struct worker *, char *, char *, char );
+extern void worker_set_config(
+    struct worker *,
+    char *,
+    char **,
+    unsigned int,
+    char
+);
 
 extern bool parent_init( int, char ** );
 extern void free_worker( struct worker * );
@@ -112,9 +123,6 @@ extern void __term( void ) __attribute__ ((noreturn));
 
 extern void * create_shared_memory( size_t );
 extern void _set_process_title( char **, int, char *, unsigned int * );
-
-extern bool _wait_and_set_mutex( bool * );
-extern bool __test_and_set( bool * );
 
 extern struct worker * get_worker_by_channel( char * );
 #endif // UTIL_H

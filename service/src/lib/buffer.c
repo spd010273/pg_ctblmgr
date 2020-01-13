@@ -1,20 +1,70 @@
 #include "buffer.h"
 
+#ifdef __BUF_NO_ATOMICS__
+static inline bool _test_and_set( bool * );
+static bool _test_and_set_mutex( bool * );
+static void _clear_mutex( bool * );
+#define __TNS_MUTEX(val) _test_and_set_mutex(val)
+#define __C_MUTEX(val) _clear_mutex(val)
+#endif // __BUF_NO_ATOMICS__
+
 static struct buffer_pin * _new_buffer_pin( void );
 static struct buffer * _new_buffer( void );
 
-void new_buffer( struct buffer ** b, char * qual_name, void * wal_data )
+void buffer_populate_trie( struct buffer ** b, char ** qual_name, unsigned int n_quals )
 {
-    if( b == NULL || qual_name == NULL || wal_data == NULL )
-        return;
+    void *              data = NULL;
+    struct buffer_pin * bp   = NULL;
+    unsigned int        i    = 0;
 
     if( *b == NULL )
-    {
         *b = ( struct buffer * ) _new_buffer();
-    }
 
-    if( !buffer_add( *b, qual_name, wal_data ) )
+    if( qual_name == NULL )
         return;
+
+    if( !__TNS_MUTEX( (&((*b)->in_use)) ) )
+        return;
+
+    for( i = 0; i < n_quals; i++ )
+    {
+        data = trie_search( (*b)->trie, qual_name[i] );
+
+        if( data == NULL )
+        {
+            bp = _new_buffer_pin();
+
+            if( bp == NULL )
+            {
+                __C_MUTEX( (&((*b)->in_use)) );
+                return;
+            }
+
+            if( !trie_insert( &((*b)->trie), qual_name[i], ( void * ) bp ) )
+            {
+                __C_MUTEX( (&((*b)->in_use)) );
+                return;
+            }
+        }
+    }
+    
+    __C_MUTEX( (&((*b)->in_use)) );
+    return;
+}
+
+void new_buffer( struct buffer ** b, char * qual_name, void * wal_data )
+{
+    if( *b == NULL )
+        *b = ( struct buffer * ) _new_buffer();
+
+    if(
+            qual_name != NULL
+         && wal_data != NULL
+         && !buffer_add( *b, qual_name, wal_data )
+      )
+    {
+        return;
+    }
 
     return;
 }

@@ -4,27 +4,66 @@
 const char * replication_check = "\
     SELECT plugin, \
            slot_type \
-      FROM pg_replication_slots \
+      FROM pg_catalog.pg_replication_slots \
      WHERE slot_name = $1";
+
+const char * replication_slot_create = "\
+    SELECT * \
+      FROM pg_catalog.pg_create_logical_replication_slot( \
+               '__pg_ctblmgr', \
+               'pg_ctblmgr' \
+           )";
+
+const char * replication_slot_destroy = "\
+    SELECT pg_catalog.pg_drop_replication_slot( '__pg_ctblmgr' )";
+
+const char * get_distinct_filter_tables = "\
+    SELECT DISTINCT x AS filter_table \
+      FROM " EXTENSION_NAME ".__pgctblmgr_repl_slot rs \
+INNER JOIN unnest( rs.filter ) x \
+        ON TRUE ";
+
+const char * get_slot_filter_tables = "\
+    SELECT DISTINCT x AS filter_table \
+      FROM " EXTENSION_NAME ".__pgctblmgr_repl_slot rs \
+INNER JOIN unnest( rs.filter ) x \
+        ON TRUE \
+     WHERE rs.maintenance_channel = $1";
 
 const char * replication_seek = "\
     SELECT location, \
            xid, \
-           data \
-      FROM pg_logical_slot_get_changes( \
+           data::JSONB AS data \
+      FROM pg_catalog.pg_logical_slot_get_changes( \
                $1, \
                NULL, \
                NULL, \
                'wal-level', \
                $2, \
-               'filter-tables' \
-               $3 \
-               'include-transactions' \
+               'filter-tables', \
+               $3, \
+               'include-transactions', \
+               FALSE \
+           ) ";
+
+const char * replication_peek = "\
+    SELECT location, \
+           xid, \
+           data::JSONB AS data \
+      FROM pg_catalog.pg_logical_slot_peek_changes( \
+               $1, \
+               NULL, \
+               NULL, \
+               'wal-level', \
+               $2, \
+               'filter-tables', \
+               $3, \
+               'include-transactions', \
                FALSE \
            ) ";
 
 const char * get_worker_list = "\
-    SELECT rs.name AS slot_name, \
+    SELECT rs.maintenance_channel, \
            rs.filter, \
            mg.wal_level \
       FROM " EXTENSION_NAME ".__pgctblmgr_repl_slot rs \
@@ -39,4 +78,5 @@ const char * extension_check_query = "\
 INNER JOIN pg_catalog.pg_namespace n \
         ON n.oid = e.extnamespace \
      WHERE e.extname = $1";
+
 #endif // STRINGS_H

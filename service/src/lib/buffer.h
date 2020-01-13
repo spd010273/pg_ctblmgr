@@ -15,14 +15,6 @@
 #define __BUF_NO_ATOMICS__
 #endif // __STDC_VERSION__
 
-#ifdef __BUF_NO_ATOMICS__
-static inline bool _test_and_set( bool * );
-static bool _test_and_set_mutex( bool * );
-static void _clear_mutex( bool * );
-#define __TNS_MUTEX(val) _test_and_set_mutex(val)
-#define __C_MUTEX(val) _clear_mutex(val)
-#endif // __BUF_NO_ATOMICS__
-
 #include "slpq.h"
 #include "trie.h"
 
@@ -51,6 +43,7 @@ struct buffer_pin
 #endif // __BUF_NO_ATOMICS__
 };
 
+void buffer_populate_trie( struct buffer **, char **, unsigned int );
 void new_buffer( struct buffer **, char *, void * );
 struct buffer_pin * buffer_get_pin_by_name( struct buffer *, char * );
 bool buffer_add( struct buffer *, char *, void * );

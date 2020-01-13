@@ -236,7 +236,8 @@ struct worker * new_worker(
     void (*function)( void * ),
     struct worker *   workerslot,
     char *            channel,
-    char *            filter_tables,
+    char **           filter_tables,
+    unsigned int      num_tables,
     char              wal_level
 )
 {
@@ -274,6 +275,7 @@ struct worker * new_worker(
         result,
         channel,
         filter_tables,
+        num_tables,
         wal_level
     );
 
@@ -323,10 +325,13 @@ struct worker * new_worker(
 void worker_set_config(
     struct worker * worker,
     char *          channel,
-    char *          filter_tables,
+    char **         filter_tables,
+    unsigned int    num_tables,
     char            wal_level
 )
 {
+    unsigned int i = 0;
+
     if( worker == NULL  )
     {
         return;
@@ -355,26 +360,40 @@ void worker_set_config(
 
     if( filter_tables != NULL )
     {
+        worker->config.num_tables = num_tables;
         worker->config.filter_tables = calloc(
-            sizeof( char ),
-            strlen( filter_tables ) + 1
+            sizeof( char * ),
+            num_tables
         );
 
         if( worker->config.filter_tables == NULL )
         {
-             return;
+            return;
         }
 
-        strncpy(
-            worker->config.filter_tables,
-            filter_tables,
-            strlen( filter_tables )
-        );
+        for( i = 0; i < num_tables; i++ )
+        {
+            worker->config.filter_tables[i] = calloc(
+                sizeof( char ),
+                strlen( filter_tables[i] ) + 1
+            );
 
-        worker->config.filter_tables[strlen(filter_tables) + 1] = '\0';
+            if( worker->config.filter_tables[i] == NULL )
+            {
+                return;
+            }
+
+            strncpy(
+                worker->config.filter_tables[i],
+                filter_tables[i],
+                strlen( filter_tables[i] )
+            );
+
+            worker->config.filter_tables[i][strlen(filter_tables[i]) + 1] = '\0';
+        }
     }
 
-    worker->config.wal_level            = wal_level;
+    worker->config.wal_level = wal_level;
 
     return;
 }
@@ -408,6 +427,7 @@ bool parent_init( int argc, char ** argv )
         NULL,
         MAIN_CHANNEL,
         NULL,
+        0,
         'F'
     );
 
@@ -679,46 +699,6 @@ void _set_process_title(
     memset( argv[0], '\0', size );
     strncpy( argv[0], title, size );
     return;
-}
-
-bool _wait_and_set_mutex( bool * mutex )
-{
-    time_t lock_acquire_start = 0;
-    double random_backoff     = 0.0;
-    double last_backoff       = 0.0;
-
-    lock_acquire_start = time( NULL );
-
-    last_backoff = 1.0;
-
-    while( *mutex == true || __test_and_set( mutex ) == true )
-    {
-        if( difftime( time( NULL ), lock_acquire_start ) > MAX_LOCK_WAIT )
-        {
-            _log(
-                LOG_LEVEL_WARNING,
-                "Max lock wait time %d exceeded",
-                MAX_LOCK_WAIT
-            );
-
-            return false;
-        }
-
-        sleep( last_backoff + random_backoff );
-        last_backoff   = last_backoff + random_backoff;
-        random_backoff = 2 * ( ( double ) rand() / ( double ) RAND_MAX );
-    }
-
-    *mutex = true;
-    return true;
-}
-
-bool __test_and_set( bool * mutex )
-{
-    bool initial = true;
-    initial = *mutex;
-    *mutex = true;
-    return initial;
 }
 
 void __sigterm( int sig )

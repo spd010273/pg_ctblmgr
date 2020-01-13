@@ -9,11 +9,11 @@ CREATE OR REPLACE FUNCTION @extschema@.fn_get_dependencies
 (
     in_maintenance_object INTEGER
 )
-RETURNS VARCHAR AS
+RETURNS VARCHAR[] AS
  $_$
 DECLARE
     my_query             TEXT;
-    my_result            VARCHAR;
+    my_result            VARCHAR[];
     my_schema            VARCHAR;
     my_table             VARCHAR;
     my_current_replident VARCHAR;
@@ -105,7 +105,7 @@ BEGIN
                table_name
           FROM tt_dependencies tt
                               ) LOOP
-        my_result := my_schema || '.' || my_table || ',';
+        my_result := my_result::VARCHAR[] || ( quote_ident( my_schema ) || '.' || quote_ident( my_table ) )::VARCHAR;
         -- Verify that the table has a unique constraint or
         -- some kind of replica identity set
          SELECT CASE WHEN c.relreplident = 'n' AND c_pk.oid IS NOT NULL
@@ -197,7 +197,6 @@ BEGIN
         END IF;
     END LOOP;
 
-    my_result := regexp_replace( my_result, ',$', '' );
     DROP VIEW tt_vw_column_check;
     RETURN my_result;
 END
