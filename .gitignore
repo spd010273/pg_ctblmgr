@@ -4,3 +4,4 @@
 *.so
 *.bc
 pg_ctblmgr
+server/sql/pg_ctblmgr*.sql
