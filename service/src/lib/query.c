@@ -1,6 +1,6 @@
 #include "query.h"
 
-PGresult * _execute_query( struct worker * me, char * query, char ** params, unsigned int param_count )
+PGresult * execute_query( struct worker * me, char * query, char ** params, unsigned int param_count )
 {
     PGresult *   result              = NULL;
     char *       last_sql_state      = NULL;
@@ -128,7 +128,7 @@ PGresult * _execute_query( struct worker * me, char * query, char ** params, uns
           )
         {
             _log(
-                LOG_LEVEL_ERROR,
+                LOG_LEVEL_DEBUG,
                 "Query '%s' failed: %s",
                 query,
                 PQerrorMessage( me->conn )
@@ -232,7 +232,7 @@ bool db_connect( struct worker * me )
     return false;
 }
 
-bool _begin_transaction( struct worker * me )
+bool begin_transaction( struct worker * me )
 {
     PGresult * result = NULL;
 
@@ -278,7 +278,7 @@ bool _begin_transaction( struct worker * me )
     return true;
 }
 
-bool _commit_transaction( struct worker * me )
+bool commit_transaction( struct worker * me )
 {
     PGresult * result = NULL;
 
@@ -329,7 +329,7 @@ bool _commit_transaction( struct worker * me )
     return true;
 }
 
-bool _rollback_transaction( struct worker * me )
+bool rollback_transaction( struct worker * me )
 {
     PGresult * result = NULL;
 

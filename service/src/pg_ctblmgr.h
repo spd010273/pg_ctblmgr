@@ -18,4 +18,5 @@ static void get_filter_tables_by_channel(
     char ***,
     unsigned int *
 );
+static void destroy_replication_slot( struct worker * );
 #endif // PG_CTBLMGR_H

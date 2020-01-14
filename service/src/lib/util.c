@@ -222,7 +222,7 @@ void _log( unsigned short log_level, char * message, ... )
 
     if( log_level == LOG_LEVEL_FATAL )
     {
-        exit( 1 );
+        __term();
     }
 
     return;
@@ -416,6 +416,12 @@ bool parent_init( int argc, char ** argv )
         {
             return false;
         }
+        
+        _log(
+            LOG_LEVEL_DEBUG,
+            "opened logfile '%s'",
+            LOG_FILE_NAME
+        );
     }
 
     parent = new_worker(
@@ -645,13 +651,14 @@ void * create_shared_memory( size_t size )
     protection = PROT_READ | PROT_WRITE;
     visibility = MAP_ANONYMOUS | MAP_SHARED;
 
-    ptr = mmap( NULL, size, protection, visibility, 0, 0 );
+    ptr = mmap( NULL, size, protection, visibility, -1, 0 );
 
     if( ptr == MAP_FAILED )
     {
         _log(
             LOG_LEVEL_ERROR,
-            "Failed to allocate shared memory: %s",
+            "Failed to allocate shared memory of size %lu: %s",
+            size,
             strerror( errno )
         );
         return NULL;
@@ -751,4 +758,77 @@ struct worker * get_worker_by_channel( char * channel )
     }
 
     return NULL;
+}
+
+struct worker * get_worker_by_pid( void )
+{
+    struct worker * worker = NULL;
+    unsigned int    i      = 0;
+    pid_t           pid    = 0;
+
+    pid = getpid();
+
+    if( parent != NULL && parent->pid == pid )
+    {
+        return parent;
+    }
+
+    for( i = 0; i < num_workers; i++ )
+    {
+        worker = workers[i];
+
+        if( worker == NULL )
+        {
+            continue;
+        }
+
+        if( worker->pid == pid )
+        {
+            return worker;
+        }
+    }
+
+    return NULL;
+}
+
+void __term( void )
+{
+    struct worker * me       = NULL;
+    struct stat     filestat = {0};
+    me = get_worker_by_pid();
+
+    if( me == NULL )
+        exit( 0 );
+
+    if( me->type == WORKER_TYPE_PARENT )
+    {
+        // Wait for children to shut down and purge WAL buffers if at
+        // all possible, then cleanup
+        if( me->pidfile != NULL && stat( me->pidfile, &filestat ) >= 0 )
+        {
+            if( remove( me->pidfile ) != 0 )
+            {
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "Failed to remove PID file '%s'",
+                    me->pidfile
+                );
+            }
+
+            me->pidfile = NULL;
+        }
+
+        if( log_file != NULL )
+        {
+            fclose( log_file );
+        }
+
+        log_file = NULL;
+    }
+    else
+    {
+
+    }
+
+    exit( 0 );
 }

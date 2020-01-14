@@ -45,6 +45,7 @@
 
 #define DEFAULT_BUFFER_SIZE 16
 #define EXTENSION_NAME "pg_ctblmgr"
+#define EXTENSION_SCHEMA "pgctblmgr"
 #define MAIN_CHANNEL "__pg_ctblmgr"
 #define PLUGIN_NAME "pg_ctblmgr"
 #define WORKER_TITLE_PARENT "pg_ctblmgr main process"
@@ -125,4 +126,5 @@ extern void * create_shared_memory( size_t );
 extern void _set_process_title( char **, int, char *, unsigned int * );
 
 extern struct worker * get_worker_by_channel( char * );
+extern struct worker * get_worker_by_pid( void );
 #endif // UTIL_H

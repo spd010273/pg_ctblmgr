@@ -30,18 +30,34 @@ int main( int argc, char ** argv )
         );
     }
 
-    setup_replication_slot( parent );
+    if( !setup_replication_slot( parent ) )
+    {
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to create replication slot"
+        );
+    }
 
     if( !initialize_buffer( parent ) )
     {
-        return 1;
+        destroy_replication_slot( parent );
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to initialize WAL buffers"
+        );
     }
 
     worker_count = start_workers();
 
     if( worker_count < 0 )
     {
-        return 1;
+        destroy_replication_slot( parent );
+        _log(
+            LOG_LEVEL_INFO,
+            "No tables to maintain, shutting down..."
+        );
+        // Maybe make a standby mode and listen on the maint channel
+        __term();
     }
 
     // Main loop
@@ -50,26 +66,27 @@ int main( int argc, char ** argv )
 
     }
 
-    return 0;
+    destroy_replication_slot( parent );
+    __term();
 }
 
 static int start_workers( void )
 {
-    PGresult *        result       = NULL;
-    struct worker **  temp         = NULL;
-    char *            channel      = NULL;
-    char **           filter       = NULL;
-    char *            wal_level    = NULL;
-    unsigned long int i            = 0;
-    unsigned long int worker_count = 0;
-    unsigned int      num_tables   = 0;
+    PGresult *       result       = NULL;
+    struct worker ** temp         = NULL;
+    char *           channel      = NULL;
+    char **          filter       = NULL;
+    char *           wal_level    = NULL;
+    unsigned int     i            = 0;
+    unsigned int     worker_count = 0;
+    unsigned int     num_tables   = 0;
 
     if( parent == NULL || parent->type != WORKER_TYPE_PARENT )
     {
         return -1;
     }
 
-    result = _execute_query( parent, ( char * ) get_worker_list, NULL, 0 );
+    result = execute_query( parent, ( char * ) get_worker_list, NULL, 0 );
 
     if( result == NULL || PQntuples( result ) <= 0 )
     {
@@ -82,10 +99,15 @@ static int start_workers( void )
     }
 
     worker_count = PQntuples( result );
+    _log(
+        LOG_LEVEL_DEBUG,
+        "Need to start %u worker(s)",
+        worker_count
+    );
 
     if( workers == NULL || num_workers == 0 || worker_count > num_workers )
     {
-        temp = create_shared_memory( sizeof( struct worker * ) * num_workers );
+        temp = create_shared_memory( sizeof( struct worker * ) * worker_count );
 
         if( temp == NULL )
         {
@@ -160,14 +182,16 @@ static int start_workers( void )
 
 static bool extension_installed( void )
 {
-    PGresult * result = NULL;
+    PGresult * result    = NULL;
+    char *     params[1] = {NULL};
 
     if( parent == NULL )
     {
         return false;
     }
 
-    result = _execute_query( parent, ( char * ) extension_check_query, NULL, 0 );
+    params[0] = EXTENSION_NAME;
+    result = execute_query( parent, ( char * ) extension_check_query, params, 1 );
 
     if( result == NULL )
     {
@@ -209,7 +233,7 @@ static void worker_entrypoint( void * data )
         return;
     }
 
-    result = _execute_query(
+    result = execute_query(
         me,
         "SELECT 1",
         NULL,
@@ -252,7 +276,7 @@ static bool setup_replication_slot( struct worker * me )
 
     params[0] = MAIN_CHANNEL;
 
-    result = _execute_query(
+    result = execute_query(
         me,
         ( char * ) replication_check,
         params,
@@ -267,7 +291,7 @@ static bool setup_replication_slot( struct worker * me )
 
     PQclear( result );
 
-    result = _execute_query(
+    result = execute_query(
         me,
         ( char * ) replication_slot_create,
         NULL,
@@ -343,7 +367,7 @@ static void get_filter_tables_by_channel(
 
     if( channel == NULL )
     {
-        filter_result = _execute_query(
+        filter_result = execute_query(
             me,
             ( char * ) get_distinct_filter_tables,
             NULL,
@@ -354,7 +378,7 @@ static void get_filter_tables_by_channel(
     {
         params[0] = channel;
 
-        filter_result = _execute_query(
+        filter_result = execute_query(
             me,
             ( char * ) get_slot_filter_tables,
             params,
@@ -408,5 +432,31 @@ static void get_filter_tables_by_channel(
     }
 
     PQclear( filter_result );
+    return;
+}
+
+static void destroy_replication_slot( struct worker * me )
+{
+    PGresult * result = NULL;
+
+    if( me == NULL || me->type != WORKER_TYPE_PARENT )
+        return;
+
+    result = execute_query(
+        me,
+        ( char * ) replication_slot_destroy,
+        NULL,
+        0
+    );
+
+    if( result == NULL || me->conn == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to drop replication slot, please remove manually"
+        );
+    }
+
+    PQclear( result );
     return;
 }

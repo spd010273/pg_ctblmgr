@@ -19,13 +19,13 @@ const char * replication_slot_destroy = "\
 
 const char * get_distinct_filter_tables = "\
     SELECT DISTINCT x AS filter_table \
-      FROM " EXTENSION_NAME ".__pgctblmgr_repl_slot rs \
+      FROM " EXTENSION_SCHEMA ".__pgctblmgr_repl_slot rs \
 INNER JOIN unnest( rs.filter ) x \
         ON TRUE ";
 
 const char * get_slot_filter_tables = "\
     SELECT DISTINCT x AS filter_table \
-      FROM " EXTENSION_NAME ".__pgctblmgr_repl_slot rs \
+      FROM " EXTENSION_SCHEMA ".__pgctblmgr_repl_slot rs \
 INNER JOIN unnest( rs.filter ) x \
         ON TRUE \
      WHERE rs.maintenance_channel = $1";
@@ -66,10 +66,10 @@ const char * get_worker_list = "\
     SELECT rs.maintenance_channel, \
            rs.filter, \
            mg.wal_level \
-      FROM " EXTENSION_NAME ".__pgctblmgr_repl_slot rs \
-INNER JOIN " EXTENSION_NAME ".tb_maintenance_object mo \
+      FROM " EXTENSION_SCHEMA ".__pgctblmgr_repl_slot rs \
+INNER JOIN " EXTENSION_SCHEMA ".tb_maintenance_object mo \
         ON mo.maintenance_object = rs.id \
-INNER JOIN " EXTENSION_NAME ".tb_maintenance_group mg \
+INNER JOIN " EXTENSION_SCHEMA ".tb_maintenance_group mg \
         ON mg.maintenance_group = mo.maintenance_group";
 
 const char * extension_check_query = "\

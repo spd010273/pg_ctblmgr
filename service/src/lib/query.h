@@ -14,12 +14,12 @@
 #define SQL_STATE_CONNECTION_DOES_NOT_EXIST "08003"
 #define SQL_STATE_CONNECTION_EXCEPTION "08000"
 
-extern PGresult * _execute_query( struct worker *, char *, char **, unsigned int );
+extern PGresult * execute_query( struct worker *, char *, char **, unsigned int );
 extern bool db_connect( struct worker * );
 
-extern bool _begin_transaction( struct worker * );
-extern bool _commit_transaction( struct worker * );
-extern bool _rollback_transaction( struct worker * );
+extern bool begin_transaction( struct worker * );
+extern bool commit_transaction( struct worker * );
+extern bool rollback_transaction( struct worker * );
 
 extern char * get_column_value( int, PGresult *, char * );
 extern bool is_column_null( int, PGresult *, char * );
