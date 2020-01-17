@@ -47,7 +47,7 @@ void buffer_populate_trie( struct buffer ** b, char ** qual_name, unsigned int n
             }
         }
     }
-    
+
     __C_MUTEX( (&((*b)->in_use)) );
     return;
 }

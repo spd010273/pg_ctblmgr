@@ -5,16 +5,14 @@ static struct trie * _new_trie_node( void );
 static bool _trie_string_safety_check( char * );
 static void _trie_free( struct trie * );
 
+/*
+ * List of valid characters for a trie span, listed in order
+ * of their appearance on the ASCII table
+ */
 static const char _trie_search_chars[TRIE_SIZE] = "\
- !\"#$%&'()\
-*+,-./0123\
-456789:;<=\
->?@ABCDEFG\
-HIJKLMNOPQ\
-RSTUVWXYZ[\
-\\]^_`abcde\
-fghijklmno\
-pqrstuvwxy\
+ !\"#$%&'()*+,-./0123456789:;<=\
+>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\
+\\]^_`abcdefghijklmnopqrstuvwxy\
 z{|}~'";
 
 bool trie_insert( struct trie ** head, char * str, void * data )

@@ -400,6 +400,25 @@ void worker_set_config(
 
 bool parent_init( int argc, char ** argv )
 {
+    log_file = fopen( LOG_FILE_NAME, "a" );
+
+    if( log_file == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to open '%s': %s",
+            LOG_FILE_NAME,
+            strerror( errno )
+        );
+        return false;
+    }
+
+    _log(
+        LOG_LEVEL_DEBUG,
+        "Opened logfile '%s'",
+        LOG_FILE_NAME
+    );
+
     if( daemonize )
     {
         if( daemon( 1, 1 ) != 0 )
@@ -410,17 +429,9 @@ bool parent_init( int argc, char ** argv )
             );
         }
 
-        log_file = fopen( LOG_FILE_NAME, "a" );
-
-        if( log_file == NULL )
-        {
-            return false;
-        }
-        
         _log(
             LOG_LEVEL_DEBUG,
-            "opened logfile '%s'",
-            LOG_FILE_NAME
+            "Daemonized"
         );
     }
 
@@ -710,12 +721,12 @@ void _set_process_title(
 
 void __sigterm( int sig )
 {
-    exit(1);
+    __term();
 }
 
 void __sigint( int sig )
 {
-    exit(1);
+    __term();
 }
 
 void __sighup( int sig )

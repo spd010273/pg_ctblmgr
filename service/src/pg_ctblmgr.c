@@ -191,7 +191,12 @@ static bool extension_installed( void )
     }
 
     params[0] = EXTENSION_NAME;
-    result = execute_query( parent, ( char * ) extension_check_query, params, 1 );
+    result = execute_query(
+        parent,
+        ( char * ) extension_check_query,
+        params,
+        1
+    );
 
     if( result == NULL )
     {
@@ -218,6 +223,12 @@ static void worker_entrypoint( void * data )
     }
 
     me = ( struct worker * ) data;
+
+    _log(
+        LOG_LEVEL_DEBUG,
+        "Worker %u at entrypoint",
+        ( unsigned int ) getpid()
+    );
 
     if( me->pid != getpid() )
     {
