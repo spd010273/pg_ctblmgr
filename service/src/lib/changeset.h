@@ -4,22 +4,30 @@
 #define JSON_TOKENS 16
 
 #include <stdlib.h>
+#include <time.h>
+#include <stdbool.h>
+#include <string.h>
+#include <errno.h>
+
+#include "util.h"
 #include "jsmn/jsmn.h"
 
-enum pg_ctblmgr_wal_level {
+#define MIN(x,y) (x>y?y:x)
+
+typedef enum {
     PGC_WAL_FULL,
     PGC_WAL_REDUCED,
     PGC_WAL_MINIMAL
-};
+} pg_ctblmgr_wal_level;
 
-enum pg_ctblmgr_dml_type {
+typedef enum {
     PGC_DML_UNINITIALIZED,
     PGC_DML_INSERT,
     PGC_DML_UPDATE,
     PGC_DML_DELETE,
     PGC_DML_TRUNCATE,
     PGC_DML_TX_BARRIER
-};
+} pg_ctblmgr_dml_type;
 
 struct changeset {
     char **             keys;
@@ -36,8 +44,6 @@ struct changeset {
     time_t              timestamp;
 };
 
-struct changeset * json_to_changeset( char * ); 
+struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level ); 
 
-static struct changeset * _new_changeset( void );
-static inline char * _json_token_to_string( char *, jsmntok_t *, jsmntype_t );
 #endif // CHANGESET_H

@@ -1,6 +1,12 @@
 #include "changeset.h"
 
-struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_level )
+static struct changeset * _new_changeset( void );
+static inline char * _json_token_to_string( char *, jsmntok_t *, jsmntype_t );
+
+struct changeset * json_to_changeset(
+    char *               json,
+    pg_ctblmgr_wal_level wal_level
+)
 {
     jsmntok_t *        type_val       = NULL;
     jsmntok_t *        xid_val        = NULL;
@@ -12,8 +18,6 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
     jsmntok_t *        key            = NULL;
     jsmntok_t *        val            = NULL;
     jsmntok_t *        tokens         = NULL;
-    jsmntok_t *        new_data_val   = NULL;
-    jsmntok_t *        old_data_val   = NULL;
     char ***           target_arr     = NULL;
     char *             key_string     = NULL;
     struct changeset * cs             = NULL;
@@ -25,14 +29,13 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
     unsigned int       start_index    = 0;
     unsigned int       new_data_index = 0;
     unsigned int       old_data_index = 0;
-    unsigned int       new_old_offset = 0;
     unsigned int       n              = 0;
     unsigned int       i              = 0;
     unsigned int       j              = 0;
     unsigned int       token_count    = 0;
+    unsigned int       key_len        = 0;
     int                milliseconds   = 0;
     int                tz_offset      = 0;
-    bool               new_lower      = false;
 
     n = JSON_TOKENS;
 
@@ -73,7 +76,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
         return NULL;
     }
 
-    if( result = JSMN_ERROR_PART )
+    if( result == JSMN_ERROR_PART )
     {
         _log(
             LOG_LEVEL_ERROR,
@@ -83,7 +86,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
         return NULL;
     }
 
-    token_count = jsmn_rc;
+    token_count = result;
 
     // Sanity check the # of tokens returned vs allocated memory
     if( token_count > n )
@@ -127,102 +130,113 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
         }
 
         strncpy( key_string, json + key->start, key->size );
-        key_string[key->size + 1] = '\0'; 
+        key_string[key->size + 1] = '\0';
         // Examine string from key->start to key->end (of size key->size)
         // and, given the wal-level, check against our expected keys and fill
         // in the changeset struct
+        key_len = strlen( key_string );
         switch( wal_level )
         {
             case PGC_WAL_FULL:
-                switch( key_string )
+                if( strncmp( key_string, "type", MIN( key_len, 4 ) ) == 0 )
                 {
-                    case "type":
-                        type_val = &(tokens[i+1]);
-                        break;
-                    case "xid":
-                        xid_val = &(tokens[i+1]);
-                        break;
-                    case "timestamp":
-                        time_val = &(tokens[i+1]);
-                        break;
-                    case "schema_name":
-                        schema_val = &(tokens[i+1]);
-                        break;
-                    case "table_name":
-                        table_val = &(tokens[i+1]);
-                        break;
-                    case "key":
-                        keys_val = &(tokens[i+1]);
-                        keys_index = i + 1;
-                        break;
-                    case "data":
-                        data_val = &(tokens[i+1]);
-                        data_index = i + 1;
-                        break;
-                    default:
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "unexpected key %s is JSON decode of FULL WAL",
-                            key_string
-                        );
-                        break;
+                    type_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "Xid", MIN( key_len, 3 ) ) == 0 )
+                {
+                    xid_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "timestamp", MIN( key_len, 9 ) ) == 0 )
+                {
+                    time_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "schema_name", MIN( key_len, 11 ) ) == 0 )
+                {
+                    schema_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "table_name", MIN( key_len, 10 ) ) == 0 )
+                {
+                    table_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
+                {
+                    keys_val = &(tokens[i+1]);
+                    keys_index = i + 1;
+                }
+                else if( strncmp( key_string, "data", MIN( key_len, 4 ) ) == 0 )
+                {
+                    data_val = &(tokens[i+1]);
+                    data_index = i + 1;
+                }
+                else
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "unexpected key %s is JSON decode of FULL WAL",
+                        key_string
+                    );
                 }
                 break;
             case PGC_WAL_REDUCED:
-                switch( key_string )
+                if( strncmp( key_string, "type", MIN( key_len, 4 ) ) == 0 )
                 {
-                    case "type":
-                        type_val = &(tokens[i+1]);
-                        break;
-                    case "xid":
-                        xid_val = &(tokens[i+1]);
-                        break;
-                    case "schema_name":
-                        schema_val = &(tokens[i+1]);
-                        break;
-                    case "table_name":
-                        table_val = &(tokens[i+1]);
-                        break;
-                    case "key":
-                        keys_val = &(tokens[i+1]);
-                        keys_index = i + 1;
-                        break;
-                    default:
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "unexpected key %s in JSON decode of REDUCED WAL",
-                            key_string
-                        );
-                        break;
+                    type_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "xid", MIN( key_len, 3 ) ) == 0 )
+                {
+                    xid_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "schema_name", MIN( key_len, 11 ) ) == 0 )
+                {
+                    schema_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "table_name", MIN( key_len, 10 ) ) == 0 )
+                {
+                    table_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
+                {
+                    keys_val = &(tokens[i+1]);
+                    keys_index = i + 1;
+                }
+                else
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "unexpected key %s in JSON decode of REDUCED WAL",
+                        key_string
+                    );
                 }
                 break;
             case PGC_WAL_MINIMAL:
-                switch( key_string )
+                if( strncmp( key_string, "d", MIN( key_len, 1 ) ) == 0 )
                 {
-                    case "d":
-                        type_val = &(tokens[i+1]);
-                        break;
-                    case "x":
-                        xid_val = &(tokens[i+1]);
-                        break;
-                    case "s":
-                        schema_val = &(tokens[i+1]);
-                        break;
-                    case "t":
-                        table_val = &(tokens[i+1]);
-                        break;
-                    case "key":
-                        keys_val = &(tokens[i+1]);
-                        keys_index = i + 1;
-                        break;
-                    default:
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "unexpected key %s in JSON decode of MINIMAL WAL",
-                            key_string
-                        );
-                        break;
-
+                    type_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "x", MIN( key_len, 1 ) ) == 0 )
+                {
+                    xid_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "s", MIN( key_len, 1 ) ) == 0 )
+                {
+                    schema_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "t", MIN( key_len, 1 ) ) == 0 )
+                {
+                    table_val = &(tokens[i+1]);
+                }
+                else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
+                {
+                    keys_val = &(tokens[i+1]);
+                    keys_index = i + 1;
+                }
+                else
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "unexpected key %s in JSON decode of MINIMAL WAL",
+                        key_string
+                    );
                 }
                 break;
             default:
@@ -246,27 +260,27 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
             return NULL;
         }
 
-        switch( key_string )
+        key_len = strlen( key_string );
+
+        if( strncmp( key_string, "I", 1 ) == 0 )
         {
-            case "INSERT":
-            case "I":
-                cs->type = PGC_DML_INSERT;
-                break;
-            case "DELETE":
-            case "D"
-                cs->type = PGC_DML_DELETE;
-                break;
-            case "UPDATE":
-            case "U":
-                cs->type = PGC_DML_UPDATE;
-                break;
-            default:
-                _log(
-                    LOG_LEVEL_ERROR,
-                    "Unknown DML type %s",
-                    key_string
-                );
-                break;
+            cs->type = PGC_DML_INSERT;
+        }
+        else if( strncmp( key_string, "D", 1 ) == 0 )
+        {
+            cs->type = PGC_DML_DELETE;
+        }
+        else if( strncmp( key_string, "U", 1 ) == 0 )
+        {
+            cs->type = PGC_DML_UPDATE;
+        }
+        else
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Unknown DML type %s",
+                key_string
+            );
         }
 
         free( key_string );
@@ -275,19 +289,25 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
     if( xid_val != NULL )
     {
         key_string = _json_token_to_string( json, xid_val, JSMN_PRIMITIVE );
-        
+
         if( key_string == NULL )
         {
             free( tokens );
             return NULL;
         }
-
+        errno = 0;
         cs->xid = strtoul(
             key_string,
-            &(key_string[strlen(key_string) + 1]),
+            NULL,
             10
         );
-        free( key_string ); 
+
+        if( errno != 0 )
+        {
+            // Oopsie poopsie!
+        }
+
+        free( key_string );
     }
 
     if( time_val != NULL )
@@ -303,7 +323,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
         if(
             sscanf(
                 key_string,
-                "%4d-%2d-%2d %2d:%2d:%2d.%d-%2d", 
+                "%4d-%2d-%2d %2d:%2d:%2d.%d-%2d",
                 &(breakout.tm_year),
                 &(breakout.tm_mon),
                 &(breakout.tm_mday),
@@ -417,13 +437,13 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
                 free( tokens );
                 return NULL;
             }
-            
+
             if( cs->num_keys == 0 )
             {
                 cs->keys = ( char ** ) malloc(
                     sizeof( char * )
-                ); 
-                
+                );
+
                 cs->vals = ( char ** ) malloc(
                     sizeof( char * )
                 );
@@ -492,11 +512,11 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
             );
 
             if(
-                    cs->keys[c->num_keys] == NULL
-                 || cs->vals[c->num_keys] == NULL
+                    cs->keys[cs->num_keys] == NULL
+                 || cs->vals[cs->num_keys] == NULL
               )
             {
-                if( cs->keys[c->num_keys] != NULL )
+                if( cs->keys[cs->num_keys] != NULL )
                 {
                     for( j = 0; j < cs->num_keys; j++ )
                     {
@@ -508,7 +528,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
                     return NULL;
                 }
 
-                if( cs->vals[c->num_keys] != NULL )
+                if( cs->vals[cs->num_keys] != NULL )
                 {
                     for( j = 0; j < cs->num_keys; j++ )
                     {
@@ -562,7 +582,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
                 }
 
                 old_data_index = data_index + 2;
-                old_data_val   = &(tokens[old_data_index]);
+                //old_data_val   = &(tokens[old_data_index]);
                 target_arr     = &(cs->old_vals);
                 start_index    = old_data_index;
             }
@@ -576,9 +596,9 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
                 }
 
                 new_data_index = data_index + 2;
-                new_data_val   = &(tokens[new_data_index]);
+                //new_data_val   = &(tokens[new_data_index]);
                 target_arr     = &(cs->new_vals);
-                start_idnex    = new_data_index;
+                start_index    = new_data_index;
             }
             else
             {
@@ -590,7 +610,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
 
             free( key_string );
 
-            for( j = 0; j < num_tokens; j+= 2 )
+            for( j = 0; j < token_count; j+= 2 )
             {
                 if( cs->num_columns == 0 )
                 {
@@ -645,7 +665,7 @@ struct changeset * json_to_changeset( char * json, pg_ctblmgr_wal_level wal_leve
                 {
                     cs->columns[cs->num_columns] = ( char * ) malloc(
                         sizeof( char )
-                      * ( (&(tokens[start_index + j])->size) + 1 )
+                      * ( (&(tokens[start_index + j]))->size + 1 )
                     );
                 }
 
