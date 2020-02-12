@@ -13,14 +13,14 @@ STRICTURES		= -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-stron
 				  -fno-strict-aliasing -fwrapv -fexcess-precision=standard
 ARCHFLAGS		= -m64 -mtune=generic
 CFLAGS			= $(INCLUDE) $(LIBS) $(FLAGS) $(STRICTURES) $(ARCHFLAGS)
-SRCS			= $(wildcard src/*.c) $(wildcard ../src/lib/*.c)
-OBJS			= $(SRCS:.c=.o)
+T_CS_SRCS		= ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_changeset.c
+T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
 LDFLAGS			= -lm -lpq
 
-t_changeset: $(OBJS)
+t_changeset: $(T_CS_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 .PHONY: clean
 clean:
-	rm -f $(OBJS)
+	rm -f $(T_CS_OBJS)
 	rm -f t_changeset

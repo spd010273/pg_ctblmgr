@@ -69,6 +69,7 @@ int main( void )
     struct changeset *   received  = NULL;
     char *               input     = NULL;
     unsigned int         i         = 0;
+    unsigned int         failed    = 0;
     pg_ctblmgr_wal_level wal_level = 0;
 
     for( i = 0; i < NUM_TESTS; i++ )
@@ -81,11 +82,16 @@ int main( void )
         received = json_to_changeset( input, wal_level );
         if( !check_expects( expects, received ) )
         {
-            printf( "Test %u failed", i );
+            printf( "Test %u failed\n", i );
+            failed++;
         }
     }
 
-    printf( "All tests passed" );
+    if( failed == 0 )
+    {
+        printf( "All tests passed\n" );
+    }
+
     return 0;
 }
 
@@ -164,10 +170,10 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
     if( ex == NULL || cs == NULL )
     {
         if( ex == NULL )
-            printf( "Expected NULL changeset" );
+            printf( "Expected NULL changeset\n" );
 
         if( cs == NULL )
-            printf( "Received NULL changeset" );
+            printf( "Received NULL changeset\n" );
 
         return false;
     }

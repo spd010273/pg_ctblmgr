@@ -10,6 +10,7 @@
 #include <errno.h>
 
 #include "util.h"
+#define JSMN_HEADER
 #include "jsmn/jsmn.h"
 
 #define MIN(x,y) (x>y?y:x)
