@@ -2,6 +2,7 @@
 
 static struct changeset * _new_changeset( void );
 static inline char * _json_token_to_string( char *, jsmntok_t *, jsmntype_t );
+static void _jsmn_dump( jsmntok_t * );
 
 struct changeset * json_to_changeset(
     char *               json,
@@ -34,8 +35,10 @@ struct changeset * json_to_changeset(
     unsigned int       j              = 0;
     unsigned int       token_count    = 0;
     unsigned int       key_len        = 0;
+    unsigned int       size           = 0;
     int                milliseconds   = 0;
     int                tz_offset      = 0;
+    bool               done           = false; // Initial parse oneshot
 
     n = JSON_TOKENS;
 
@@ -104,16 +107,19 @@ struct changeset * json_to_changeset(
 
     cs = _new_changeset();
 
-    for( i = 1; i < token_count; i += 2 )
+    for( i = 1; i < token_count && !done; i += 2 )
     {
         key = &(tokens[i]);
 
-        if( key->type != JSMN_STRING || key->type != JSMN_PRIMITIVE )
+        if( key->type != JSMN_STRING && key->type != JSMN_PRIMITIVE )
         {
             _log(
                 LOG_LEVEL_ERROR,
-                "Expected key of type primitive or string"
+                "Expected key of type primitive or string at token "\
+                "index %u, got:",
+                i
             );
+            _jsmn_dump( key );
             free( tokens );
             return NULL;
         }
@@ -170,11 +176,25 @@ struct changeset * json_to_changeset(
                 }
                 else
                 {
-                    _log(
-                        LOG_LEVEL_ERROR,
-                        "unexpected key %s is JSON decode of FULL WAL",
-                        key_string
-                    );
+                    if(
+                            type_val != NULL && xid_val != NULL
+                         && time_val != NULL && schema_val != NULL
+                         && table_val != NULL && keys_val != NULL
+                         && data_val != NULL
+                      )
+                    {
+                        done = true;
+                    }
+                    else
+                    {
+                        _log(
+                            LOG_LEVEL_ERROR,
+                            "unexpected key %s is JSON decode of FULL WAL" \
+                            " at index %u",
+                            key_string,
+                            i
+                        );
+                    }
                 }
                 break;
             case PGC_WAL_REDUCED:
@@ -201,11 +221,24 @@ struct changeset * json_to_changeset(
                 }
                 else
                 {
-                    _log(
-                        LOG_LEVEL_ERROR,
-                        "unexpected key %s in JSON decode of REDUCED WAL",
-                        key_string
-                    );
+                    if(
+                          type_val != NULL && xid_val != NULL
+                       && schema_val != NULL && table_val != NULL
+                       && keys_val != NULL
+                      )
+                    {
+                        done = true;
+                    }
+                    else
+                    {
+                        _log(
+                            LOG_LEVEL_ERROR,
+                            "unexpected key %s in JSON decode of REDUCED WAL" \
+                            " at index %u",
+                            key_string,
+                            i
+                        );
+                    }
                 }
                 break;
             case PGC_WAL_MINIMAL:
@@ -232,11 +265,24 @@ struct changeset * json_to_changeset(
                 }
                 else
                 {
-                    _log(
-                        LOG_LEVEL_ERROR,
-                        "unexpected key %s in JSON decode of MINIMAL WAL",
-                        key_string
-                    );
+                    if(
+                            type_val != NULL && xid_val != NULL
+                         && schema_val != NULL && table_val != NULL
+                         && keys_val != NULL
+                      )
+                    {
+                        done = true;
+                    }
+                    else
+                    {
+                        _log(
+                            LOG_LEVEL_ERROR,
+                            "unexpected key %s in JSON decode of MINIMAL WAL" \
+                            " at index %u",
+                            key_string,
+                            i
+                        );
+                    }
                 }
                 break;
             default:
@@ -257,6 +303,10 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to parse DML type from json token"
+            );
             return NULL;
         }
 
@@ -278,7 +328,8 @@ struct changeset * json_to_changeset(
         {
             _log(
                 LOG_LEVEL_ERROR,
-                "Unknown DML type %s",
+                "Unknown DML type '%s' (%p)",
+                key_string,
                 key_string
             );
         }
@@ -292,7 +343,12 @@ struct changeset * json_to_changeset(
 
         if( key_string == NULL )
         {
+            _jsmn_dump( xid_val );
             free( tokens );
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to parse XID value from json token"
+            );
             return NULL;
         }
         errno = 0;
@@ -317,6 +373,10 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to parse timestamp value from json token"
+            );
             return NULL;
         }
 
@@ -372,6 +432,10 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to parse schema from json token"
+            );
             return NULL;
         }
 
@@ -385,6 +449,10 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to parse table from json token"
+            );
             return NULL;
         }
 
@@ -461,6 +529,10 @@ struct changeset * json_to_changeset(
                     }
 
                     free( tokens );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to perform initial alloc for changeset kv"
+                    );
                     return NULL;
                 }
             }
@@ -499,6 +571,10 @@ struct changeset * json_to_changeset(
                     }
 
                     free( tokens );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to perform incremental alloc for cs kv"
+                    );
                     return NULL;
                 }
             }
@@ -525,6 +601,10 @@ struct changeset * json_to_changeset(
 
                     free( cs->keys );
                     free( tokens );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to allocate key array member"
+                    );
                     return NULL;
                 }
 
@@ -537,15 +617,31 @@ struct changeset * json_to_changeset(
 
                     free( cs->vals );
                     free( tokens );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to allocate value array member"
+                    );
                     return NULL;
                 }
             }
 
-            strncpy( cs->keys[cs->num_keys], json + key->start, key->size );
-            cs->keys[cs->num_keys][key->size + 1] = '\0';
+            size = key->end - key->start;
+            strncpy(
+                cs->keys[cs->num_keys],
+                json + key->start,
+                size
+            );
 
-            strncpy( cs->vals[cs->num_keys], json + val->start, val->size );
-            cs->vals[cs->num_keys][val->size + 1] = '\0';
+            cs->keys[cs->num_keys][size + 1] = '\0';
+
+            size = val->end - val->start;
+            strncpy(
+                cs->vals[cs->num_keys],
+                json + val->start,
+                size
+            );
+
+            cs->vals[cs->num_keys][size + 1] = '\0';
             cs->num_keys++;
 
             if( val->end >= keys_val->end )
@@ -569,6 +665,11 @@ struct changeset * json_to_changeset(
             if( key_string == NULL )
             {
                 free( tokens );
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "get key string from jsmn token at %u",
+                    data_index + 1
+                );
                 return NULL;
             }
 
@@ -578,6 +679,10 @@ struct changeset * json_to_changeset(
                 {
                     free( tokens );
                     free( key_string );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Expected JSMN_OBJECT in data value (old)"
+                    );
                     return NULL;
                 }
 
@@ -592,6 +697,10 @@ struct changeset * json_to_changeset(
                 {
                     free( tokens );
                     free( key_string );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Expected JSMN_OBJECT in data balue (new)"
+                    );
                     return NULL;
                 }
 
@@ -605,6 +714,10 @@ struct changeset * json_to_changeset(
                 //oopsie poopsie
                 free( key_string );
                 free( tokens );
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "Did not find old or new record in data structure"
+                );
                 return NULL;
             }
 
@@ -658,6 +771,10 @@ struct changeset * json_to_changeset(
                     }
 
                     free( tokens );
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "target array and /or columns alloc failed"
+                    );
                     return NULL;
                 }
 
@@ -665,13 +782,21 @@ struct changeset * json_to_changeset(
                 {
                     cs->columns[cs->num_columns] = ( char * ) malloc(
                         sizeof( char )
-                      * ( (&(tokens[start_index + j]))->size + 1 )
+                      * (
+                            (&(tokens[start_index + j]))->end
+                          - (&(tokens[start_index + j]))->start
+                          + 1
+                        )
                     );
                 }
 
                 (*target_arr)[cs->num_columns] = ( char * ) malloc(
                     sizeof( char )
-                  * ( (&(tokens[start_index + j + 1]))->size + 1)
+                  * (
+                        (&(tokens[start_index + j + 1]))->end
+                      - (&(tokens[start_index + j + 1]))->start
+                      + 1
+                    )
                 );
 
                 if(
@@ -705,7 +830,10 @@ struct changeset * json_to_changeset(
                             if( (*target_arr)[n] != NULL )
                                 free( (*target_arr)[n] );
 
-                            if( n < cs->num_columns - 1 && cs->columns != NULL )
+                            if(
+                                    n < cs->num_columns - 1
+                                 && cs->columns != NULL
+                              )
                             {
                                 if( cs->columns[n] != NULL )
                                     free( cs->columns[n] );
@@ -718,21 +846,25 @@ struct changeset * json_to_changeset(
                     }
                 }
 
+                size = (&(tokens[start_index + j]))->end
+                     - (&(tokens[start_index+j]))->start;
                 strncpy(
                     cs->columns[cs->num_columns],
                     json + (&(tokens[start_index + j]))->start,
-                    (&(tokens[start_index + j]))->size
+                    size
                 );
 
-                cs->columns[cs->num_columns][(&(tokens[start_index + j]))->size + 1] = '\0';
-
+                cs->columns[cs->num_columns][size + 1] = '\0';
+                
+                size = (&(tokens[start_index + j + 1]))->end
+                     - (&(tokens[start_index + j + 1]))->start;
                 strncpy(
                     (*target_arr)[cs->num_columns],
                     json + (&(tokens[start_index + j + 1]))->start,
-                    (&(tokens[start_index + j + 1]))->size
+                    size
                 );
 
-                (*target_arr)[cs->num_columns][(&(tokens[start_index + j + 1]))->size + 1] = '\0';
+                (*target_arr)[cs->num_columns][size + 1] = '\0';
                 cs->num_columns++;
 
                 if( start_index + j + 1 > (&(tokens[data_index]))->end )
@@ -791,13 +923,35 @@ static inline char * _json_token_to_string(
 
     result = ( char * ) calloc(
         sizeof( char ),
-        token->size + 1
+        ( token->end - token->start ) + 1
     );
 
     if( result == NULL )
         return NULL;
 
-    strncpy( result, json + token->start, token->size );
-    result[token->size] = '\0';
+    strncpy( result, json + token->start, token->end - token->start );
+    result[token->end - token->start] = '\0';
     return result;
+}
+
+static void _jsmn_dump( jsmntok_t * token )
+{
+    if( token == NULL )
+        return;
+
+    _log(
+        LOG_LEVEL_DEBUG,
+        "Token %p\n type: %s\n start: %d\n end: %d\n size: %d\n",
+        token,
+        token->type == JSMN_UNDEFINED ? "UNDEFINED" :
+        token->type == JSMN_OBJECT ? "OBJECT" :
+        token->type == JSMN_ARRAY ? "ARRAY" :
+        token->type == JSMN_STRING ? "STRING" :
+        token->type == JSMN_PRIMITIVE ? "PRIMITIVE" : "N/A",
+        token->start,
+        token->end,
+        token->size
+    );
+
+    return;
 }

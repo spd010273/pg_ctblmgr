@@ -23,4 +23,4 @@ t_changeset: $(T_CS_OBJS)
 .PHONY: clean
 clean:
 	rm -f $(T_CS_OBJS)
-	rm -f t_changeset
+	rm -f t_*

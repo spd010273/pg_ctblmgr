@@ -52,9 +52,48 @@ const char * expect_old[NUM_TESTS][3] = {
 };
 
 const struct changeset changeset_expects[NUM_TESTS] = {
-    { ( char ** ) &(expect_keys[0]), ( char ** ) &(expect_vals[0]), 1, ( char ** ) &(expect_columns[0]), ( char ** ) &(expect_old[0]), ( char ** ) &(expect_new[0]), 0, "public", "tb_a", 4408, PGC_DML_INSERT, 0 },
-    { ( char ** ) &(expect_keys[1]), ( char ** ) &(expect_vals[1]), 1, ( char ** ) &(expect_columns[1]), ( char ** ) &(expect_old[1]), ( char ** ) &(expect_new[1]), 3, "public", "tb_a", 4408, PGC_DML_INSERT, 1579120198 },
-    { ( char ** ) &(expect_keys[2]), ( char ** ) &(expect_vals[2]), 1, ( char ** ) &(expect_columns[2]), ( char ** ) &(expect_old[2]), ( char ** ) &(expect_new[2]), 0, "public", "tb_a", 4408, PGC_DML_INSERT, 0 }
+    {
+        ( char ** ) &(expect_keys[0]),      // keys
+        ( char ** ) &(expect_vals[0]),      // vals
+        1,                                  // num_keys
+        ( char ** ) &(expect_columns[0]),   // columns
+        ( char ** ) &(expect_new[0]),       // new_vals
+        ( char ** ) &(expect_old[0]),       // old_vals
+        0,                                  // num_columns
+        "public",                           // schema_name
+        "tb_a",                             // table_name
+        4408,                               // xid
+        PGC_DML_INSERT,                     // type
+        0                                   // timestamp
+    },
+    {
+        ( char ** ) &(expect_keys[1]),
+        ( char ** ) &(expect_vals[1]),
+        1,
+        ( char ** ) &(expect_columns[1]),
+        ( char ** ) &(expect_new[1]),
+        ( char ** ) &(expect_old[1]),
+        3,
+        "public",
+        "tb_a",
+        4408,
+        PGC_DML_INSERT,
+        1579120198
+    },
+    {
+        ( char ** ) &(expect_keys[2]),
+        ( char ** ) &(expect_vals[2]),
+        1,
+        ( char ** ) &(expect_columns[2]),
+        ( char ** ) &(expect_new[2]),
+        ( char ** ) &(expect_old[2]),
+        0,
+        "public",
+        "tb_a",
+        4408,
+        PGC_DML_INSERT,
+        0
+    }
 };
 
 /* End test definitions */
