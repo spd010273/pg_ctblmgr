@@ -258,6 +258,14 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
                 i,
                 cs->keys[i]
             );
+            if( len_e != len_c )
+            {
+                printf(
+                    "(Keys lengths mismatched, E: %u C: %u)",
+                    len_e,
+                    len_c
+                );
+            }
             return false;
         }
     

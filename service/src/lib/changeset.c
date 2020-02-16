@@ -107,6 +107,15 @@ struct changeset * json_to_changeset(
 
     cs = _new_changeset();
 
+    if( cs == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to allocate changeset"
+        );
+        return NULL;
+    }
+
     for( i = 1; i < token_count && !done; i += 2 )
     {
         key = &(tokens[i]);
@@ -121,6 +130,7 @@ struct changeset * json_to_changeset(
             );
             _jsmn_dump( key );
             free( tokens );
+            free( cs );
             return NULL;
         }
 
@@ -132,6 +142,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            free( cs );
             return NULL;
         }
 
@@ -307,6 +318,7 @@ struct changeset * json_to_changeset(
                 LOG_LEVEL_ERROR,
                 "Failed to parse DML type from json token"
             );
+            free( cs );
             return NULL;
         }
 
@@ -339,12 +351,13 @@ struct changeset * json_to_changeset(
 
     if( xid_val != NULL )
     {
-        key_string = _json_token_to_string( json, xid_val, JSMN_PRIMITIVE );
+        key_string = _json_token_to_string( json, xid_val, JSMN_STRING );
 
         if( key_string == NULL )
         {
             _jsmn_dump( xid_val );
             free( tokens );
+            free( cs );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse XID value from json token"
@@ -373,6 +386,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            free( cs );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse timestamp value from json token"
@@ -408,6 +422,7 @@ struct changeset * json_to_changeset(
                 );
                 free( key_string );
                 free( tokens );
+                free( cs );
                 return NULL;
             }
         }
@@ -419,6 +434,7 @@ struct changeset * json_to_changeset(
             );
             free( key_string );
             free( tokens );
+            free( cs );
             return NULL;
         }
 
@@ -432,6 +448,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            free( cs );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse schema from json token"
@@ -449,6 +466,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
+            free( cs );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse table from json token"
@@ -469,6 +487,7 @@ struct changeset * json_to_changeset(
                 "Expected a JSON object for keys."
             );
             free( tokens );
+            free( cs );
             return NULL;
         }
 
@@ -487,6 +506,7 @@ struct changeset * json_to_changeset(
                     "expected column name"
                 );
                 free( tokens );
+                free( cs );
                 return NULL;
             }
 
@@ -503,6 +523,7 @@ struct changeset * json_to_changeset(
                     "expected a string, primitive, or null"
                 );
                 free( tokens );
+                free( cs );
                 return NULL;
             }
 
@@ -533,6 +554,7 @@ struct changeset * json_to_changeset(
                         LOG_LEVEL_ERROR,
                         "Failed to perform initial alloc for changeset kv"
                     );
+                    free( cs );
                     return NULL;
                 }
             }
@@ -571,6 +593,7 @@ struct changeset * json_to_changeset(
                     }
 
                     free( tokens );
+                    free( cs );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Failed to perform incremental alloc for cs kv"
@@ -601,6 +624,7 @@ struct changeset * json_to_changeset(
 
                     free( cs->keys );
                     free( tokens );
+                    free( cs );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Failed to allocate key array member"
@@ -617,6 +641,7 @@ struct changeset * json_to_changeset(
 
                     free( cs->vals );
                     free( tokens );
+                    free( cs );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Failed to allocate value array member"
@@ -665,6 +690,7 @@ struct changeset * json_to_changeset(
             if( key_string == NULL )
             {
                 free( tokens );
+                free( cs );
                 _log(
                     LOG_LEVEL_ERROR,
                     "get key string from jsmn token at %u",
@@ -679,6 +705,7 @@ struct changeset * json_to_changeset(
                 {
                     free( tokens );
                     free( key_string );
+                    free( cs );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Expected JSMN_OBJECT in data value (old)"
@@ -697,6 +724,7 @@ struct changeset * json_to_changeset(
                 {
                     free( tokens );
                     free( key_string );
+                    free( cs );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Expected JSMN_OBJECT in data balue (new)"
@@ -714,6 +742,7 @@ struct changeset * json_to_changeset(
                 //oopsie poopsie
                 free( key_string );
                 free( tokens );
+                free( cs );
                 _log(
                     LOG_LEVEL_ERROR,
                     "Did not find old or new record in data structure"
@@ -771,6 +800,7 @@ struct changeset * json_to_changeset(
                     }
 
                     free( tokens );
+                    free( cs );
                     _log(
                         LOG_LEVEL_ERROR,
                         "target array and /or columns alloc failed"
