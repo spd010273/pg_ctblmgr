@@ -46,9 +46,9 @@ const char * expect_new[NUM_TESTS][3] = {
 };
 
 const char * expect_old[NUM_TESTS][3] = {
-    {NULL},
-    {NULL},
-    {NULL}
+    { NULL },
+    { NULL },
+    { NULL }
 };
 
 const struct changeset changeset_expects[NUM_TESTS] = {
@@ -56,9 +56,9 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         ( char ** ) &(expect_keys[0]),      // keys
         ( char ** ) &(expect_vals[0]),      // vals
         1,                                  // num_keys
-        ( char ** ) &(expect_columns[0]),   // columns
-        ( char ** ) &(expect_new[0]),       // new_vals
-        ( char ** ) &(expect_old[0]),       // old_vals
+        NULL,
+        NULL,
+        NULL,
         0,                                  // num_columns
         "public",                           // schema_name
         "tb_a",                             // table_name
@@ -72,7 +72,7 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         1,
         ( char ** ) &(expect_columns[1]),
         ( char ** ) &(expect_new[1]),
-        ( char ** ) &(expect_old[1]),
+        NULL,
         3,
         "public",
         "tb_a",
@@ -84,9 +84,9 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         ( char ** ) &(expect_keys[2]),
         ( char ** ) &(expect_vals[2]),
         1,
-        ( char ** ) &(expect_columns[2]),
-        ( char ** ) &(expect_new[2]),
-        ( char ** ) &(expect_old[2]),
+        NULL,
+        NULL,
+        NULL,
         0,
         "public",
         "tb_a",
@@ -118,7 +118,20 @@ int main( void )
         wal_level = wal_levels[i];
         print_expects( expects );
 
+        printf(
+            "Decoding (%s): %s\n",
+            wal_level == PGC_WAL_FULL
+                ? "FULL"
+                : wal_level == PGC_WAL_REDUCED
+                ? "REDUCED"
+                : wal_level == PGC_WAL_MINIMAL
+                ? "MINIMAL"
+                : "Unknown",
+            input
+        );
+
         received = json_to_changeset( input, wal_level );
+        print_expects( received );
         if( !check_expects( expects, received ) )
         {
             printf( "Test %u failed\n", i );
@@ -175,7 +188,7 @@ static void print_array( char ** arr, unsigned int num_elements )
 
     if( num_elements == 0 )
     {
-        printf( "NULL" );
+        printf( "NULL (%p)", arr );
     }
     else if( num_elements > 0 && arr != NULL )
     {
@@ -306,7 +319,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
        && ex->num_columns != 0
       )
     {
-        printf( "NULL column array for changeset!" );
+        printf( "NULL column array for changeset!\n" );
         return false;
     }
     
@@ -315,7 +328,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
        || ( cs->old_vals != NULL && ex->old_vals == NULL )
       )
     {
-        printf( "old_vals mismatch, one is NULL" );
+        printf( "old_vals mismatch, one is NULL\n" );
         return false;
     }
 
@@ -324,7 +337,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
        || ( cs->new_vals != NULL && ex->new_vals == NULL )
       )
     {
-        printf( "new_vals mismatch, one is NULL" );
+        printf( "new_vals mismatch, one is NULL\n" );
         return false;
     }
 
@@ -407,8 +420,23 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
         return false;
     }
 
-    len_e = strlen( ex->table_name );
-    len_c = strlen( cs->table_name );
+    if( ex->table_name == NULL )
+    {
+        len_e = 0;
+    }
+    else
+    {
+        len_e = strlen( ex->table_name );
+    }
+
+    if( cs->table_name == NULL )
+    {
+        len_c = 0;
+    }
+    else
+    {
+        len_c = strlen( cs->table_name );
+    }
 
     if(
           len_e != len_c

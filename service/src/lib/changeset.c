@@ -136,7 +136,7 @@ struct changeset * json_to_changeset(
 
         key_string = ( char * ) calloc(
             sizeof( char ),
-            key->size + 1
+            ( key->end - key->start ) + 1
         );
 
         if( key_string == NULL )
@@ -146,12 +146,13 @@ struct changeset * json_to_changeset(
             return NULL;
         }
 
-        strncpy( key_string, json + key->start, key->size );
-        key_string[key->size + 1] = '\0';
+        strncpy( key_string, json + key->start, key->end - key->start );
+        key_string[key->end - key->start] = '\0';
         // Examine string from key->start to key->end (of size key->size)
         // and, given the wal-level, check against our expected keys and fill
         // in the changeset struct
         key_len = strlen( key_string );
+        printf( "Got keylen %d for '%s'\n", key_len, key_string );
         switch( wal_level )
         {
             case PGC_WAL_FULL:
@@ -159,7 +160,7 @@ struct changeset * json_to_changeset(
                 {
                     type_val = &(tokens[i+1]);
                 }
-                else if( strncmp( key_string, "Xid", MIN( key_len, 3 ) ) == 0 )
+                else if( strncmp( key_string, "xid", MIN( key_len, 3 ) ) == 0 )
                 {
                     xid_val = &(tokens[i+1]);
                 }
@@ -212,22 +213,27 @@ struct changeset * json_to_changeset(
                 if( strncmp( key_string, "type", MIN( key_len, 4 ) ) == 0 )
                 {
                     type_val = &(tokens[i+1]);
+                    printf( "Found type_val (%p)\n", type_val );
                 }
                 else if( strncmp( key_string, "xid", MIN( key_len, 3 ) ) == 0 )
                 {
                     xid_val = &(tokens[i+1]);
+                    printf( "Found xid_val (%p)\n", xid_val );
                 }
                 else if( strncmp( key_string, "schema_name", MIN( key_len, 11 ) ) == 0 )
                 {
                     schema_val = &(tokens[i+1]);
+                    printf( "Found schema_val (%p)\n", schema_val );
                 }
                 else if( strncmp( key_string, "table_name", MIN( key_len, 10 ) ) == 0 )
                 {
                     table_val = &(tokens[i+1]);
+                    printf( "Found table_val (%p)\n", table_val );
                 }
                 else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
                 {
                     keys_val = &(tokens[i+1]);
+                    printf( "Found keys_val (%p)\n", keys_val );
                     keys_index = i + 1;
                 }
                 else
@@ -491,7 +497,7 @@ struct changeset * json_to_changeset(
             return NULL;
         }
 
-        for( i = keys_index + 1; i < token_count; i += 2 )
+        for( i = keys_index; i < token_count; i += 2 )
         {
             // Iterate pairwise over k-v set
             key = &(tokens[i]);
@@ -503,8 +509,19 @@ struct changeset * json_to_changeset(
                 _log(
                     LOG_LEVEL_ERROR,
                     "Unexpected JSON subtype in keys structure for key: "
-                    "expected column name"
+                    "expected column name, got %s, literal\n'%s'",
+                    key->type == JSMN_OBJECT
+                        ? "OBJECT"
+                        : key->type == JSMN_ARRAY
+                        ? "ARRAY"
+                        : key->type == JSMN_PRIMITIVE
+                        ? "PRIMITIVE"
+                        : key->type == JSMN_UNDEFINED
+                        ? "UNDEF"
+                        : "UNKNOWN",
+                        json + key->start
                 );
+
                 free( tokens );
                 free( cs );
                 return NULL;
@@ -520,7 +537,19 @@ struct changeset * json_to_changeset(
                 _log(
                     LOG_LEVEL_DEBUG,
                     "Unexpected JSON subtype in keys structure for value: "
-                    "expected a string, primitive, or null"
+                    "expected a string, primitive, or null, got %s, literal\n%s",
+                    val->type == JSMN_OBJECT
+                        ? "OBJECT"
+                        : val->type == JSMN_ARRAY
+                        ? "ARRAY"
+                        : val->type == JSMN_PRIMITIVE
+                        ? "PRIMITIVE"
+                        : val->type == JSMN_UNDEFINED
+                        ? "UNDEF"
+                        : val->type == JSMN_STRING
+                        ? "STRING"
+                        : "UNKNOWN",
+                        json + val->start
                 );
                 free( tokens );
                 free( cs );
@@ -603,11 +632,11 @@ struct changeset * json_to_changeset(
             }
 
             cs->keys[cs->num_keys] = ( char * ) malloc(
-                sizeof( char ) * ( key->size + 1 )
+                sizeof( char ) * ( key->end - key->start + 1 )
             );
 
             cs->vals[cs->num_keys] = ( char * ) malloc(
-                sizeof( char ) * ( val->size + 1 )
+                sizeof( char ) * ( val->end - val->start + 1 )
             );
 
             if(
@@ -657,7 +686,7 @@ struct changeset * json_to_changeset(
                 size
             );
 
-            cs->keys[cs->num_keys][size + 1] = '\0';
+            cs->keys[cs->num_keys][size] = '\0';
 
             size = val->end - val->start;
             strncpy(
@@ -666,7 +695,7 @@ struct changeset * json_to_changeset(
                 size
             );
 
-            cs->vals[cs->num_keys][size + 1] = '\0';
+            cs->vals[cs->num_keys][size] = '\0';
             cs->num_keys++;
 
             if( val->end >= keys_val->end )
@@ -699,7 +728,7 @@ struct changeset * json_to_changeset(
                 return NULL;
             }
 
-            if( strncmp( key_string, "old", data_val->size ) == 0 )
+            if( strncmp( key_string, "old", data_val->end - data_val->start ) == 0 )
             {
                 if( (&(tokens[data_index+1]))->type != JSMN_OBJECT )
                 {
@@ -718,7 +747,7 @@ struct changeset * json_to_changeset(
                 target_arr     = &(cs->old_vals);
                 start_index    = old_data_index;
             }
-            else if( strncmp( key_string, "new", data_val->size ) == 0 )
+            else if( strncmp( key_string, "new", data_val->end - data_val->start ) == 0 )
             {
                 if( (&(tokens[data_index+1]))->type != JSMN_OBJECT )
                 {
@@ -884,8 +913,8 @@ struct changeset * json_to_changeset(
                     size
                 );
 
-                cs->columns[cs->num_columns][size + 1] = '\0';
-                
+                cs->columns[cs->num_columns][size] = '\0';
+
                 size = (&(tokens[start_index + j + 1]))->end
                      - (&(tokens[start_index + j + 1]))->start;
                 strncpy(
@@ -894,7 +923,7 @@ struct changeset * json_to_changeset(
                     size
                 );
 
-                (*target_arr)[cs->num_columns][size + 1] = '\0';
+                (*target_arr)[cs->num_columns][size] = '\0';
                 cs->num_columns++;
 
                 if( start_index + j + 1 > (&(tokens[data_index]))->end )
