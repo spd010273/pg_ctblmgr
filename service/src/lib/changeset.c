@@ -3,6 +3,15 @@
 static struct changeset * _new_changeset( void );
 static inline char * _json_token_to_string( char *, jsmntok_t *, jsmntype_t );
 static void _jsmn_dump( jsmntok_t * );
+static void _parse_data_record(
+    char *,         // json string
+    jsmntok_t *,    // token array
+    unsigned int,   // num_tokens
+    unsigned int,   // start index
+    char ***,       // target array
+    unsigned int *, // array len
+    char ***        // columns array (population of this is one-shotted)
+);
 
 struct changeset * json_to_changeset(
     char *               json,
@@ -19,7 +28,6 @@ struct changeset * json_to_changeset(
     jsmntok_t *        key            = NULL;
     jsmntok_t *        val            = NULL;
     jsmntok_t *        tokens         = NULL;
-    char ***           target_arr     = NULL;
     char *             key_string     = NULL;
     struct changeset * cs             = NULL;
     jsmn_parser        parser         = {0};
@@ -27,9 +35,6 @@ struct changeset * json_to_changeset(
     int                result         = 0;
     unsigned int       keys_index     = 0;
     unsigned int       data_index     = 0;
-    unsigned int       start_index    = 0;
-    unsigned int       new_data_index = 0;
-    unsigned int       old_data_index = 0;
     unsigned int       n              = 0;
     unsigned int       i              = 0;
     unsigned int       j              = 0;
@@ -39,6 +44,10 @@ struct changeset * json_to_changeset(
     int                milliseconds   = 0;
     int                tz_offset      = 0;
     bool               done           = false; // Initial parse oneshot
+    unsigned int       column_canary  = 0;
+    bool               in_subobject   = false;
+    unsigned int       subobject_end  = 0;
+    jsmntok_t *        temp_val       = NULL;
 
     n = JSON_TOKENS;
 
@@ -146,13 +155,18 @@ struct changeset * json_to_changeset(
             return NULL;
         }
 
+        if( in_subobject && key->end > subobject_end )
+        {
+            in_subobject = false;
+        }
+
         strncpy( key_string, json + key->start, key->end - key->start );
         key_string[key->end - key->start] = '\0';
         // Examine string from key->start to key->end (of size key->size)
         // and, given the wal-level, check against our expected keys and fill
         // in the changeset struct
         key_len = strlen( key_string );
-        printf( "Got keylen %d for '%s'\n", key_len, key_string );
+
         switch( wal_level )
         {
             case PGC_WAL_FULL:
@@ -178,84 +192,59 @@ struct changeset * json_to_changeset(
                 }
                 else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
                 {
-                    keys_val = &(tokens[i+1]);
-                    keys_index = i + 1;
+                    keys_val      = &(tokens[i+1]);
+                    keys_index    = i + 1;
+                    in_subobject  = true;
+                    subobject_end = keys_val->end;
                 }
                 else if( strncmp( key_string, "data", MIN( key_len, 4 ) ) == 0 )
                 {
-                    data_val = &(tokens[i+1]);
-                    data_index = i + 1;
+                    data_val      = &(tokens[i+1]);
+                    data_index    = i + 1;
+                    in_subobject  = true;
+                    subobject_end = data_val->end;
                 }
-                else
-                {
-                    if(
+                else if(
                             type_val != NULL && xid_val != NULL
                          && time_val != NULL && schema_val != NULL
                          && table_val != NULL && keys_val != NULL
                          && data_val != NULL
-                      )
-                    {
-                        done = true;
-                    }
-                    else
-                    {
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "unexpected key %s is JSON decode of FULL WAL" \
-                            " at index %u",
-                            key_string,
-                            i
-                        );
-                    }
+                       )
+                {
+                    done = true;
                 }
                 break;
             case PGC_WAL_REDUCED:
                 if( strncmp( key_string, "type", MIN( key_len, 4 ) ) == 0 )
                 {
                     type_val = &(tokens[i+1]);
-                    printf( "Found type_val (%p)\n", type_val );
                 }
                 else if( strncmp( key_string, "xid", MIN( key_len, 3 ) ) == 0 )
                 {
                     xid_val = &(tokens[i+1]);
-                    printf( "Found xid_val (%p)\n", xid_val );
                 }
                 else if( strncmp( key_string, "schema_name", MIN( key_len, 11 ) ) == 0 )
                 {
                     schema_val = &(tokens[i+1]);
-                    printf( "Found schema_val (%p)\n", schema_val );
                 }
                 else if( strncmp( key_string, "table_name", MIN( key_len, 10 ) ) == 0 )
                 {
                     table_val = &(tokens[i+1]);
-                    printf( "Found table_val (%p)\n", table_val );
                 }
                 else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
                 {
-                    keys_val = &(tokens[i+1]);
-                    printf( "Found keys_val (%p)\n", keys_val );
-                    keys_index = i + 1;
+                    keys_val      = &(tokens[i+1]);
+                    keys_index    = i + 1;
+                    in_subobject  = true;
+                    subobject_end = keys_val->end;
                 }
-                else
+                else if(
+                           type_val != NULL && xid_val != NULL
+                        && schema_val != NULL && table_val != NULL
+                        && keys_val != NULL
+                       )
                 {
-                    if(
-                          type_val != NULL && xid_val != NULL
-                       && schema_val != NULL && table_val != NULL
-                       && keys_val != NULL
-                      )
-                    {
-                        done = true;
-                    }
-                    else
-                    {
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "unexpected key %s in JSON decode of REDUCED WAL" \
-                            " at index %u",
-                            key_string,
-                            i
-                        );
-                    }
+                    done = true;
                 }
                 break;
             case PGC_WAL_MINIMAL:
@@ -277,29 +266,18 @@ struct changeset * json_to_changeset(
                 }
                 else if( strncmp( key_string, "key", MIN( key_len, 3 ) ) == 0 )
                 {
-                    keys_val = &(tokens[i+1]);
-                    keys_index = i + 1;
+                    keys_val      = &(tokens[i+1]);
+                    keys_index    = i + 1;
+                    in_subobject  = true;
+                    subobject_end = keys_val->end;
                 }
-                else
-                {
-                    if(
+                else if(
                             type_val != NULL && xid_val != NULL
                          && schema_val != NULL && table_val != NULL
                          && keys_val != NULL
-                      )
-                    {
-                        done = true;
-                    }
-                    else
-                    {
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "unexpected key %s in JSON decode of MINIMAL WAL" \
-                            " at index %u",
-                            key_string,
-                            i
-                        );
-                    }
+                       )
+                {
+                    done = true;
                 }
                 break;
             default:
@@ -497,7 +475,7 @@ struct changeset * json_to_changeset(
             return NULL;
         }
 
-        for( i = keys_index; i < token_count; i += 2 )
+        for( i = keys_index + 1; i < token_count; i += 2 )
         {
             // Iterate pairwise over k-v set
             key = &(tokens[i]);
@@ -509,7 +487,7 @@ struct changeset * json_to_changeset(
                 _log(
                     LOG_LEVEL_ERROR,
                     "Unexpected JSON subtype in keys structure for key: "
-                    "expected column name, got %s, literal\n'%s'",
+                    "expected column name, got %s, literal\n'%s'\n at index %u\nnumkeys %u",
                     key->type == JSMN_OBJECT
                         ? "OBJECT"
                         : key->type == JSMN_ARRAY
@@ -519,7 +497,9 @@ struct changeset * json_to_changeset(
                         : key->type == JSMN_UNDEFINED
                         ? "UNDEF"
                         : "UNKNOWN",
-                        json + key->start
+                        json + key->start,
+                        i,
+                        cs->num_keys
                 );
 
                 free( tokens );
@@ -537,7 +517,7 @@ struct changeset * json_to_changeset(
                 _log(
                     LOG_LEVEL_DEBUG,
                     "Unexpected JSON subtype in keys structure for value: "
-                    "expected a string, primitive, or null, got %s, literal\n%s",
+                    "expected a string, primitive, or null, got %s, literal\n'%s' at index %u\nnumkeys: %u",
                     val->type == JSMN_OBJECT
                         ? "OBJECT"
                         : val->type == JSMN_ARRAY
@@ -549,7 +529,9 @@ struct changeset * json_to_changeset(
                         : val->type == JSMN_STRING
                         ? "STRING"
                         : "UNKNOWN",
-                        json + val->start
+                        json + val->start,
+                        i + 1,
+                        cs->num_keys
                 );
                 free( tokens );
                 free( cs );
@@ -698,7 +680,7 @@ struct changeset * json_to_changeset(
             cs->vals[cs->num_keys][size] = '\0';
             cs->num_keys++;
 
-            if( val->end >= keys_val->end )
+            if( val->end >= keys_val->end - 1 )
             {
                 break;
             }
@@ -707,236 +689,313 @@ struct changeset * json_to_changeset(
 
     if( data_val != NULL )
     {
+        // Data index is pointing to the OBJECT opening token, the first string
+        // of the key/value pair will be +1 offset, and will be either new/old
         // Parse out new, iff exists
-        data_val = &(tokens[data_index + 1]);
+        data_val   = &(tokens[data_index + 1]);
+        temp_val   = &(tokens[data_index + 1]);
+        key_string = _json_token_to_string(
+            json,
+            temp_val,
+            JSMN_STRING
+        );
 
-        for( i = 0; i < 2; i++ )
+        if( key_string == NULL )
         {
-            // note: once done, we need to set data_val to the next object iff exists
-            // We'll also need to adjust the data index as well
-            key_string = _json_token_to_string( json, data_val, JSMN_STRING );
+            _log( LOG_LEVEL_ERROR, "Error parsing data subobject string '%s'", json + temp_val->start );
+            free( tokens );
+            free( cs );
+            return NULL;
+        }
 
-            if( key_string == NULL )
+        key_len = strlen( key_string );
+
+        if( strncmp( key_string, "new", MIN( key_len, 3 ) ) == 0 )
+        {
+            _parse_data_record(
+                json,
+                tokens,
+                token_count,
+                data_index + 2,
+                &(cs->new_vals),
+                &(cs->num_columns),
+                &(cs->columns)
+            );
+
+            if( cs->new_vals == NULL )
             {
+                _log( LOG_LEVEL_ERROR, "failed to parse new vals from data object" );
                 free( tokens );
                 free( cs );
-                _log(
-                    LOG_LEVEL_ERROR,
-                    "get key string from jsmn token at %u",
-                    data_index + 1
-                );
                 return NULL;
             }
+        }
+        else if( strncmp( key_string, "old", MIN( key_len, 3 ) ) == 0 )
+        {
+            _parse_data_record(
+                json,
+                tokens,
+                token_count,
+                data_index + 2,
+                &(cs->old_vals),
+                &(cs->num_columns),
+                &(cs->columns)
+            );
 
-            if( strncmp( key_string, "old", data_val->end - data_val->start ) == 0 )
+            if( cs->old_vals == NULL )
             {
-                if( (&(tokens[data_index+1]))->type != JSMN_OBJECT )
-                {
-                    free( tokens );
-                    free( key_string );
-                    free( cs );
-                    _log(
-                        LOG_LEVEL_ERROR,
-                        "Expected JSMN_OBJECT in data value (old)"
-                    );
-                    return NULL;
-                }
-
-                old_data_index = data_index + 2;
-                //old_data_val   = &(tokens[old_data_index]);
-                target_arr     = &(cs->old_vals);
-                start_index    = old_data_index;
-            }
-            else if( strncmp( key_string, "new", data_val->end - data_val->start ) == 0 )
-            {
-                if( (&(tokens[data_index+1]))->type != JSMN_OBJECT )
-                {
-                    free( tokens );
-                    free( key_string );
-                    free( cs );
-                    _log(
-                        LOG_LEVEL_ERROR,
-                        "Expected JSMN_OBJECT in data balue (new)"
-                    );
-                    return NULL;
-                }
-
-                new_data_index = data_index + 2;
-                //new_data_val   = &(tokens[new_data_index]);
-                target_arr     = &(cs->new_vals);
-                start_index    = new_data_index;
-            }
-            else
-            {
-                //oopsie poopsie
-                free( key_string );
+                _log( LOG_LEVEL_ERROR, "Failed to parse old vals from data object" );
                 free( tokens );
                 free( cs );
-                _log(
-                    LOG_LEVEL_ERROR,
-                    "Did not find old or new record in data structure"
-                );
                 return NULL;
             }
+        }
+        else
+        {
+            _log( LOG_LEVEL_ERROR, "unexpected record key in data subobject %s", key_string );
+            free( tokens );
+            free( cs );
+            return NULL;
+        }
 
-            free( key_string );
+        // Hijack data_val to locate the next subobject
+        temp_val      = &(tokens[data_index+2]);
+        subobject_end = temp_val->end;
+        data_val      = &(tokens[data_index]);
 
-            for( j = 0; j < token_count; j+= 2 )
+        while( temp_val->start < subobject_end && data_index < token_count )
+        {
+            temp_val = &(tokens[data_index]);
+            data_index++;
+        }
+
+        if( temp_val->end >= data_val->end - 2 )
+        {
+            // No other record
+            free( tokens );
+            return cs;
+        }
+
+        key_string = _json_token_to_string(
+            json,
+            temp_val,
+            JSMN_STRING
+        );
+
+        if( key_string == NULL )
+        {
+            _log( LOG_LEVEL_ERROR, "Error parsing data subobject string '%s'", json + temp_val->start );
+            free( tokens );
+            free( cs );
+            return NULL;
+        }
+
+        key_len = strlen( key_string );
+
+        if( strncmp( key_string, "new", MIN( key_len, 3 ) ) == 0 && cs->new_vals == NULL )
+        {
+            _parse_data_record(
+                json,
+                tokens,
+                token_count,
+                data_index,
+                &(cs->new_vals),
+                &(column_canary),
+                NULL
+            );
+
+            if( cs->new_vals == NULL )
             {
-                if( cs->num_columns == 0 )
-                {
-                    cs->columns = ( char ** ) malloc(
-                        sizeof( char * )
-                    );
-
-                    *target_arr = ( char ** ) malloc(
-                        sizeof( char * )
-                    );
-                }
-                else
-                {
-                    cs->columns = ( char ** ) realloc(
-                        cs->columns,
-                        sizeof( char * ) * ( cs->num_columns + 1 )
-                    );
-
-                    *target_arr = ( char ** ) realloc(
-                        *target_arr,
-                        sizeof( char * ) * ( cs->num_columns + 1 )
-                    );
-                }
-
-                if( cs->columns == NULL || *target_arr == NULL )
-                {
-                    if( cs->columns != NULL )
-                    {
-                        for( n = 0; n < cs->num_columns; n++ )
-                        {
-                            free( cs->columns[n] );
-                        }
-
-                        free( cs->columns );
-                    }
-
-                    if( *target_arr != NULL )
-                    {
-                        for( n = 0; n < cs->num_columns; n++ )
-                        {
-                            free( (*target_arr)[n] );
-                        }
-
-                        free( *target_arr );
-                    }
-
-                    free( tokens );
-                    free( cs );
-                    _log(
-                        LOG_LEVEL_ERROR,
-                        "target array and /or columns alloc failed"
-                    );
-                    return NULL;
-                }
-
-                if( cs->columns[cs->num_columns] == NULL )
-                {
-                    cs->columns[cs->num_columns] = ( char * ) malloc(
-                        sizeof( char )
-                      * (
-                            (&(tokens[start_index + j]))->end
-                          - (&(tokens[start_index + j]))->start
-                          + 1
-                        )
-                    );
-                }
-
-                (*target_arr)[cs->num_columns] = ( char * ) malloc(
-                    sizeof( char )
-                  * (
-                        (&(tokens[start_index + j + 1]))->end
-                      - (&(tokens[start_index + j + 1]))->start
-                      + 1
-                    )
-                );
-
-                if(
-                        cs->columns[cs->num_columns] == NULL
-                     || (*target_arr)[cs->num_columns] == NULL
-                  )
-                {
-                    if( cs->columns[cs->num_columns] != NULL )
-                    {
-                        for( n = 0; n < cs->num_columns; n++ )
-                        {
-                            if( cs->columns[n] != NULL )
-                                free( cs->columns[n] );
-
-                            if( n < cs->num_columns - 1 )
-                            {
-                                if( (*target_arr)[n] != NULL )
-                                    free( (*target_arr)[n] );
-                                (*target_arr)[n] = NULL;
-                            }
-                        }
-
-                        free( cs->columns );
-                        cs->columns = NULL;
-                    }
-
-                    if( (*target_arr)[cs->num_columns] != NULL )
-                    {
-                        for( n = 0; n < cs->num_columns; n++ )
-                        {
-                            if( (*target_arr)[n] != NULL )
-                                free( (*target_arr)[n] );
-
-                            if(
-                                    n < cs->num_columns - 1
-                                 && cs->columns != NULL
-                              )
-                            {
-                                if( cs->columns[n] != NULL )
-                                    free( cs->columns[n] );
-                                cs->columns[n] = NULL;
-                            }
-                        }
-
-                        free( *target_arr );
-                        *target_arr = NULL;
-                    }
-                }
-
-                size = (&(tokens[start_index + j]))->end
-                     - (&(tokens[start_index+j]))->start;
-                strncpy(
-                    cs->columns[cs->num_columns],
-                    json + (&(tokens[start_index + j]))->start,
-                    size
-                );
-
-                cs->columns[cs->num_columns][size] = '\0';
-
-                size = (&(tokens[start_index + j + 1]))->end
-                     - (&(tokens[start_index + j + 1]))->start;
-                strncpy(
-                    (*target_arr)[cs->num_columns],
-                    json + (&(tokens[start_index + j + 1]))->start,
-                    size
-                );
-
-                (*target_arr)[cs->num_columns][size] = '\0';
-                cs->num_columns++;
-
-                if( start_index + j + 1 > (&(tokens[data_index]))->end )
-                {
-                    data_val = &(tokens[start_index + j + 2]);
-                    break;
-                }
+                _log( LOG_LEVEL_ERROR, "failed to parse new vals from data object" );
+                free( tokens );
+                free( cs );
+                return NULL;
             }
+        }
+        else if( strncmp( key_string, "old", MIN( key_len, 3 ) ) == 0 && cs->old_vals == NULL )
+        {
+            _parse_data_record(
+                json,
+                tokens,
+                token_count,
+                data_index,
+                &(cs->old_vals),
+                &(column_canary),
+                NULL
+            );
+
+            if( cs->old_vals == NULL )
+            {
+                _log( LOG_LEVEL_ERROR, "Failed to parse old vals from data object" );
+                free( tokens );
+                free( cs );
+                return NULL;
+            }
+        }
+        else
+        {
+            _log( LOG_LEVEL_ERROR, "unexpected record key in data subobject %s", key_string );
+            free( tokens );
+            free( cs );
+            return NULL;
+        }
+
+        if( column_canary > 0 && column_canary != cs->num_columns )
+        {
+            // These records should be of the same length
+            _log( LOG_LEVEL_ERROR, "Mismatch in recordlengths between new and old" );
+            free( tokens );
+            free( cs );
+            return NULL;
         }
     }
 
     free( tokens );
     return cs;
+}
+
+static void _parse_data_record(
+    char *         json,
+    jsmntok_t *    tokens,
+    unsigned int   num_tokens,
+    unsigned int   index,
+    char ***       val_array,
+    unsigned int * num_elements,
+    char ***       columns
+)
+{
+    unsigned int obj_end       = 0;
+    unsigned int i             = 0;
+    unsigned int e             = 0;
+    jsmntok_t *  val           = NULL;
+    jsmntok_t *  key           = NULL;
+    jsmntok_t *  temp          = NULL;
+
+    if(
+            json == NULL
+         || tokens == NULL
+         || num_tokens == 0
+         || val_array == NULL
+         || index >= num_tokens
+      )
+    {
+        _log( LOG_LEVEL_ERROR, "Invalid input to parse_data_record" );
+        return;
+    }
+
+    if( (&(tokens[index]))->type != JSMN_OBJECT )
+    {
+        _log( LOG_LEVEL_ERROR, "Starting point in data parse must be the object" );
+        return;
+    }
+
+    obj_end = (&(tokens[index]))->end;
+
+    for( i = index + 1; i < num_tokens; i += 2 )
+    {
+        key = &(tokens[i]);
+        val = &(tokens[i + 1]);
+
+        if( key == NULL || val == NULL )
+        {
+            return;
+        }
+
+        if( key->type != JSMN_STRING )
+        {
+            _log( LOG_LEVEL_ERROR, "Unexpected key in data structure at token index %u, position %u", i, key->start );
+            return;
+        }
+
+        if( key->end >= obj_end - 1 )
+        {
+            break;
+        }
+
+        if( *num_elements == 0 )
+        {
+            *val_array = ( char ** ) calloc( sizeof( char * ), 1 );
+
+            if( columns != NULL )
+            {
+                *columns = ( char ** ) calloc( sizeof( char * ), 1 );
+            }
+        }
+        else
+        {
+            *val_array = ( char ** ) realloc( *val_array, sizeof( char * ) * ( (*num_elements) + 1 ) );
+
+            if( columns != NULL )
+            {
+                *columns = ( char ** ) realloc( *columns, sizeof( char * ) * ( (*num_elements) + 1 ) );
+            }
+        }
+
+        if( (*val_array) == NULL || ( columns != NULL && (*columns) == NULL ) )
+        {
+            _log( LOG_LEVEL_ERROR, "Failed to allocate memory" );
+            return;
+        }
+
+        (*val_array)[(*num_elements)] = ( char * ) calloc(
+            sizeof( char ),
+            val->end - val->start + 1
+        );
+
+        if( (*val_array)[(*num_elements)] == NULL )
+        {
+            _log( LOG_LEVEL_ERROR, "Failed to allocate memory" );
+            free( *val_array );
+            return;
+        }
+
+        if( columns != NULL )
+        {
+            (*columns)[(*num_elements)] = ( char * ) calloc(
+                sizeof( char ),
+                key->end - key->start + 1
+            );
+
+            if( (*columns)[(*num_elements)] == NULL )
+            {
+                _log( LOG_LEVEL_ERROR, "Failed to allocate memory" );
+                free( *columns );
+                return;
+            }
+        }
+
+        strncpy(
+            (*val_array)[(*num_elements)],
+            json + val->start,
+            val->end - val->start
+        );
+        (*val_array)[(*num_elements)][val->end - val->start] = '\0';
+
+        if( columns != NULL )
+        {
+            strncpy(
+                (*columns)[(*num_elements)],
+                json + key->start,
+                key->end - key->start
+            );
+            (*columns)[(*num_elements)][key->end - key->start] = '\0';
+        }
+
+        (*num_elements)++;
+
+        if( key->type == JSMN_OBJECT || key->type == JSMN_ARRAY )
+        {
+            temp = key;
+            while( e < temp->end && e < num_tokens )
+            {
+                e++;
+            }
+
+            i += e;
+        }
+    }
+
+    return;
 }
 
 static struct changeset * _new_changeset( void )

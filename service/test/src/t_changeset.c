@@ -7,21 +7,27 @@
 
 /* Here we define the test changeset string, their WAL level, and the expected
  * output structure */
-#define NUM_TESTS 3
+#define NUM_TESTS 5
 
 const char * tests[NUM_TESTS] = {
     "{\"d\":\"I\",\"x\":\"4408\",\"s\":\"public\",\"t\":\"tb_a\",\"key\":{\"foo\":1}}",
-    "{\"type\":\"INSERT\",\"xid\":\"4408\",\"timestamp\":\"2020-01-15 15:29:58.892742-05\",\"schema_name\":\"public\",\"table_name\":\"tb_a\",\"key\":{\"foo\":4},\"data\":{\"new\":{\"foo\":4,\"bar\":5,\"baz\":6}}}",
-    "{\"type\":\"INSERT\",\"xid\":\"4408\",\"schema_name\":\"public\",\"table_name\":\"tb_a\",\"key\":{\"foo\":1}}"
+    "{\"type\":\"INSERT\",\"xid\":\"4408\",\"timestamp\":\"2020-01-15 15:29:58.892742-05\",\"schema_name\":\"public\",\"table_name\":\"tb_a\",\"key\":{\"foo\":1},\"data\":{\"new\":{\"foo\":4,\"bar\":5,\"baz\":6}}}",
+    "{\"type\":\"INSERT\",\"xid\":\"4408\",\"schema_name\":\"public\",\"table_name\":\"tb_a\",\"key\":{\"foo\":1}}",
+    "{\"type\":\"UPDATE\",\"xid\":\"4408\",\"timestamp\":\"2020-01-15 15:29:58.892742-05\",\"schema_name\":\"public\",\"table_name\":\"tb_a\",\"key\":{\"foo\":2},\"data\":{\"new\":{\"foo\":5,\"bar\":6,\"baz\":7},\"old\":{\"foo\":4,\"bar\":5,\"baz\":6}}}",
+    "{\"data\":{\"new\":{\"foo\":5,\"bar\":6,\"baz\":7},\"old\":{\"foo\":4,\"bar\":5,\"baz\":6}},\"type\":\"UPDATE\",\"xid\":\"4409\",\"timestamp\":\"2020-01-15 15:29:58.892742-05\",\"schema_name\":\"public\",\"table_name\":\"tb_a\",\"key\":{\"foo\":2}}"
 };
 
 const pg_ctblmgr_wal_level wal_levels[NUM_TESTS] = {
     PGC_WAL_MINIMAL,
     PGC_WAL_FULL,
-    PGC_WAL_REDUCED
+    PGC_WAL_REDUCED,
+    PGC_WAL_FULL,
+    PGC_WAL_FULL
 };
 
 const char * expect_keys[NUM_TESTS] = {
+    "foo",
+    "foo",
     "foo",
     "foo",
     "foo"
@@ -30,25 +36,33 @@ const char * expect_keys[NUM_TESTS] = {
 const char * expect_vals[NUM_TESTS] = {
     "1",
     "1",
-    "1"
+    "1",
+    "2",
+    "2"
 };
 
 const char * expect_columns[NUM_TESTS][3] = {
     { NULL },
     { "foo", "bar", "baz" },
     { NULL },
+    { "foo", "bar", "baz" },
+    { "foo", "bar", "baz" }
 };
 
 const char * expect_new[NUM_TESTS][3] = {
     { NULL },
     { "4", "5", "6" },
-    { NULL }
+    { NULL },
+    { "5", "6", "7" },
+    { "5", "6", "7" }
 };
 
 const char * expect_old[NUM_TESTS][3] = {
     { NULL },
     { NULL },
-    { NULL }
+    { NULL },
+    { "4", "5", "6" },
+    { "4", "5", "6" }
 };
 
 const struct changeset changeset_expects[NUM_TESTS] = {
@@ -93,6 +107,34 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         4408,
         PGC_DML_INSERT,
         0
+    },
+    {
+        ( char ** ) &(expect_keys[3]),
+        ( char ** ) &(expect_vals[3]),
+        1,
+        ( char ** ) &(expect_columns[3]),
+        ( char ** ) &(expect_new[3]),
+        ( char ** ) &(expect_old[3]),
+        3,
+        "public",
+        "tb_a",
+        4408,
+        PGC_DML_UPDATE,
+        1579120198
+    },
+    {
+        ( char ** ) &(expect_keys[4]),
+        ( char ** ) &(expect_vals[4]),
+        1,
+        ( char ** ) &(expect_columns[4]),
+        ( char ** ) &(expect_new[4]),
+        ( char ** ) &(expect_old[4]),
+        3,
+        "public",
+        "tb_a",
+        4409,
+        PGC_DML_UPDATE,
+        1579120198
     }
 };
 
@@ -116,22 +158,10 @@ int main( void )
         expects   = ( struct changeset * ) &((changeset_expects[i])) ;
         input     = ( char * ) tests[i];
         wal_level = wal_levels[i];
-        print_expects( expects );
-
-        printf(
-            "Decoding (%s): %s\n",
-            wal_level == PGC_WAL_FULL
-                ? "FULL"
-                : wal_level == PGC_WAL_REDUCED
-                ? "REDUCED"
-                : wal_level == PGC_WAL_MINIMAL
-                ? "MINIMAL"
-                : "Unknown",
-            input
-        );
-
+        //print_expects( expects );
         received = json_to_changeset( input, wal_level );
-        print_expects( received );
+        //print_expects( received );
+
         if( !check_expects( expects, received ) )
         {
             printf( "Test %u failed\n", i );
@@ -253,7 +283,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
         printf( "NULL keys array for changeset" );
         return false;
     }
-    
+
     for( i = 0; i < cs->num_keys; i ++ )
     {
         len_e = strlen( ex->keys[i] );
@@ -281,7 +311,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
             }
             return false;
         }
-    
+
         len_e = strlen( ex->vals[i] );
         len_c = strlen( cs->vals[i] );
 
@@ -322,7 +352,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
         printf( "NULL column array for changeset!\n" );
         return false;
     }
-    
+
     if(
           ( cs->old_vals == NULL && ex->old_vals != NULL )
        || ( cs->old_vals != NULL && ex->old_vals == NULL )
@@ -406,7 +436,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
 
     len_e = strlen( ex->schema_name );
     len_c = strlen( cs->schema_name );
-    
+
     if(
            len_e != len_c
         || strncmp( cs->schema_name, ex->schema_name, MIN( len_e, len_c ) ) != 0
