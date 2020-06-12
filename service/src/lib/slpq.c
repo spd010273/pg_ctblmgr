@@ -26,7 +26,7 @@ bool slpq_push( struct slpq * head, void * data )
         return false;
     }
 
-    node = ( struct slpq_node * ) _SLPQ_ALLOC( sizeof( struct slpq_node * ) );
+    node = ( struct slpq_node * ) _SLPQ_ALLOC( sizeof( struct slpq_node ) );
 
     if( node == NULL )
     {

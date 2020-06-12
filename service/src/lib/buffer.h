@@ -50,4 +50,5 @@ bool buffer_add( struct buffer *, char *, void * );
 void * buffer_pin_pop( struct buffer_pin * );
 bool buffer_pin_push( struct buffer_pin *, void * );
 bool remove_buffer_pin_by_name( struct buffer *, char * );
+void * buffer_pop( struct buffer *, char * );
 #endif // _BUFFER_H

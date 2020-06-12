@@ -15,12 +15,20 @@ ARCHFLAGS		= -m64 -mtune=generic
 CFLAGS			= $(INCLUDE) $(LIBS) $(FLAGS) $(STRICTURES) $(ARCHFLAGS)
 T_CS_SRCS		= ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_changeset.c
 T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
+T_B_SRCS		= ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
+T_B_OBJS		= $(T_B_SRCS:.c=.o)
 LDFLAGS			= -lm -lpq
 
+all: t_buffer t_changeset
+
 t_changeset: $(T_CS_OBJS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
+
+t_buffer: $(T_B_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 .PHONY: clean
 clean:
 	rm -f $(T_CS_OBJS)
+	rm -f $(T_B_OBJS)
 	rm -f t_*

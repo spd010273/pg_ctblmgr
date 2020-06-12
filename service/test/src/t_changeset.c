@@ -172,9 +172,10 @@ int main( void )
     if( failed == 0 )
     {
         printf( "All tests passed\n" );
+        return 0;
     }
 
-    return 0;
+    return -1;
 }
 
 static void print_expects( struct changeset * cs )

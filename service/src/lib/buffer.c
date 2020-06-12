@@ -225,6 +225,32 @@ bool remove_buffer_pin_by_name( struct buffer * b, char * qual_name )
     }
 }
 
+void * buffer_pop( struct buffer * b, char * qual )
+{
+    struct buffer_pin * bp = NULL;
+
+    if( b == NULL || qual == NULL )
+    {
+        return NULL;
+    }
+
+    if( !__TNS_MUTEX( (&(b->in_use)) ) )
+    {
+        return NULL;
+    }
+
+    bp = ( struct buffer_pin * ) trie_search( b->trie, qual );
+
+    if( bp != NULL )
+    {
+        __C_MUTEX( (&(b->in_use)) );
+        return buffer_pin_pop( bp );
+    }
+
+    __C_MUTEX( (&(b->in_use)) );
+    return NULL;
+}
+
 static struct buffer_pin * _new_buffer_pin( void )
 {
     struct buffer_pin * bp = NULL;
