@@ -17,9 +17,11 @@ T_CS_SRCS		= ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_ch
 T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
 T_B_SRCS		= ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
 T_B_OBJS		= $(T_B_SRCS:.c=.o)
+T_Q_SRCS		= ../src/lib/query.c ../src/lib/util.c src/t_query.c
+T_Q_OBJS		= $(T_Q_SRCS:.c=.o)
 LDFLAGS			= -lm -lpq
 
-all: t_buffer t_changeset
+all: t_buffer t_changeset t_query
 
 t_changeset: $(T_CS_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
@@ -27,8 +29,12 @@ t_changeset: $(T_CS_OBJS)
 t_buffer: $(T_B_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
+t_query: $(T_Q_OBJS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
+
 .PHONY: clean
 clean:
 	rm -f $(T_CS_OBJS)
 	rm -f $(T_B_OBJS)
+	rm -f $(T_Q_OBJS)
 	rm -f t_*

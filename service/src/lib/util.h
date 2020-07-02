@@ -99,10 +99,10 @@ extern struct worker * new_worker(
     char **,
     void (*)( void * ),
     struct worker *,
-    char *, // channel
-    char **, // filter_tables
+    char *,       // channel
+    char **,      // filter_tables
     unsigned int, // num_tables
-    char   // wal_level
+    char          // wal_level
 );
 
 extern void worker_set_config(
