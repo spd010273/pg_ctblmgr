@@ -8,7 +8,8 @@ use Carp;
 use JSON;
 use Readonly;
 use English qw( -no_match_vars );
-use Cwd qw( abs_path );
+use Cwd qw( abs_path getcwd );
+use Data::Dumper;
 
 Readonly my $TEST_DIR => 'test/sql';
 Readonly my $TEST_DATABASE => '__pgc_testing__';
@@ -19,6 +20,47 @@ Readonly my $DBNAME_CHECK_QUERY => <<END_SQL;
       FROM pg_database
      WHERE datname = ?
 END_SQL
+
+Readonly my $SERVICE_TESTS => '../service/test/';
+
+my $current_path = getcwd;
+unless( chdir( $SERVICE_TESTS ) )
+{
+    croak( 'Failed to change directory to service test directory' );
+}
+
+system( 'make clean && make' );
+
+unless( chdir( $current_path ) )
+{
+    croak( 'Failed to return to cwd' );
+}
+
+unless( opendir( SERVICE_TESTS, $SERVICE_TESTS ) )
+{
+    croak( 'Failed to open directory for listing' );
+}
+
+my @tests;
+
+while( my $file = readdir( SERVICE_TESTS ) )
+{
+    next unless( $file =~ /t_/ );
+    push( @tests, $file );
+}
+
+closedir( SERVICE_TESTS );
+
+foreach my $test( @tests )
+{
+    my $path   = $SERVICE_TESTS . $test;
+    print "$test: ";
+    my $result = system( $path );
+    if( $result != 0 )
+    {
+        croak( "Service unit test $test failed" );
+    }
+}
 
 my $pg_handle = DBI->connect(
     $POSTGRES_CONN_STRING,
