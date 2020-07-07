@@ -181,7 +181,7 @@ void _log( unsigned short log_level, char * message, ... )
     va_start( args, message );
 
 #ifndef DEBUG
-    if( log_level == LOG_LEVEL_DEBUG )
+    if( log_level != LOG_LEVEL_DEBUG )
     {
 #endif
         fprintf(
@@ -241,8 +241,10 @@ struct worker * new_worker(
     char              wal_level
 )
 {
-    struct worker * result = NULL;
-    pid_t           pid    = 0;
+    struct worker * result      = NULL;
+    pid_t           pid         = 0;
+    char *          worker_name = NULL;
+    unsigned int    size        = 0;
 
     if( workerslot == NULL )
     {
@@ -271,6 +273,7 @@ struct worker * new_worker(
     result->my_argc        = my_argc;
     result->my_argv        = my_argv;
     result->type           = type;
+
     worker_set_config(
         result,
         channel,
@@ -304,12 +307,27 @@ struct worker * new_worker(
         signal( SIGHUP, __sighup );
         signal( SIGTERM, __sigterm );
         signal( SIGINT, __sigint );
+
+        size = strlen( WORKER_TITLE_CHILD ) - 2 + strlen( channel ) + 1;
+        worker_name = ( char * ) calloc(
+            1,
+            sizeof( char ) * size
+        );
+
+        if( worker_name == NULL )
+            exit( 0 );
+
+        snprintf( worker_name, size, WORKER_TITLE_CHILD, channel );
+
         _set_process_title(
             my_argv,
             my_argc,
-            WORKER_TITLE_CHILD,
+            worker_name,
             &max_argv_size
         );
+
+        free( worker_name );
+        worker_name = NULL;
         result->status = WORKER_STATUS_STARTUP;
         function( ( void * ) workers[id] );
         exit( 0 );
@@ -355,7 +373,7 @@ void worker_set_config(
             strnlen( channel, MAX_CHANNEL_LENGTH )
         );
 
-        worker->config.channel[MAX_CHANNEL_LENGTH] = '\0';
+        worker->config.channel[MAX_CHANNEL_LENGTH - 1] = '\0';
     }
 
     if( filter_tables != NULL )
@@ -721,16 +739,19 @@ void _set_process_title(
 
 void __sigterm( int sig )
 {
+    got_sigterm = true;
     __term();
 }
 
 void __sigint( int sig )
 {
+    got_sigint = true;
     __term();
 }
 
 void __sighup( int sig )
 {
+    got_sighup = true;
     return;
 }
 

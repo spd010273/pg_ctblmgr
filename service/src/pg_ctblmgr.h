@@ -20,6 +20,6 @@ static void get_filter_tables_by_channel(
     char ***,
     unsigned int *
 );
-static void destroy_replication_slot( struct worker * );
+static void get_worker_pins( struct worker *, struct buffer_pin *** );
 
 #endif // PG_CTBLMGR_H

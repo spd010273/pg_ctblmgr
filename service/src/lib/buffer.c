@@ -11,7 +11,11 @@ static void _clear_mutex( bool * );
 static struct buffer_pin * _new_buffer_pin( void );
 static struct buffer * _new_buffer( void );
 
-void buffer_populate_trie( struct buffer ** b, char ** qual_name, unsigned int n_quals )
+void buffer_populate_trie(
+    struct buffer ** b,
+    char **          qual_name,
+    unsigned int     n_quals
+)
 {
     void *              data = NULL;
     struct buffer_pin * bp   = NULL;
@@ -69,7 +73,10 @@ void new_buffer( struct buffer ** b, char * qual_name, void * wal_data )
     return;
 }
 
-struct buffer_pin * buffer_get_pin_by_name( struct buffer * b, char * qual_name )
+struct buffer_pin * buffer_get_pin_by_name(
+    struct buffer * b,
+    char *          qual_name
+)
 {
     struct buffer_pin * bp   = NULL;
     void *              data = NULL;

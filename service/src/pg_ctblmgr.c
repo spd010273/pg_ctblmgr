@@ -40,7 +40,6 @@ int main( int argc, char ** argv )
 
     if( !initialize_buffer( parent ) )
     {
-        destroy_replication_slot( parent );
         _log(
             LOG_LEVEL_FATAL,
             "Failed to initialize WAL buffers"
@@ -51,7 +50,6 @@ int main( int argc, char ** argv )
 
     if( worker_count < 0 )
     {
-        destroy_replication_slot( parent );
         _log(
             LOG_LEVEL_INFO,
             "No tables to maintain, shutting down..."
@@ -63,10 +61,17 @@ int main( int argc, char ** argv )
     // Main loop
     while( true )
     {
-
+        /*
+         * Parent needs to:
+         *     - Prune the trie when pgctblmgr relations are modified
+         *     - Prune the SLPQ when the oldest LSNs have been consumed by their worker(s)
+         *     - Add newer, translated LSNs to the SLPQ
+         *     - Verify workers are still running and alove
+         *     - Collect and maintain statistics
+         */
+        sleep( 1.0 );
     }
 
-    destroy_replication_slot( parent );
     __term();
 }
 
@@ -140,8 +145,13 @@ static int start_workers( void )
             {
                 if( workers[i] == NULL )
                 {
-                    get_filter_tables_by_channel( parent, channel, &filter, &num_tables );
-                    
+                    get_filter_tables_by_channel(
+                        parent,
+                        channel,
+                        &filter,
+                        &num_tables
+                    );
+
                     if( num_tables == 0 )
                     {
                         return -1;
@@ -165,9 +175,9 @@ static int start_workers( void )
                         return -1;
                     }
 
-                    if( workers[i]->type == WORKER_TYPE_CHILD )
+                    if( workers[i]->type != WORKER_TYPE_CHILD )
                     {
-                        exit(0);
+                        _log( LOG_LEVEL_FATAL, "Error creating new worker" );
                     }
                 }
             }
@@ -205,6 +215,7 @@ static bool extension_installed( void )
 
     if( PQntuples( result ) > 0 )
     {
+        PQclear( result );
         return true;
     }
 
@@ -214,8 +225,9 @@ static bool extension_installed( void )
 
 static void worker_entrypoint( void * data )
 {
-    struct worker *   me        = NULL;
-    PGresult *        result    = NULL;
+    struct worker *      me     = NULL;
+    PGresult *           result = NULL;
+    struct buffer_pin ** pins   = NULL;
 
     if( data == NULL )
     {
@@ -263,17 +275,65 @@ static void worker_entrypoint( void * data )
     // Start main program
     me->status = WORKER_STATUS_IDLE;
 
+    _log( LOG_LEVEL_DEBUG, "Worker entering main loop" );
+
+    get_worker_pins( me, &pins );
+
+    if( pins == NULL )
+        return;
+
     while( 1 )
     {
+        sleep( 1 );
         if( me->conn == NULL )
         {
             db_connect( me );
         }
+        /*
+         * Worker needs to:
+         *     - consume SLPQ entries from oldest LSN to newest for tables
+         */
 
         // Start looking at buffer
     }
 
     me->status = WORKER_STATUS_DEAD;
+    return;
+}
+
+static void get_worker_pins( struct worker * me, struct buffer_pin *** bp_array )
+{
+    unsigned int i = 0;
+
+    if( me == NULL || bp_array == NULL )
+        return;
+
+    if( me->config.num_tables == 0 )
+        return;
+
+    if( *bp_array == NULL )
+    {
+        free( *bp_array );
+        (*bp_array) = NULL;
+    }
+
+    *bp_array = ( struct buffer_pin ** ) calloc(
+        me->config.num_tables,
+        sizeof( struct buffer_pin * )
+    );
+
+    if( *bp_array == NULL )
+        return;
+
+    for( i = 0; i < me->config.num_tables; i++ )
+    {
+        _log( LOG_LEVEL_DEBUG, "Adding pin for table %s", me->config.filter_tables[i] );
+        (*bp_array)[i] = buffer_get_pin_by_name(
+            me->buffer,
+            me->config.filter_tables[i]
+        );
+    }
+
     return;
 }
 
@@ -296,9 +356,13 @@ static bool setup_replication_slot( struct worker * me )
 
     if( result == NULL || me->conn == NULL )
         return false;
-   
-    if( PQntuples( result ) > 1 )
-        return false; // slot already exists
+
+    if( PQntuples( result ) > 0 )
+    {
+        _log( LOG_LEVEL_DEBUG, "Connecting to existing replication slot" );
+        PQclear( result );
+        return true;
+    }
 
     PQclear( result );
 
@@ -323,15 +387,14 @@ static bool setup_replication_slot( struct worker * me )
  */
 static bool initialize_buffer( struct worker * me )
 {
-    struct buffer * buff          = NULL;
-    char **         filter_tables = NULL;
-    unsigned int    num_tables    = 0;
-    unsigned int    i             = 0;
+    char **      filter_tables = NULL;
+    unsigned int num_tables    = 0;
+    unsigned int i             = 0;
 
     if( me == NULL || me->type != WORKER_TYPE_PARENT )
         return false;
 
-    new_buffer( &buff, NULL, NULL ); 
+    new_buffer( &(me->buffer), NULL, NULL );
 
     get_filter_tables_by_channel(
         me,
@@ -342,6 +405,7 @@ static bool initialize_buffer( struct worker * me )
 
     if( num_tables == 0 )
     {
+        _log( DEBUG, "No tables in channel" );
         return false;
     }
 
@@ -430,7 +494,7 @@ static void get_filter_tables_by_channel(
             sizeof( char ),
             strlen( table ) + 1
         );
-          
+
         if( (*filter)[i] == NULL )
         {
             *num_tables = 0;
@@ -439,35 +503,9 @@ static void get_filter_tables_by_channel(
         }
 
         strncpy( (*filter)[i], table, strlen( table ) );
-        (*filter)[i][strlen(table) + 1] = '\0';
+        (*filter)[i][strlen(table)] = '\0';
     }
 
     PQclear( filter_result );
-    return;
-}
-
-static void destroy_replication_slot( struct worker * me )
-{
-    PGresult * result = NULL;
-
-    if( me == NULL || me->type != WORKER_TYPE_PARENT )
-        return;
-
-    result = execute_query(
-        me,
-        ( char * ) replication_slot_destroy,
-        NULL,
-        0
-    );
-
-    if( result == NULL || me->conn == NULL )
-    {
-        _log(
-            LOG_LEVEL_ERROR,
-            "Failed to drop replication slot, please remove manually"
-        );
-    }
-
-    PQclear( result );
     return;
 }

@@ -48,8 +48,8 @@
 #define EXTENSION_SCHEMA "pgctblmgr"
 #define MAIN_CHANNEL "__pg_ctblmgr"
 #define PLUGIN_NAME "pg_ctblmgr"
-#define WORKER_TITLE_PARENT "pg_ctblmgr main process"
-#define WORKER_TITLE_CHILD "pg_ctblmgr logical receiver"
+#define WORKER_TITLE_PARENT "pg_ctblmgr logical receiver"
+#define WORKER_TITLE_CHILD "pg_ctblmgr worker (%s)"
 #define LOG_FILE_NAME "/var/log/pg_ctblmgr/pg_ctblmgr.log"
 
 #define MIN(x,y) (x>y?y:x)
@@ -93,16 +93,16 @@ void _usage( char * ) __attribute__ ((noreturn));
 void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
 
 extern struct worker * new_worker(
-    unsigned short,
-    unsigned long int,
-    int,
-    char **,
-    void (*)( void * ),
-    struct worker *,
-    char *,       // channel
-    char **,      // filter_tables
-    unsigned int, // num_tables
-    char          // wal_level
+    unsigned short,     // type
+    unsigned long int,  // id
+    int,                // argc
+    char **,            // argv
+    void (*)( void * ), // Entrypoint
+    struct worker *,    // workerslot
+    char *,             // channel
+    char **,            // filter_tables
+    unsigned int,       // num_tables
+    char                // wal_level
 );
 
 extern void worker_set_config(
@@ -117,8 +117,8 @@ extern bool parent_init( int, char ** );
 extern void free_worker( struct worker * );
 extern bool create_pid_file( void );
 
-extern void __sigterm( int ) __attribute__ ((noreturn));
-extern void __sigint( int ) __attribute__ ((noreturn));
+extern void __sigterm( int );
+extern void __sigint( int );
 extern void __sighup( int );
 extern void __term( void ) __attribute__ ((noreturn));
 
