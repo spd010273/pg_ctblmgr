@@ -57,8 +57,8 @@ struct changeset * json_to_changeset(
     jsmn_init( &parser );
 
     tokens = ( jsmntok_t * ) calloc(
-        sizeof( jsmntok_t ),
-        n
+        n,
+        sizeof( jsmntok_t )
     );
 
     if( tokens == NULL )
@@ -144,8 +144,8 @@ struct changeset * json_to_changeset(
         }
 
         key_string = ( char * ) calloc(
-            sizeof( char ),
-            ( key->end - key->start ) + 1
+            ( key->end - key->start ) + 1,
+            sizeof( char )
         );
 
         if( key_string == NULL )
@@ -914,11 +914,11 @@ static void _parse_data_record(
 
         if( *num_elements == 0 )
         {
-            *val_array = ( char ** ) calloc( sizeof( char * ), 1 );
+            *val_array = ( char ** ) calloc( 1, sizeof( char * ) );
 
             if( columns != NULL )
             {
-                *columns = ( char ** ) calloc( sizeof( char * ), 1 );
+                *columns = ( char ** ) calloc( 1, sizeof( char * ) );
             }
         }
         else
@@ -938,8 +938,8 @@ static void _parse_data_record(
         }
 
         (*val_array)[(*num_elements)] = ( char * ) calloc(
-            sizeof( char ),
-            val->end - val->start + 1
+            val->end - val->start + 1,
+            sizeof( char )
         );
 
         if( (*val_array)[(*num_elements)] == NULL )
@@ -952,8 +952,8 @@ static void _parse_data_record(
         if( columns != NULL )
         {
             (*columns)[(*num_elements)] = ( char * ) calloc(
-                sizeof( char ),
-                key->end - key->start + 1
+                key->end - key->start + 1,
+                sizeof( char )
             );
 
             if( (*columns)[(*num_elements)] == NULL )
@@ -1003,8 +1003,8 @@ static struct changeset * _new_changeset( void )
     struct changeset * cs = NULL;
 
     cs = ( struct changeset * ) calloc(
-        sizeof( struct changeset ),
-        1
+        1,
+        sizeof( struct changeset )
     );
 
     if( cs == NULL )
@@ -1040,8 +1040,8 @@ static inline char * _json_token_to_string(
         return NULL;
 
     result = ( char * ) calloc(
-        sizeof( char ),
-        ( token->end - token->start ) + 1
+        ( token->end - token->start ) + 1,
+        sizeof( char )
     );
 
     if( result == NULL )

@@ -310,8 +310,8 @@ struct worker * new_worker(
 
         size = strlen( WORKER_TITLE_CHILD ) - 2 + strlen( channel ) + 1;
         worker_name = ( char * ) calloc(
-            1,
-            sizeof( char ) * size
+            size,
+            sizeof( char )
         );
 
         if( worker_name == NULL )
@@ -380,8 +380,8 @@ void worker_set_config(
     {
         worker->config.num_tables = num_tables;
         worker->config.filter_tables = calloc(
-            sizeof( char * ),
-            num_tables
+            num_tables,
+            sizeof( char * )
         );
 
         if( worker->config.filter_tables == NULL )
@@ -392,8 +392,8 @@ void worker_set_config(
         for( i = 0; i < num_tables; i++ )
         {
             worker->config.filter_tables[i] = calloc(
-                sizeof( char ),
-                strlen( filter_tables[i] ) + 1
+                strlen( filter_tables[i] ) + 1,
+                sizeof( char )
             );
 
             if( worker->config.filter_tables[i] == NULL )
@@ -550,8 +550,8 @@ bool create_pid_file( void )
                + string_offset + 1;
 
     pid_path = ( char * ) calloc(
-        sizeof( char ),
-        total_size
+        total_size,
+        sizeof( char )
     );
 
     if( pid_path == NULL )
@@ -607,8 +607,8 @@ bool create_pid_file( void )
     total_size = ( unsigned int ) ceil( log10( ( int ) getpid() ) + 3 );
 
     my_pid = ( char * ) calloc(
-        sizeof( char ),
-        total_size
+        total_size,
+        sizeof( char )
     );
 
     if( my_pid == NULL )
