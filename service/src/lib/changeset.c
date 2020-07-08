@@ -239,9 +239,9 @@ struct changeset * json_to_changeset(
                     subobject_end = keys_val->end;
                 }
                 else if(
-                           type_val != NULL && xid_val != NULL
+                           type_val   != NULL && xid_val   != NULL
                         && schema_val != NULL && table_val != NULL
-                        && keys_val != NULL
+                        && keys_val   != NULL
                        )
                 {
                     done = true;

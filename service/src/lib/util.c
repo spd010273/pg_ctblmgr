@@ -547,7 +547,8 @@ bool create_pid_file( void )
 
     total_size = strlen( path )
                + strlen( pid_file )
-               + string_offset + 1;
+               + string_offset
+               + 1;
 
     pid_path = ( char * ) calloc(
         total_size,
@@ -827,6 +828,7 @@ void __term( void )
 {
     struct worker * me       = NULL;
     struct stat     filestat = {0};
+
     me = get_worker_by_pid();
 
     if( me == NULL )
@@ -847,6 +849,7 @@ void __term( void )
                 );
             }
 
+            free( me->pidfile );
             me->pidfile = NULL;
         }
 
@@ -859,7 +862,7 @@ void __term( void )
     }
     else
     {
-
+        // Clear out child resources
     }
 
     exit( 0 );

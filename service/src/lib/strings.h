@@ -36,12 +36,12 @@ const char * replication_seek = "\
            data::JSONB AS data \
       FROM pg_catalog.pg_logical_slot_get_changes( \
                $1, \
-               NULL, \
+               $2, \
                NULL, \
                'wal-level', \
-               $2, \
-               'filter-tables', \
                $3, \
+               'filter-tables', \
+               $4, \
                'include-transactions', \
                FALSE \
            ) ";

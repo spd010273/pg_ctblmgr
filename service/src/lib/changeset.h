@@ -39,12 +39,12 @@ struct changeset {
     char **             old_vals;
     unsigned int        num_columns;
     char *              schema_name;
-    char *              table_name; 
+    char *              table_name;
     unsigned long int   xid;
     pg_ctblmgr_dml_type type;
     time_t              timestamp;
 };
 
-struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level ); 
+struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level );
 
 #endif // CHANGESET_H

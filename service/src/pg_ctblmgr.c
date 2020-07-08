@@ -58,21 +58,169 @@ int main( int argc, char ** argv )
         __term();
     }
 
-    // Main loop
+    parent_main_loop();
+    __term();
+}
+
+static char * get_filter_tables_string( void )
+{
+    char **      filter_tables = NULL;
+    char *       output        = NULL;
+    unsigned int num_tables    = 0;
+    unsigned int i             = 0;
+    unsigned int size          = 0;
+
+    get_filter_tables_by_channel(
+        parent,
+        NULL,
+        &filter_tables,
+        &num_tables
+    );
+
+    if( filter_tables == NULL || num_tables == 0 )
+        return NULL;
+
+    for( i = 0; i < num_tables; i++ )
+    {
+        size += strlen( filter_tables[i] ) + 1;
+    }
+
+    size++;
+
+    output = ( char * ) calloc(
+        size,
+        sizeof( char )
+    );
+
+    if( output == NULL )
+        return NULL;
+
+    strncpy( output, filter_tables[0], strlen( filter_tables[0] ) );
+    free( filter_tables[0] );
+
+    for( i = 1; i < num_tables; i++ )
+    {
+        strncat( output, ",", 1 );
+        strncat( output, filter_tables[i], strlen( filter_tables[i] ) );
+        free( filter_tables[i] );
+    }
+
+    free( filter_tables );
+    return output;
+}
+
+static void parent_main_loop( void )
+{
+    char *              params[4]      = {NULL};
+    char *              filter_tables  = NULL;
+    PGresult *          result         = NULL;
+    unsigned int        i              = 0;
+    unsigned int        j              = 0;
+    char *              lsn            = NULL;
+    char *              newest_lsn     = NULL;
+    char *              xid            = NULL;
+    char *              data           = NULL;
+    char                qual[QUAL_MAX] = {0};
+    struct changeset *  cs             = NULL;
+    struct buffer_pin * bp             = NULL;
+
+    filter_tables = get_filter_tables_string();
+
+    if( filter_tables == NULL )
+        return;
+
     while( true )
     {
         /*
          * Parent needs to:
-         *     - Prune the trie when pgctblmgr relations are modified
-         *     - Prune the SLPQ when the oldest LSNs have been consumed by their worker(s)
-         *     - Add newer, translated LSNs to the SLPQ
          *     - Verify workers are still running and alove
          *     - Collect and maintain statistics
+         *     - Consume translated WAL and insert into each child's SLPQ / trie
          */
         sleep( 1.0 );
+
+        // Start of proto loop
+        params[0] = MAIN_CHANNEL;
+        params[1] = "F"; // Need way to switch this?
+        params[2] = filter_tables; // Filter tables
+
+        result = execute_query(
+            parent,
+            ( char * ) replication_peek,
+            params,
+            3
+        );
+
+        if( result == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Replication peek failed"
+            );
+            continue;
+        }
+
+        // This could be made more efficient by constructing a trie
+        // pointing to an array of BPs so it's not exactly N**2
+        for( i = 0; i < PQntuples( result ); i++ )
+        {
+            data = get_column_value( i, result, "data" );
+            xid  = get_column_value( i, result, "xid"  );
+            lsn  = get_column_value( i, result, "lsn"  );
+            cs   = json_to_changeset( data, PGC_WAL_FULL );
+
+            for( j = 0; j < num_workers; j++ )
+            {
+                memset( qual, 0, QUAL_MAX );
+                strncpy( qual, cs->schema_name, strlen( cs->schema_name ) );
+                strncat( qual, ".", 1 );
+                strncat( qual, cs->table_name, strlen( cs->table_name ) );
+                bp = buffer_get_pin_by_name( workers[i]->buffer, qual );
+
+                if( bp != NULL )
+                {
+                    if( !buffer_pin_push( bp, ( void * ) cs ) )
+                    {
+                        _log(
+                            LOG_LEVEL_ERROR,
+                            "Failed to push changeset for %s.%s to worker %d",
+                            cs->schema_name,
+                            cs->table_name,
+                            (workers[i])->pid
+                        );
+                    }
+                }
+            }
+        }
+
+        params[0] = MAIN_CHANNEL;
+        params[1] = newest_lsn;
+        params[2] = "M";
+        params[3] = filter_tables;
+
+        result = execute_query(
+            parent,
+            ( char * ) replication_seek,
+            params,
+            4
+        );
+
+        if( got_sighup )
+        {
+            free( filter_tables );
+            filter_tables = get_filter_tables_string();
+            if( filter_tables == NULL )
+            {
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "Failed to get filter tables string"
+                );
+                return;
+            }
+        }
     }
 
-    __term();
+    return;
 }
 
 static int start_workers( void )
@@ -228,6 +376,7 @@ static void worker_entrypoint( void * data )
     struct worker *      me     = NULL;
     PGresult *           result = NULL;
     struct buffer_pin ** pins   = NULL;
+    unsigned int         i      = 0;
 
     if( data == NULL )
     {
@@ -295,6 +444,24 @@ static void worker_entrypoint( void * data )
          */
 
         // Start looking at buffer
+        for( i = 0; i < me->config.num_tables; i++ )
+        {
+            data = buffer_pin_pop( pins[i] );
+
+            if( data == NULL )
+            {
+                _log(
+                    LOG_LEVEL_DEBUG,
+                    "Buffer pin %p (%s) empty",
+                    pins[i],
+                    me->config.filter_tables[i]
+                );
+            }
+            else
+            {
+                // data is a valid changeset and we'll add it to our todo list
+            }
+        }
     }
 
     me->status = WORKER_STATUS_DEAD;
