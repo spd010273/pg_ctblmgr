@@ -22,6 +22,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <sys/time.h>
+#include <stdint.h>
 
 #include "buffer.h"
 
@@ -82,6 +83,7 @@ struct worker {
     char *          pidfile;  // used by parent to remove pid file on term
     struct pgc_conf config;
     struct buffer * buffer;
+    uint64_t        last_lsn;
 };
 
 struct worker ** workers;

@@ -6,6 +6,7 @@
 #include "lib/strings.h"
 #include "lib/buffer.h"
 #include "lib/changeset.h"
+#include "lib/xlog.h"
 
 #define QUAL_MAX 128
 int main( int, char ** );

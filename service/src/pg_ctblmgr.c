@@ -116,19 +116,23 @@ static void parent_main_loop( void )
     PGresult *          result         = NULL;
     unsigned int        i              = 0;
     unsigned int        j              = 0;
-    char *              lsn            = NULL;
-    char *              newest_lsn     = NULL;
-    char *              xid            = NULL;
+    uint32_t            xid            = 0;
     char *              data           = NULL;
     char                qual[QUAL_MAX] = {0};
     struct changeset *  cs             = NULL;
     struct buffer_pin * bp             = NULL;
+    uint64_t            curr_lsn       = 0;
+    uint64_t            latest_lsn     = 0;
 
     filter_tables = get_filter_tables_string();
 
     if( filter_tables == NULL )
         return;
 
+    // XXX Another strategy here is to just have the parent feed each worker's buffer,
+    // then turn around and mop up after they've been consumed.
+    // The tough part here is not losing xlog changes. Especially in the case where >1 worker
+    // relies on changes from one table and finish at different rates
     while( true )
     {
         /*
@@ -164,10 +168,10 @@ static void parent_main_loop( void )
         // pointing to an array of BPs so it's not exactly N**2
         for( i = 0; i < PQntuples( result ); i++ )
         {
-            data = get_column_value( i, result, "data" );
-            xid  = get_column_value( i, result, "xid"  );
-            lsn  = get_column_value( i, result, "lsn"  );
-            cs   = json_to_changeset( data, PGC_WAL_FULL );
+            data     = get_column_value( i, result, "data" );
+            xid      = xid_in( get_column_value( i, result, "xid"  ) );
+            curr_lsn = lsn_to_offset( get_column_value( i, result, "lsn" ) );
+            cs       = json_to_changeset( data, PGC_WAL_FULL );
 
             for( j = 0; j < num_workers; j++ )
             {
@@ -191,19 +195,33 @@ static void parent_main_loop( void )
                     }
                 }
             }
+
+            if( curr_lsn > latest_lsn )
+                latest_lsn = curr_lsn;
         }
 
         params[0] = MAIN_CHANNEL;
-        params[1] = newest_lsn;
+        params[1] = offset_to_lsn( latest_lsn );;
         params[2] = "M";
         params[3] = filter_tables;
-
+        PQclear( result );
         result = execute_query(
             parent,
             ( char * ) replication_seek,
             params,
             4
         );
+
+        if( result == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to consume changes up to LSN %s",
+                params[1]
+            );
+        }
+        
+        free( params[1] );
 
         if( got_sighup )
         {
