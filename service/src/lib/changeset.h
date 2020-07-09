@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
+#include <stdint.h>
 
 #include "util.h"
 #define JSMN_HEADER
@@ -31,6 +32,7 @@ typedef enum {
 } pg_ctblmgr_dml_type;
 
 struct changeset {
+    uint64_t            lsn;
     char **             keys;
     char **             vals;
     unsigned int        num_keys;

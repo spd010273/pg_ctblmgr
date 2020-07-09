@@ -75,18 +75,18 @@ char * xid_out( uint32_t xid )
     int    size = 0;
 
     size = floor( log10( xid ) ) + 1;
-    
+
     out = ( char * ) calloc(
         size,
         sizeof( char )
     );
-    
+
     if( out == NULL )
         return NULL;
-    
+
     snprintf( out, size, "%u", xid );
-    
-    out[size] = '\0'; 
+
+    out[size] = '\0';
 
     return out;
 }

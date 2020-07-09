@@ -172,6 +172,14 @@ static void parent_main_loop( void )
             xid      = xid_in( get_column_value( i, result, "xid"  ) );
             curr_lsn = lsn_to_offset( get_column_value( i, result, "lsn" ) );
             cs       = json_to_changeset( data, PGC_WAL_FULL );
+            cs->lsn  = curr_lsn;
+
+            _log(
+                LOG_LEVEL_DEBUG,
+                "Processing XID %u, LSN %s",
+                xid,
+                get_column_value( i, result, "lsn" )
+            );
 
             for( j = 0; j < num_workers; j++ )
             {
@@ -220,7 +228,7 @@ static void parent_main_loop( void )
                 params[1]
             );
         }
-        
+
         free( params[1] );
 
         if( got_sighup )
@@ -391,10 +399,15 @@ static bool extension_installed( void )
 
 static void worker_entrypoint( void * data )
 {
-    struct worker *      me     = NULL;
-    PGresult *           result = NULL;
-    struct buffer_pin ** pins   = NULL;
-    unsigned int         i      = 0;
+    struct worker *      me      = NULL;
+    PGresult *           result  = NULL;
+    struct buffer_pin ** pins    = NULL;
+    unsigned int         i       = 0;
+    uint64_t             lsn     = 0;
+    uint64_t             max_lsn = 0;
+    struct changeset *   cs      = NULL;
+    char *               currlsn = NULL;
+    char *               lastlsn = NULL;
 
     if( data == NULL )
     {
@@ -478,6 +491,33 @@ static void worker_entrypoint( void * data )
             else
             {
                 // data is a valid changeset and we'll add it to our todo list
+                cs = ( struct changeset * ) data;
+                lsn          = cs->lsn;
+
+                // Sanity check to ensure we are consuming changes in order
+                if( cs->lsn <= me->last_lsn )
+                {
+                    currlsn = offset_to_lsn( cs->lsn );
+                    lastlsn = offset_to_lsn( me->last_lsn );
+
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Out of order LSN encountered, "
+                        "currently at %s, last %s",
+                        currlsn,
+                        lastlsn
+                    );
+
+                    free( currlsn );
+                    free( lastlsn );
+                }
+                else
+                {
+                    me->last_lsn = lsn;
+
+                    if( lsn > max_lsn )
+                        max_lsn = lsn;
+                }
             }
         }
     }
