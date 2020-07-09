@@ -172,14 +172,19 @@ static void parent_main_loop( void )
             xid      = xid_in( get_column_value( i, result, "xid"  ) );
             curr_lsn = lsn_to_offset( get_column_value( i, result, "lsn" ) );
             cs       = json_to_changeset( data, PGC_WAL_FULL );
-            cs->lsn  = curr_lsn;
 
-            _log(
-                LOG_LEVEL_DEBUG,
-                "Processing XID %u, LSN %s",
-                xid,
-                get_column_value( i, result, "lsn" )
-            );
+            if( cs == NULL )
+            {
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "Failed to parse changeset at xid %u, LSN %s",
+                    xid,
+                    get_column_value( i, result, "lsn" )
+                );
+                continue;
+            }
+
+            cs->lsn = curr_lsn;
 
             for( j = 0; j < num_workers; j++ )
             {
@@ -187,7 +192,8 @@ static void parent_main_loop( void )
                 strncpy( qual, cs->schema_name, strlen( cs->schema_name ) );
                 strncat( qual, ".", 1 );
                 strncat( qual, cs->table_name, strlen( cs->table_name ) );
-                bp = buffer_get_pin_by_name( workers[i]->buffer, qual );
+                _log( LOG_LEVEL_DEBUG, "Getting buffer pin for qual %s, worker slot %p, id %u", qual, workers[j], i );
+                bp = buffer_get_pin_by_name( (workers[j])->buffer, qual );
 
                 if( bp != NULL )
                 {
@@ -198,7 +204,7 @@ static void parent_main_loop( void )
                             "Failed to push changeset for %s.%s to worker %d",
                             cs->schema_name,
                             cs->table_name,
-                            (workers[i])->pid
+                            (workers[j])->pid
                         );
                     }
                 }
@@ -206,6 +212,8 @@ static void parent_main_loop( void )
 
             if( curr_lsn > latest_lsn )
                 latest_lsn = curr_lsn;
+
+            _log( LOG_LEVEL_DEBUG, "Loop %u", i );
         }
 
         params[0] = MAIN_CHANNEL;
@@ -229,6 +237,11 @@ static void parent_main_loop( void )
             );
         }
 
+        _log(
+            LOG_LEVEL_DEBUG,
+            "Consumed changes up to %s",
+            params[1]
+        );
         free( params[1] );
 
         if( got_sighup )

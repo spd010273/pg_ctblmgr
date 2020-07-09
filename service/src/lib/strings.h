@@ -31,7 +31,7 @@ INNER JOIN unnest( rs.filter ) x \
      WHERE rs.maintenance_channel = $1";
 
 const char * replication_seek = "\
-    SELECT location, \
+    SELECT lsn, \
            xid, \
            data::JSONB AS data \
       FROM pg_catalog.pg_logical_slot_get_changes( \
@@ -42,12 +42,12 @@ const char * replication_seek = "\
                $3, \
                'filter-tables', \
                $4, \
-               'include-transactions', \
-               FALSE \
+               'include-transaction', \
+               'FALSE' \
            ) ";
 
 const char * replication_peek = "\
-    SELECT location, \
+    SELECT lsn, \
            xid, \
            data::JSONB AS data \
       FROM pg_catalog.pg_logical_slot_peek_changes( \
@@ -58,8 +58,8 @@ const char * replication_peek = "\
                $2, \
                'filter-tables', \
                $3, \
-               'include-transactions', \
-               FALSE \
+               'include-transaction', \
+               'FALSE' \
            ) ";
 
 const char * get_worker_list = "\
