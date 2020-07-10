@@ -15,6 +15,10 @@
 #define JSMN_HEADER
 #include "jsmn/jsmn.h"
 
+#define _CS_FREE(x,y) free_shared_memory(x,y)
+#define _CS_ALLOC(x) create_shared_memory(x)
+#define _CS_REALLOC(x,y,z) resize_shared_memory(x,y,z)
+
 #define MIN(x,y) (x>y?y:x)
 
 typedef enum {

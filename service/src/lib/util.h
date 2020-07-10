@@ -126,6 +126,7 @@ extern void __term( void ) __attribute__ ((noreturn));
 
 extern void free_shared_memory( void *, size_t );
 extern void * create_shared_memory( size_t );
+extern void * resize_shared_memory( void *, size_t, size_t );
 extern void _set_process_title( char **, int, char *, unsigned int * );
 
 extern struct worker * get_worker_by_channel( char * );

@@ -139,7 +139,7 @@ struct changeset * json_to_changeset(
             );
             _jsmn_dump( key );
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -151,7 +151,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -302,7 +302,7 @@ struct changeset * json_to_changeset(
                 LOG_LEVEL_ERROR,
                 "Failed to parse DML type from json token"
             );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -353,7 +353,7 @@ struct changeset * json_to_changeset(
         {
             _jsmn_dump( xid_val );
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse XID value from json token"
@@ -382,7 +382,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse timestamp value from json token"
@@ -418,7 +418,7 @@ struct changeset * json_to_changeset(
                 );
                 free( key_string );
                 free( tokens );
-                free( cs );
+                _CS_FREE( cs, sizeof( struct changeset ) );
                 return NULL;
             }
         }
@@ -430,7 +430,7 @@ struct changeset * json_to_changeset(
             );
             free( key_string );
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -444,7 +444,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse schema from json token"
@@ -462,7 +462,7 @@ struct changeset * json_to_changeset(
         if( key_string == NULL )
         {
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             _log(
                 LOG_LEVEL_ERROR,
                 "Failed to parse table from json token"
@@ -483,7 +483,7 @@ struct changeset * json_to_changeset(
                 "Expected a JSON object for keys."
             );
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -515,7 +515,7 @@ struct changeset * json_to_changeset(
                 );
 
                 free( tokens );
-                free( cs );
+                _CS_FREE( cs, sizeof( struct changeset ) );
                 return NULL;
             }
 
@@ -546,17 +546,17 @@ struct changeset * json_to_changeset(
                         cs->num_keys
                 );
                 free( tokens );
-                free( cs );
+                _CS_FREE( cs, sizeof( struct changeset ) );
                 return NULL;
             }
 
             if( cs->num_keys == 0 )
             {
-                cs->keys = ( char ** ) malloc(
+                cs->keys = ( char ** ) _CS_ALLOC(
                     sizeof( char * )
                 );
 
-                cs->vals = ( char ** ) malloc(
+                cs->vals = ( char ** ) _CS_ALLOC(
                     sizeof( char * )
                 );
 
@@ -564,12 +564,12 @@ struct changeset * json_to_changeset(
                 {
                     if( cs->keys != NULL )
                     {
-                        free( cs->keys );
+                        _CS_FREE( cs->keys, sizeof( char * ) );
                     }
 
                     if( cs->vals != NULL )
                     {
-                        free( cs->vals );
+                        _CS_FREE( cs->vals, sizeof( char * ) );
                     }
 
                     free( tokens );
@@ -577,19 +577,21 @@ struct changeset * json_to_changeset(
                         LOG_LEVEL_ERROR,
                         "Failed to perform initial alloc for changeset kv"
                     );
-                    free( cs );
+                    _CS_FREE( cs, sizeof( struct changeset ) );
                     return NULL;
                 }
             }
             else
             {
-                cs->keys = ( char ** ) realloc(
+                cs->keys = ( char ** ) _CS_REALLOC(
                     cs->keys,
+                    cs->num_keys * sizeof( char * ),
                     ( cs->num_keys + 1 ) * sizeof( char * )
                 );
 
-                cs->vals = ( char ** ) realloc(
+                cs->vals = ( char ** ) _CS_REALLOC(
                     cs->vals,
+                    cs->num_keys * sizeof( char * ),
                     ( cs->num_keys + 1 ) * sizeof( char * )
                 );
 
@@ -599,24 +601,24 @@ struct changeset * json_to_changeset(
                     {
                         for( j = 0; j < cs->num_keys - 1; j++ )
                         {
-                            free( cs->keys[j] );
+                            _CS_FREE( cs->keys[j], strlen( cs->keys[j] ) );
                         }
 
-                        free( cs->keys );
+                        _CS_FREE( cs->keys, sizeof( char * ) * ( cs->num_keys - 1 ) );
                     }
 
                     if( cs->vals != NULL )
                     {
                         for( j = 0; j < cs->num_keys - 1; j++ )
                         {
-                            free( cs->vals[j] );
+                            _CS_FREE( cs->vals[j], strlen( cs->vals[j] ) );
                         }
 
-                        free( cs->vals );
+                        _CS_FREE( cs->vals, sizeof( char * ) * ( cs->num_keys - 1 ) );
                     }
 
                     free( tokens );
-                    free( cs );
+                    _CS_FREE( cs, sizeof( struct changeset ) );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Failed to perform incremental alloc for cs kv"
@@ -625,11 +627,11 @@ struct changeset * json_to_changeset(
                 }
             }
 
-            cs->keys[cs->num_keys] = ( char * ) malloc(
+            cs->keys[cs->num_keys] = ( char * ) _CS_ALLOC(
                 sizeof( char ) * ( key->end - key->start + 1 )
             );
 
-            cs->vals[cs->num_keys] = ( char * ) malloc(
+            cs->vals[cs->num_keys] = ( char * ) _CS_ALLOC(
                 sizeof( char ) * ( val->end - val->start + 1 )
             );
 
@@ -642,12 +644,12 @@ struct changeset * json_to_changeset(
                 {
                     for( j = 0; j < cs->num_keys; j++ )
                     {
-                        free( cs->keys[j] );
+                        _CS_FREE( cs->keys[j], strlen( cs->keys[j] ) );
                     }
 
-                    free( cs->keys );
+                    _CS_FREE( cs->keys, sizeof( char * ) * cs->num_keys );
                     free( tokens );
-                    free( cs );
+                    _CS_FREE( cs, sizeof( struct changeset ) );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Failed to allocate key array member"
@@ -659,12 +661,12 @@ struct changeset * json_to_changeset(
                 {
                     for( j = 0; j < cs->num_keys; j++ )
                     {
-                        free( cs->vals[j] );
+                        _CS_FREE( cs->vals[j], strlen( cs->keys[j] ) );
                     }
 
-                    free( cs->vals );
+                    _CS_FREE( cs->vals, sizeof( char * ) * cs->num_keys );
                     free( tokens );
-                    free( cs );
+                    _CS_FREE( cs, sizeof( struct changeset ) );
                     _log(
                         LOG_LEVEL_ERROR,
                         "Failed to allocate value array member"
@@ -716,7 +718,7 @@ struct changeset * json_to_changeset(
         {
             _log( LOG_LEVEL_ERROR, "Error parsing data subobject string '%s'", json + temp_val->start );
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -738,7 +740,7 @@ struct changeset * json_to_changeset(
             {
                 _log( LOG_LEVEL_ERROR, "failed to parse new vals from data object" );
                 free( tokens );
-                free( cs );
+                _CS_FREE( cs, sizeof( struct changeset ) );
                 return NULL;
             }
         }
@@ -758,7 +760,7 @@ struct changeset * json_to_changeset(
             {
                 _log( LOG_LEVEL_ERROR, "Failed to parse old vals from data object" );
                 free( tokens );
-                free( cs );
+                _CS_FREE( cs, sizeof( struct changeset ) );
                 return NULL;
             }
         }
@@ -766,7 +768,7 @@ struct changeset * json_to_changeset(
         {
             _log( LOG_LEVEL_ERROR, "unexpected record key in data subobject %s", key_string );
             free( tokens );
-            free( cs );
+            _CS_FREE( cs, sizeof( struct changeset ) );
             return NULL;
         }
 
@@ -926,20 +928,28 @@ static void _parse_data_record(
 
         if( *num_elements == 0 )
         {
-            *val_array = ( char ** ) calloc( 1, sizeof( char * ) );
+            *val_array = ( char ** ) _CS_ALLOC( sizeof( char * ) );
 
             if( columns != NULL )
             {
-                *columns = ( char ** ) calloc( 1, sizeof( char * ) );
+                *columns = ( char ** ) _CS_ALLOC( sizeof( char * ) );
             }
         }
         else
         {
-            *val_array = ( char ** ) realloc( *val_array, sizeof( char * ) * ( (*num_elements) + 1 ) );
+            *val_array = ( char ** ) _CS_REALLOC(
+                *val_array,
+                sizeof( char * ) * *num_elements,
+                sizeof( char * ) * ( (*num_elements) + 1 )
+            );
 
             if( columns != NULL )
             {
-                *columns = ( char ** ) realloc( *columns, sizeof( char * ) * ( (*num_elements) + 1 ) );
+                *columns = ( char ** ) _CS_REALLOC(
+                    *columns,
+                    sizeof( char * ) * *num_elements,
+                    sizeof( char * ) * ( (*num_elements) + 1 )
+                );
             }
         }
 
@@ -949,29 +959,27 @@ static void _parse_data_record(
             return;
         }
 
-        (*val_array)[(*num_elements)] = ( char * ) calloc(
-            val->end - val->start + 1,
-            sizeof( char )
+        (*val_array)[(*num_elements)] = ( char * ) _CS_ALLOC(
+            ( val->end - val->start + 1 ) * sizeof( char )
         );
 
         if( (*val_array)[(*num_elements)] == NULL )
         {
             _log( LOG_LEVEL_ERROR, "Failed to allocate memory" );
-            free( *val_array );
+            _CS_FREE( *val_array, *num_elements * sizeof( char * ) );
             return;
         }
 
         if( columns != NULL )
         {
-            (*columns)[(*num_elements)] = ( char * ) calloc(
-                key->end - key->start + 1,
-                sizeof( char )
+            (*columns)[(*num_elements)] = ( char * ) _CS_ALLOC(
+                ( key->end - key->start + 1 ) * sizeof( char )
             );
 
             if( (*columns)[(*num_elements)] == NULL )
             {
                 _log( LOG_LEVEL_ERROR, "Failed to allocate memory" );
-                free( *columns );
+                _CS_FREE( *columns, *num_elements * sizeof( char * ) );
                 return;
             }
         }
@@ -1014,8 +1022,7 @@ static struct changeset * _new_changeset( void )
 {
     struct changeset * cs = NULL;
 
-    cs = ( struct changeset * ) calloc(
-        1,
+    cs = ( struct changeset * ) _CS_ALLOC(
         sizeof( struct changeset )
     );
 
@@ -1096,12 +1103,12 @@ void free_changeset( struct changeset * cs )
     {
         for( i = 0; i < cs->num_keys; i++ )
         {
-            free( cs->keys[i] );
-            free( cs->vals[i] );
+            _CS_FREE( cs->keys[i], strlen( cs->keys[i] ) );
+            _CS_FREE( cs->vals[i], strlen( cs->vals[i] ) );
         }
 
-        free( cs->keys );
-        free( cs->vals );
+        _CS_FREE( cs->keys, sizeof( char * ) * cs->num_keys );
+        _CS_FREE( cs->vals, sizeof( char * ) * cs->num_keys );
 
         cs->keys = NULL;
         cs->vals = NULL;
@@ -1112,22 +1119,22 @@ void free_changeset( struct changeset * cs )
     {
         for( i = 0; i < cs->num_columns; i++ )
         {
-            free( cs->columns[i] );
+            _CS_FREE( cs->columns[i], strlen( cs->columns[i] ) );
 
             if( cs->old_vals != NULL )
-                free( cs->old_vals[i] );
+                _CS_FREE( cs->old_vals[i], strlen( cs->old_vals[i] ) );
 
             if( cs->new_vals != NULL )
-                free( cs->new_vals[i] );
+                _CS_FREE( cs->new_vals[i], strlen( cs->new_vals[i] ) );
         }
 
-        free( cs->columns );
+        _CS_FREE( cs->columns, sizeof( char * ) * cs->num_columns );
 
         if( cs->old_vals != NULL )
-            free( cs->old_vals );
+            _CS_FREE( cs->old_vals, sizeof( char * ) * cs->num_columns );
 
         if( cs->new_vals != NULL )
-            free( cs->new_vals );
+            _CS_FREE( cs->new_vals, sizeof( char * ) * cs->num_columns );
 
         cs->columns     = NULL;
         cs->old_vals    = NULL;
@@ -1136,15 +1143,15 @@ void free_changeset( struct changeset * cs )
     }
 
     if( cs->schema_name != NULL )
-        free( cs->schema_name );
+        _CS_FREE( cs->schema_name, strlen( cs->schema_name ) );
 
     if( cs->table_name != NULL )
-        free( cs->table_name );
+        _CS_FREE( cs->table_name, strlen( cs->table_name ) );
 
     cs->schema_name = NULL;
     cs->table_name = NULL;
 
-    free( cs );
+    _CS_FREE( cs, sizeof( struct changeset ) );
     return;
 }
 

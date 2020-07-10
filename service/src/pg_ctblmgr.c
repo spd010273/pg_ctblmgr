@@ -537,6 +537,7 @@ static void get_worker_pins( struct worker * me, struct buffer_pin *** bp_array 
         (*bp_array) = NULL;
     }
 
+    _log( LOG_LEVEL_DEBUG, "worker allocating %u pins", me->config.num_tables );
     *bp_array = ( struct buffer_pin ** ) calloc(
         me->config.num_tables,
         sizeof( struct buffer_pin * )

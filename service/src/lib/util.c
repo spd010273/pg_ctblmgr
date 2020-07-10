@@ -706,6 +706,23 @@ void * create_shared_memory( size_t size )
     return ptr;
 }
 
+void * resize_shared_memory( void * ptr, size_t old_size, size_t size )
+{
+    void * new = NULL;
+
+    if( size == 0 || ptr == NULL || old_size == 0 )
+        return NULL;
+
+    new = create_shared_memory( size );
+
+    if( new == NULL )
+        return NULL;
+
+    memcpy( new, ptr, old_size );
+    free_shared_memory( ptr, old_size );
+    return new;
+}
+
 void _set_process_title(
     char **        argv,
     int            argc,
