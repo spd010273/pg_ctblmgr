@@ -17,9 +17,10 @@
 
 #include "slpq.h"
 #include "trie.h"
+#include "util.h"
 
-#define _BUFFER_ALLOC(sz) calloc(1,sz)
-#define _BUFFER_FREE(ptr) free(ptr)
+#define _BUFFER_ALLOC(sz) create_shared_memory(sz)
+#define _BUFFER_FREE(ptr,sz) free_shared_memory(ptr,sz)
 
 struct buffer
 {

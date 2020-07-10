@@ -224,7 +224,7 @@ bool remove_buffer_pin_by_name( struct buffer * b, char * qual_name )
         bp = ( struct buffer_pin * ) trie_delete( &(b->trie), qual_name );
 
         if( bp != NULL )
-            _BUFFER_FREE( bp );
+            _BUFFER_FREE( bp, sizeof( struct buffer_pin ) );
 
         b->entries--;
         __C_MUTEX( (&(b->in_use)) );

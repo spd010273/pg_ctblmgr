@@ -2,9 +2,9 @@
 #define _SLPQ_H
 #include <stdbool.h>
 #include <stdlib.h>
-
-#define _SLPQ_ALLOC(sz) calloc(1,sz)
-#define _SLPQ_FREE(ptr) free(ptr)
+#include "util.h"
+#define _SLPQ_ALLOC(sz) create_shared_memory(sz)
+#define _SLPQ_FREE(ptr,sz) free_shared_memory(ptr,sz)
 
 /*
  *  Form a single-linked priority queue with the following structure:

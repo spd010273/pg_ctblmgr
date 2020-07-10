@@ -114,7 +114,7 @@ void * trie_delete( struct trie ** head, char * str )
             if( !_trie_has_children( *head ) )
             {
                 data = (*head)->data;
-                _TRIE_FREE( *head );
+                _TRIE_FREE( *head, sizeof( struct trie ) );
                 *head = NULL;
                 return data;
             }
@@ -128,7 +128,7 @@ void * trie_delete( struct trie ** head, char * str )
         if( !_trie_has_children( *head ) )
         {
             data = (*head)->data;
-            _TRIE_FREE( *head );
+            _TRIE_FREE( *head, sizeof( struct trie ) );
             *head = NULL;
             return data;
         }
@@ -148,7 +148,7 @@ void trie_free( struct trie ** node )
     }
 
     _trie_free( *node );
-    _TRIE_FREE( *node );
+    _TRIE_FREE( *node, sizeof( struct trie ) );
     *node = NULL;
     return;
 }
@@ -218,7 +218,7 @@ static void _trie_free( struct trie * node )
         if( node->character[i] != NULL )
         {
             _trie_free( node->character[i] );
-            _TRIE_FREE( node->character[i] );
+            _TRIE_FREE( node->character[i], sizeof( struct trie * ) );
             node->character[i] = NULL;
         }
     }

@@ -4,8 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define _TRIE_ALLOC(sz) calloc(1,sz)
-#define _TRIE_FREE(ptr) free(ptr)
+#include "util.h"
+
+#define _TRIE_ALLOC(sz) create_shared_memory(sz)
+#define _TRIE_FREE(ptr,sz) free_shared_memory(ptr,sz)
 #define TRIE_SIZE 96
 
 struct trie

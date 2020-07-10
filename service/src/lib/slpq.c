@@ -69,7 +69,7 @@ void * slpq_pop( struct slpq * head )
 
     data = temp->data;
     head->head = temp->next;
-    _SLPQ_FREE( temp );
+    _SLPQ_FREE( temp, sizeof( struct slpq_node ) );
     head->size--;
     return data;
 }
@@ -105,7 +105,7 @@ void * slpq_unshift( struct slpq * head )
     head->tail = temp;
     temp       = temp->next;
     data       = temp->data;
-    _SLPQ_FREE( temp );
+    _SLPQ_FREE( temp, sizeof( struct slpq_node ) );
     head->size--;
     return data;
 }
@@ -158,13 +158,13 @@ void slpq_free( struct slpq * head )
     {
         last = node;
         node = node->next;
-        _SLPQ_FREE( last );
+        _SLPQ_FREE( last, sizeof( struct slpq_node ) );
     }
 
     head->head = NULL;
     head->size = 0;
     head->tail = NULL;
-    _SLPQ_FREE( head );
+    _SLPQ_FREE( head, sizeof( struct slpq_node ) );
 
     return;
 }
