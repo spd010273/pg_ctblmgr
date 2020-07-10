@@ -124,6 +124,7 @@ extern void __sigint( int );
 extern void __sighup( int );
 extern void __term( void ) __attribute__ ((noreturn));
 
+extern void free_shared_memory( void *, size_t );
 extern void * create_shared_memory( size_t );
 extern void _set_process_title( char **, int, char *, unsigned int * );
 

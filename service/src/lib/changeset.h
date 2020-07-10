@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "util.h"
+#include "xlog.h"
 #define JSMN_HEADER
 #include "jsmn/jsmn.h"
 
@@ -51,5 +52,5 @@ struct changeset {
 
 struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level );
 void free_changeset( struct changeset * );
-
+void dump_changeset( struct changeset * );
 #endif // CHANGESET_H

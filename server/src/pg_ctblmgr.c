@@ -359,12 +359,15 @@ static void pg_ctblmgr_decode_commit_tx(
  * We could hook this function, but we also need the XID at the time the hook is
  * performed. Then again, the decoder may be running within the backend and have
  * access to the GUC stack as well as the current XID in which it was changed in
- * the session.
+ * the session (I actually doubt this is the case).
  *
  * More than likely - the best place to intercept this is at the tcop, because
  * it has access to xid information as well as directing the SET command to
  * guc.c routines, a good starting point is the standard_ProcessUtility in
  * backend/tcop/utility.c
+ *
+ * We may also need to cannibalize pg_logical_emit_message() to insert the GUC
+ * state into the WAL so that the decoder can reach it
  */
 static void pg_ctblmgr_decode_change(
     LogicalDecodingContext * context,
@@ -458,7 +461,7 @@ static void pg_ctblmgr_decode_change(
             old_tuple = change->data.tp.oldtuple != NULL ?
                         &(change->data.tp.oldtuple->tuple) :
                         NULL;
-            tuple     = old_tuple; 
+            tuple     = old_tuple;
             break;
         default:
             dml_type = "UNKNOWN";
@@ -541,7 +544,7 @@ static void pg_ctblmgr_decode_change(
             // May need to tear down the memory context
             return;
     }
-    
+
     // Append key information
     if( tuple != NULL )
     {

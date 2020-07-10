@@ -1147,3 +1147,157 @@ void free_changeset( struct changeset * cs )
     free( cs );
     return;
 }
+
+void dump_changeset( struct changeset * cs )
+{
+    unsigned int i    = 0;
+    char *       a    = NULL;
+    char *       b    = NULL;
+    char *       c    = NULL;
+    unsigned int a_sz = 0;
+    unsigned int b_sz = 0;
+    unsigned int c_sz = 0;
+    char *       lsn  = NULL;
+
+    _log( LOG_LEVEL_DEBUG, "Changeset %p", cs );
+
+    if( cs == NULL )
+        return;
+
+    lsn = offset_to_lsn( cs->lsn );
+    _log( LOG_LEVEL_DEBUG, "LSN: %lu (%s)", cs->lsn, lsn );
+    free( lsn );
+    _log( LOG_LEVEL_DEBUG, "num_keys: %u", cs->num_keys );
+    if( cs->num_keys > 0 )
+    {
+        for( i = 0; i < cs->num_keys; i++ )
+        {
+            a_sz += strlen( cs->keys[i] ) + 1;
+            b_sz += strlen( cs->vals[i] ) + 1;
+        }
+
+        a = ( char * ) calloc( a_sz, sizeof( char ) );
+        b = ( char * ) calloc( b_sz, sizeof( char ) );
+
+        strncpy( a, cs->keys[0], strlen( cs->keys[0] ) );
+        strncpy( b, cs->vals[0], strlen( cs->vals[0] ) );
+
+        for( i = 1; i < cs->num_keys; i++ )
+        {
+            strncat( a, ",", 1 );
+            strncat( a, cs->keys[i], strlen( cs->keys[i] ) );
+            strncat( b, ",", 1 );
+            strncat( b, cs->vals[i], strlen( cs->vals[i] ) );
+        }
+
+        _log( LOG_LEVEL_DEBUG, "keys: '%s'", a );
+        _log( LOG_LEVEL_DEBUG, "vals: '%s'", b );
+        free( a );
+        free( b );
+        a = NULL;
+        b = NULL;
+        a_sz = 0;
+        b_sz = 0;
+    }
+    else
+    {
+        _log( LOG_LEVEL_DEBUG, "keys: %p", cs->keys );
+        _log( LOG_LEVEL_DEBUG, "vals: %p", cs->vals );
+    }
+
+    _log( LOG_LEVEL_DEBUG, "num_columns: %u", cs->num_columns );
+    if( cs->num_columns > 0 )
+    {
+        for( i = 0; i < cs->num_columns; i++ )
+        {
+            a_sz += strlen( cs->columns[i] ) + 1;
+            if( cs->new_vals != NULL )
+                b_sz += strlen( cs->new_vals[i] ) + 1;
+
+            if( cs->old_vals != NULL )
+                c_sz += strlen( cs->old_vals[i] ) + 1;
+        }
+
+        a = ( char * ) calloc( a_sz, sizeof( char ) );
+
+        if( b_sz > 0 )
+            b = ( char * ) calloc( b_sz, sizeof( char ) );
+
+        if( c_sz > 0 )
+            c = ( char * ) calloc( c_sz, sizeof( char ) );
+
+        strncpy( a, cs->columns[0], strlen( cs->columns[0] ) );
+
+        if( cs->new_vals != NULL )
+            strncpy( b, cs->new_vals[0], strlen( cs->new_vals[0] ) );
+
+        if( cs->old_vals != NULL )
+            strncpy( c, cs->old_vals[0], strlen( cs->old_vals[0] ) );
+
+        for( i = 1; i < cs->num_columns; i++ )
+        {
+            strncat( a, ",", 1 );
+            strncat( a, cs->columns[i], strlen( cs->columns[i] ) );
+
+            if( cs->new_vals != NULL )
+            {
+                strncat( b, ",", 1 );
+                strncat( b, cs->new_vals[i], strlen( cs->new_vals[i] ) );
+            }
+
+            if( cs->old_vals != NULL )
+            {
+                strncat( c, ",", 1 );
+                strncat( c, cs->old_vals[i], strlen( cs->old_vals[i] ) );
+            }
+        }
+
+        _log( LOG_LEVEL_DEBUG, "columns: '%s'", a );
+        free( a );
+        if( cs->new_vals != NULL )
+        {
+            _log( LOG_LEVEL_DEBUG, "new_vals: '%s'", b );
+            free( b );
+        }
+        else
+        {
+            _log( LOG_LEVEL_DEBUG, "new_vals: %p", cs->new_vals );
+        }
+
+        if( cs->old_vals != NULL )
+        {
+            _log( LOG_LEVEL_DEBUG, "old_vals: '%s'", c );
+            free( c );
+        }
+        else
+        {
+            _log( LOG_LEVEL_DEBUG, "old_vals: %p", cs->old_vals );
+        }
+    }
+    else
+    {
+        _log( LOG_LEVEL_DEBUG, "new_vals: %p", cs->new_vals );
+        _log( LOG_LEVEL_DEBUG, "old_vals: %p", cs->old_vals );
+    }
+
+    _log( LOG_LEVEL_DEBUG, "schema_name: %s", cs->schema_name );
+    _log( LOG_LEVEL_DEBUG, "table_name: %s", cs->table_name );
+    _log( LOG_LEVEL_DEBUG, "XID: %lu", cs->xid );
+    _log(
+        LOG_LEVEL_DEBUG,
+        "type: %s",
+        cs->type == PGC_DML_UNINITIALIZED ? "UNINITIALIZED" :
+        cs->type == PGC_DML_INSERT ? "INSERT" :
+        cs->type == PGC_DML_UPDATE ? "UPDATE" :
+        cs->type == PGC_DML_DELETE ? "DELETE" :
+        cs->type == PGC_DML_TRUNCATE ? "TRUNCATE" :
+        cs->type == PGC_DML_COMMIT ? "COMMIT" :
+        cs->type == PGC_DML_BEGIN ? "BEGIN" :
+        cs->type == PGC_DML_ROLLBACK ? "ROLLBACK" :
+        "UNKNOWN"
+    );
+
+    _log( LOG_LEVEL_DEBUG, "timestamp: %s", ctime( &(cs->timestamp) ) );
+
+    return;
+}

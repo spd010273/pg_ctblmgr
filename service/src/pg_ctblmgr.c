@@ -122,6 +122,7 @@ static void parent_main_loop( void )
     struct changeset ** cs_array       = NULL;
     unsigned int        num_cs_array   = 0;
     char *              commit_lsn     = NULL;
+
     filter_tables = get_filter_tables_string();
 
     if( filter_tables == NULL )
@@ -141,7 +142,7 @@ static void parent_main_loop( void )
          */
         sleep( 1.0 );
         if(
-                !get_changeset_batch(
+                get_changeset_batch(
                     filter_tables,
                     &cs_array,
                     &num_cs_array,
@@ -149,25 +150,25 @@ static void parent_main_loop( void )
                 )
           )
         {
+            _log( LOG_LEVEL_DEBUG, "Got CS array %p, size: %u lsn %s", cs_array, num_cs_array, commit_lsn );
             if( num_cs_array == 0 )
                 continue; // no committed changes
-        }
-        else
-        {
+
             // XXX So uhhh the cs is not allocated in a shared space so access from the worker may
-            // SIGSEGV lol
+            // SIGSEGV lol (maybe not though, they are allocated in the parent process and distributed
+            // to the children. if it's the case we can convert lib/changeset.c to use shm allocation
             for( i = 0; i < num_cs_array; i++ )
             {
                 cs = cs_array[i];
                 _log( LOG_LEVEL_DEBUG, "Got change LSN %s", offset_to_lsn( cs->lsn ) );
-
+                dump_changeset( cs );
                 for( j = 0; j < num_workers; j++ )
                 {
                     memset( qual, 0, QUAL_MAX );
                     strncpy( qual, cs->schema_name, strlen( cs->schema_name ) );
                     strncat( qual, ".", 1 );
                     strncat( qual, cs->table_name, strlen( cs->table_name ) );
-                    //_log( LOG_LEVEL_DEBUG, "Getting buffer pin for qual %s, worker slot %p, id %u", qual, workers[j], j );
+
                     bp = buffer_get_pin_by_name( (workers[j])->buffer, qual );
 
                     if( bp != NULL )
@@ -213,6 +214,10 @@ static void parent_main_loop( void )
             free( cs_array );
             cs_array = NULL;
             PQclear( result );
+        }
+        else
+        {
+            _log( LOG_LEVEL_ERROR, "Failure in fetching changesets" );
         }
 
         if( got_sighup )

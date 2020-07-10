@@ -667,9 +667,18 @@ void free_worker( struct worker * worker )
         worker->conn = NULL;
     }
 
-    munmap( worker, sizeof( struct worker ) );
+    free_shared_memory( worker, sizeof( struct worker ) );
     worker = NULL;
     return;
+}
+
+void free_shared_memory( void * data, size_t size )
+{
+    if( data == NULL || size == 0 )
+        return;
+
+    munmap( data, size );
+    data = NULL;
 }
 
 void * create_shared_memory( size_t size )
