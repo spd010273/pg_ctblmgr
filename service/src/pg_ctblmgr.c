@@ -161,7 +161,7 @@ static void parent_main_loop( void )
             {
                 cs = cs_array[i];
                 _log( LOG_LEVEL_DEBUG, "Got change LSN %s", offset_to_lsn( cs->lsn ) );
-                dump_changeset( cs );
+                //dump_changeset( cs );
                 for( j = 0; j < num_workers; j++ )
                 {
                     memset( qual, 0, QUAL_MAX );
@@ -446,10 +446,14 @@ static void worker_entrypoint( void * data )
 
     _log( LOG_LEVEL_DEBUG, "Worker entering main loop" );
 
-    get_worker_pins( me, &pins );
+    while( pins == NULL )
+    {
+        get_worker_pins( me, &pins );
+        sleep( 1 );
+        _log( LOG_LEVEL_DEBUG, "Worker waiting on pins (%p)...", pins );
+    }
 
-    if( pins == NULL )
-        return;
+    _log( LOG_LEVEL_DEBUG, "Pins: %p", pins );
 
     while( 1 )
     {
@@ -464,10 +468,11 @@ static void worker_entrypoint( void * data )
          */
 
         // Start looking at buffer
+        _log( LOG_LEVEL_DEBUG, "Worker in main loop" );
         for( i = 0; i < me->config.num_tables; i++ )
         {
             data = buffer_pin_pop( pins[i] );
-
+            _log( LOG_LEVEL_DEBUG, "Worker popped %p from pin %p", data, pins[i] );
             if( data == NULL )
             {
                 _log(
@@ -483,6 +488,7 @@ static void worker_entrypoint( void * data )
                 cs = ( struct changeset * ) data;
                 lsn          = cs->lsn;
 
+                dump_changeset( cs );
                 // Sanity check to ensure we are consuming changes in order
                 if( cs->lsn <= me->last_lsn )
                 {
