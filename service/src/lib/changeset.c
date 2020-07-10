@@ -320,6 +320,18 @@ struct changeset * json_to_changeset(
         {
             cs->type = PGC_DML_UPDATE;
         }
+        else if( strncmp( key_string, "B", 1 ) == 0 )
+        {
+            cs->type = PGC_DML_BEGIN;
+        }
+        else if( strncmp( key_string, "C", 1 ) == 0 )
+        {
+            cs->type = PGC_DML_COMMIT;
+        }
+        else if( strncmp( key_string, "R", 1 ) == 0 )
+        {
+            cs->type = PGC_DML_ROLLBACK;
+        }
         else
         {
             _log(
@@ -1071,5 +1083,67 @@ static void _jsmn_dump( jsmntok_t * token )
         token->size
     );
 
+    return;
+}
+
+void free_changeset( struct changeset * cs )
+{
+    unsigned int i = 0;
+    if( cs == NULL )
+        return;
+
+    if( cs->keys != NULL )
+    {
+        for( i = 0; i < cs->num_keys; i++ )
+        {
+            free( cs->keys[i] );
+            free( cs->vals[i] );
+        }
+
+        free( cs->keys );
+        free( cs->vals );
+
+        cs->keys = NULL;
+        cs->vals = NULL;
+        cs->num_keys = 0;
+    }
+
+    if( cs->columns != NULL )
+    {
+        for( i = 0; i < cs->num_columns; i++ )
+        {
+            free( cs->columns[i] );
+
+            if( cs->old_vals != NULL )
+                free( cs->old_vals[i] );
+
+            if( cs->new_vals != NULL )
+                free( cs->new_vals[i] );
+        }
+
+        free( cs->columns );
+
+        if( cs->old_vals != NULL )
+            free( cs->old_vals );
+
+        if( cs->new_vals != NULL )
+            free( cs->new_vals );
+
+        cs->columns     = NULL;
+        cs->old_vals    = NULL;
+        cs->new_vals    = NULL;
+        cs->num_columns = 0;
+    }
+
+    if( cs->schema_name != NULL )
+        free( cs->schema_name );
+
+    if( cs->table_name != NULL )
+        free( cs->table_name );
+
+    cs->schema_name = NULL;
+    cs->table_name = NULL;
+
+    free( cs );
     return;
 }

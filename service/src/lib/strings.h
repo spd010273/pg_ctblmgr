@@ -43,7 +43,7 @@ const char * replication_seek = "\
                'filter-tables', \
                $4, \
                'include-transaction', \
-               'FALSE' \
+               'TRUE' \
            ) ";
 
 const char * replication_peek = "\
@@ -59,7 +59,7 @@ const char * replication_peek = "\
                'filter-tables', \
                $3, \
                'include-transaction', \
-               'FALSE' \
+               'TRUE' \
            ) ";
 
 const char * get_worker_list = "\

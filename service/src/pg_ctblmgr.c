@@ -116,14 +116,12 @@ static void parent_main_loop( void )
     PGresult *          result         = NULL;
     unsigned int        i              = 0;
     unsigned int        j              = 0;
-    uint32_t            xid            = 0;
-    char *              data           = NULL;
     char                qual[QUAL_MAX] = {0};
     struct changeset *  cs             = NULL;
     struct buffer_pin * bp             = NULL;
-    uint64_t            curr_lsn       = 0;
-    uint64_t            latest_lsn     = 0;
-
+    struct changeset ** cs_array       = NULL;
+    unsigned int        num_cs_array   = 0;
+    char *              commit_lsn     = NULL;
     filter_tables = get_filter_tables_string();
 
     if( filter_tables == NULL )
@@ -142,107 +140,80 @@ static void parent_main_loop( void )
          *     - Consume translated WAL and insert into each child's SLPQ / trie
          */
         sleep( 1.0 );
-
-        // Start of proto loop
-        params[0] = MAIN_CHANNEL;
-        params[1] = "F"; // Need way to switch this?
-        params[2] = filter_tables; // Filter tables
-
-        result = execute_query(
-            parent,
-            ( char * ) replication_peek,
-            params,
-            3
-        );
-
-        if( result == NULL )
+        if(
+                !get_changeset_batch(
+                    filter_tables,
+                    &cs_array,
+                    &num_cs_array,
+                    &commit_lsn
+                )
+          )
         {
-            _log(
-                LOG_LEVEL_ERROR,
-                "Replication peek failed"
-            );
-            continue;
+            if( num_cs_array == 0 )
+                continue; // no committed changes
         }
-
-        // This could be made more efficient by constructing a trie
-        // pointing to an array of BPs so it's not exactly N**2
-        for( i = 0; i < PQntuples( result ); i++ )
+        else
         {
-            data     = get_column_value( i, result, "data" );
-            xid      = xid_in( get_column_value( i, result, "xid"  ) );
-            curr_lsn = lsn_to_offset( get_column_value( i, result, "lsn" ) );
-            cs       = json_to_changeset( data, PGC_WAL_FULL );
-
-            if( cs == NULL )
+            // XXX So uhhh the cs is not allocated in a shared space so access from the worker may
+            // SIGSEGV lol
+            for( i = 0; i < num_cs_array; i++ )
             {
-                _log(
-                    LOG_LEVEL_ERROR,
-                    "Failed to parse changeset at xid %u, LSN %s",
-                    xid,
-                    get_column_value( i, result, "lsn" )
-                );
-                continue;
-            }
+                cs = cs_array[i];
+                _log( LOG_LEVEL_DEBUG, "Got change LSN %s", offset_to_lsn( cs->lsn ) );
 
-            cs->lsn = curr_lsn;
-
-            for( j = 0; j < num_workers; j++ )
-            {
-                memset( qual, 0, QUAL_MAX );
-                strncpy( qual, cs->schema_name, strlen( cs->schema_name ) );
-                strncat( qual, ".", 1 );
-                strncat( qual, cs->table_name, strlen( cs->table_name ) );
-                _log( LOG_LEVEL_DEBUG, "Getting buffer pin for qual %s, worker slot %p, id %u", qual, workers[j], i );
-                bp = buffer_get_pin_by_name( (workers[j])->buffer, qual );
-
-                if( bp != NULL )
+                for( j = 0; j < num_workers; j++ )
                 {
-                    if( !buffer_pin_push( bp, ( void * ) cs ) )
+                    memset( qual, 0, QUAL_MAX );
+                    strncpy( qual, cs->schema_name, strlen( cs->schema_name ) );
+                    strncat( qual, ".", 1 );
+                    strncat( qual, cs->table_name, strlen( cs->table_name ) );
+                    //_log( LOG_LEVEL_DEBUG, "Getting buffer pin for qual %s, worker slot %p, id %u", qual, workers[j], j );
+                    bp = buffer_get_pin_by_name( (workers[j])->buffer, qual );
+
+                    if( bp != NULL )
                     {
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "Failed to push changeset for %s.%s to worker %d",
-                            cs->schema_name,
-                            cs->table_name,
-                            (workers[j])->pid
-                        );
+                        if( !buffer_pin_push( bp, ( void * ) cs ) )
+                        {
+                            _log(
+                                LOG_LEVEL_ERROR,
+                                "Failed to push changeset for %s.%s to worker %d",
+                                cs->schema_name,
+                                cs->table_name,
+                                (workers[j])->pid
+                            );
+                        }
                     }
                 }
             }
 
-            if( curr_lsn > latest_lsn )
-                latest_lsn = curr_lsn;
-
-            _log( LOG_LEVEL_DEBUG, "Loop %u", i );
-        }
-
-        params[0] = MAIN_CHANNEL;
-        params[1] = offset_to_lsn( latest_lsn );;
-        params[2] = "M";
-        params[3] = filter_tables;
-        PQclear( result );
-        result = execute_query(
-            parent,
-            ( char * ) replication_seek,
-            params,
-            4
-        );
-
-        if( result == NULL )
-        {
-            _log(
-                LOG_LEVEL_ERROR,
-                "Failed to consume changes up to LSN %s",
-                params[1]
+            num_cs_array = 0;
+            params[0] = MAIN_CHANNEL;
+            params[1] = commit_lsn;
+            params[2] = "M";
+            params[3] = filter_tables;
+            result = execute_query(
+                parent,
+                ( char * ) replication_seek,
+                params,
+                4
             );
-        }
 
-        _log(
-            LOG_LEVEL_DEBUG,
-            "Consumed changes up to %s",
-            params[1]
-        );
-        free( params[1] );
+            if( result == NULL )
+            {
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "Failed to consume changes up to LSN %s",
+                    params[1]
+                );
+            }
+
+            _log( LOG_LEVEL_DEBUG, "Committed LSN is %s", commit_lsn );
+            free( commit_lsn );
+            commit_lsn = NULL;
+            free( cs_array );
+            cs_array = NULL;
+            PQclear( result );
+        }
 
         if( got_sighup )
         {
@@ -746,4 +717,152 @@ static void get_filter_tables_by_channel(
 
     PQclear( filter_result );
     return;
+}
+
+/*
+ *   scans the wal records looking for a batch of changes that have been committed
+ *   These are returned in the result, with the size of the array in num_results.
+ *   The commit lsn is set to the LSN of the commit message for the batch.
+ *   In the case where the transaction was aborted / rolled back, the results will be
+ *   null but the function will return true. return of false indicates an error
+ */
+static bool get_changeset_batch(
+    char *               filter_tables,
+    struct changeset *** result,
+    unsigned int *       num_results,
+    char **              commit_lsn
+)
+{
+    char *             params[4]   = {NULL};
+    PGresult *         pgresult    = NULL;
+    unsigned int       i           = 0;
+    unsigned int       j           = 0;
+    char *             data        = NULL;
+    uint32_t           xid         = 0;
+    uint64_t           lsn         = 0;
+    char *             lsn_str     = NULL;
+    struct changeset * cs          = NULL;
+    bool               begin_found = false;
+
+    if( result == NULL || num_results == NULL || commit_lsn == NULL )
+        return false;
+
+    *num_results = 0;
+    params[0] = MAIN_CHANNEL;
+    params[1] = "F";
+    params[2] = filter_tables;
+
+    pgresult = execute_query(
+        parent,
+        ( char * ) replication_peek,
+        params,
+        3
+    );
+
+    if( pgresult == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Replication peek failed"
+        );
+        return false;
+    }
+
+    for( i = 0; i < PQntuples( pgresult ); i++ )
+    {
+        data    = get_column_value( i, pgresult, "data" );
+        xid     = xid_in( get_column_value( i, pgresult, "xid" ) );
+        lsn_str = get_column_value( i, pgresult, "lsn" );
+        lsn     = lsn_to_offset( lsn_str );
+        cs      = json_to_changeset( data, PGC_WAL_FULL );
+
+        if( cs == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to parse changeset at xid %u, LSN %s",
+                xid,
+                lsn_str
+            );
+            return false;
+        }
+
+        if( begin_found )
+        {
+            if(
+                   cs->type == PGC_DML_INSERT
+                || cs->type == PGC_DML_UPDATE
+                || cs->type == PGC_DML_DELETE
+              )
+            {
+                cs->lsn = lsn;
+                (*result)[*num_results] = cs;
+                (*num_results)++;
+            }
+            else if( cs->type == PGC_DML_ROLLBACK )
+            {
+                free_changeset( cs );
+
+                for( j = 0; j < *num_results; j++ )
+                {
+                    free_changeset( (*result)[j] );
+                    (*result)[j] = NULL;
+                }
+
+                free( *result );
+                (*num_results) = 0;
+                begin_found    = false;
+                cs             = NULL;
+            }
+            else if( cs->type == PGC_DML_COMMIT )
+            {
+                // Save LSN of commit message
+                free_changeset( cs );
+                begin_found = false;
+                cs          = NULL;
+                (*commit_lsn) = ( char * ) calloc(
+                    strlen( lsn_str ) + 1,
+                    sizeof( char )
+                );
+
+                if( (*commit_lsn) == NULL )
+                {
+                    PQclear( pgresult );
+                    return false;
+                }
+
+                strncpy( *commit_lsn, lsn_str, strlen( lsn_str ) );
+                PQclear( pgresult );
+                return true;
+            }
+        }
+        else if( cs != NULL && cs->type == PGC_DML_BEGIN )
+        {
+            begin_found = true;
+            (*result)   = ( struct changeset ** ) calloc(
+                PQntuples( pgresult ) - 2,
+                sizeof( struct changeset * )
+            );
+
+            free_changeset( cs );
+
+            if( (*result) == NULL )
+            {
+                PQclear( pgresult );
+                return false;
+            }
+        }
+    }
+
+    if( begin_found )
+    {
+        _log(
+            LOG_LEVEL_WARNING,
+            "Incomplete commit record found, last good LSN was %s",
+            lsn_str
+        );
+    }
+
+    PQclear( pgresult );
+    return true;
 }

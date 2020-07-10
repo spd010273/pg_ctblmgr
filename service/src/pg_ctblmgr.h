@@ -25,4 +25,5 @@ static void get_filter_tables_by_channel(
 static char * get_filter_tables_string( void );
 static void get_worker_pins( struct worker *, struct buffer_pin *** );
 static void parent_main_loop( void );
+static bool get_changeset_batch( char *, struct changeset ***, unsigned int *, char ** );
 #endif // PG_CTBLMGR_H

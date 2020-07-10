@@ -28,7 +28,9 @@ typedef enum {
     PGC_DML_UPDATE,
     PGC_DML_DELETE,
     PGC_DML_TRUNCATE,
-    PGC_DML_TX_BARRIER
+    PGC_DML_COMMIT,
+    PGC_DML_BEGIN,
+    PGC_DML_ROLLBACK
 } pg_ctblmgr_dml_type;
 
 struct changeset {
@@ -48,5 +50,6 @@ struct changeset {
 };
 
 struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level );
+void free_changeset( struct changeset * );
 
 #endif // CHANGESET_H
