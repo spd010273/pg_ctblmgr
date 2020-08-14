@@ -4,7 +4,7 @@
 // is not available
 
 #if defined __BUF_NO_ATOMICS__ || defined __KERNEL_HAS_BARRIERS__
-static __inline__ bool _test_and_set( volatile bool * );
+__inline__ bool _test_and_set( volatile bool * ) __attribute__((__always_inline__));
 
 bool _test_and_set_mutex( volatile bool * mutex )
 {
@@ -13,7 +13,7 @@ bool _test_and_set_mutex( volatile bool * mutex )
 }
 
 # ifdef __KERNEL_HAS_BARRIERS__
-static __inline__ bool _test_and_set( volatile bool * mutex )
+__inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = READ_ONCE( *mutex );
@@ -29,8 +29,14 @@ __inline__ void _clear_mutex( volatile bool * mutex )
     return;
 }
 # else
+__inline__ void _clear_mutex( volatile bool * mutex )
+{
+    *mutex = false;
+    __asm__ __volatile__( "" : : : "memory" );
+    return;
+}
 #  ifdef __x86_64__
-static __inline__ bool _test_and_set( volatile bool * mutex )
+__inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool _res = true;
 
@@ -41,18 +47,10 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
 :       /* no inputs */
 :       "memory", "cc"
     );
-
     return _res;
 }
-
-__inline__ void _clear_mutex( volatile bool * mutex )
-{
-    *mutex = false;
-    __asm__ __volatile__( "" : : : "memory" );
-    return;
-}
 #  elif defined(__i386__)
-static __inline__ bool _test_and_set( volatile bool * mutex )
+__inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool _res = true;
 
@@ -69,15 +67,8 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
 
     return _res;
 }
-
-__inline__ void _clear_mutex( volatile bool * mutex )
-{
-    *mutex = false;
-    __asm__ __volatile__( "" : : : "memory" );
-    return;
-}
 #  elif defined(__ppc__) || defined(__powerpc__) || defined(__ppc64__) || defined(__powerpc64__)
-static __inline__ bool _test_and_set( volatile bool * mutex )
+__inline__ bool _test_and_set( volatile bool * mutex )
 {
     bool _t   = false;
     bool _res = false;
@@ -100,27 +91,14 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
 
     return _res;
 }
-
-__inline__ bool _clear_mutex( volatile bool * mutex )
-{
-    *mutex = false;
-    __asm__ __volatile__( "" : : : "memory" );
-    return;
-}
 #  else
-static __inline__ bool _test_and_set( volatile bool * mutex )
+__inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = *mutex;
     *mutex = true;
 
     return initial;
-}
-
-__inline__ void _clear_mutex( volatile bool * mutex )
-{
-    *mutex = false;
-    return;
 }
 #  endif
 # endif // __KERNEL_HAS_BARRIERS
