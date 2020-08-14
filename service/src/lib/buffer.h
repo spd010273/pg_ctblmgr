@@ -2,19 +2,7 @@
 #define _BUFFER_H
 
 #include <stdbool.h>
-
-#if __STDC_VERSION__ >= 201112L
-# ifdef __STDC_NO_ATOMICS__
-#  define __BUF_NO_ATOMICS__
-# else
-#  include <stdatomic.h>
-#  define __TNS_MUTEX(val) atomic_test_and_set(val)
-#  define __C_MUTEX(val) atomic_flag_clear(val)
-# endif // __STDC_NO_ATOMICS__
-#else
-#define __BUF_NO_ATOMICS__
-#endif // __STDC_VERSION__
-
+#include "barrier.h"
 #include "slpq.h"
 #include "trie.h"
 #include "util.h"

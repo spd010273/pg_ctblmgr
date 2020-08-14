@@ -1,13 +1,5 @@
 #include "buffer.h"
 
-#ifdef __BUF_NO_ATOMICS__
-static inline bool _test_and_set( bool * );
-static bool _test_and_set_mutex( bool * );
-static void _clear_mutex( bool * );
-#define __TNS_MUTEX(val) _test_and_set_mutex(val)
-#define __C_MUTEX(val) _clear_mutex(val)
-#endif // __BUF_NO_ATOMICS__
-
 static struct buffer_pin * _new_buffer_pin( void );
 static struct buffer * _new_buffer( void );
 
@@ -286,25 +278,3 @@ static struct buffer * _new_buffer( void )
     b->trie    = NULL;
     return b;
 }
-
-#ifdef __BUF_NO_ATOMICS__
-static inline bool _test_and_set( bool * mutex )
-{
-    bool initial = true;
-    initial = *mutex;
-    *mutex = true;
-    return initial;
-}
-
-static bool _test_and_set_mutex( bool * mutex )
-{
-    while( *mutex == true || _test_and_set( mutex ) == true );
-    return true;
-}
-
-static void _clear_mutex( bool * mutex )
-{
-    *mutex = false;
-    return;
-}
-#endif // __BUF_NO_ATOMICS__
