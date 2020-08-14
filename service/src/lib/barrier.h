@@ -6,6 +6,7 @@
 
 #if __STDC_VERSION__ >= 201112L
 # ifdef __STDC_NO_ATOMICS__
+    // Barriers via syscall introduced in kernel 4.16
 #   if LINUX_VERSION_CODE >= KERNEL_VERSION(4,16,0)
 #    define __KERNEL_HAS_BARRIERS__
 #    include <linux/membarrier.h>

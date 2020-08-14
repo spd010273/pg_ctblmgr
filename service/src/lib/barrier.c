@@ -4,7 +4,7 @@
 // is not available
 
 #if defined __BUF_NO_ATOMICS__ || defined __KERNEL_HAS_BARRIERS__
-__inline__ bool _test_and_set( volatile bool * ) __attribute__((__always_inline__));
+static __inline__ bool _test_and_set( volatile bool * ) __attribute__((__always_inline__));
 
 bool _test_and_set_mutex( volatile bool * mutex )
 {
@@ -13,7 +13,7 @@ bool _test_and_set_mutex( volatile bool * mutex )
 }
 
 # ifdef __KERNEL_HAS_BARRIERS__
-__inline__ bool _test_and_set( volatile bool * mutex )
+static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = READ_ONCE( *mutex );
@@ -36,7 +36,7 @@ __inline__ void _clear_mutex( volatile bool * mutex )
     return;
 }
 #  ifdef __x86_64__
-__inline__ bool _test_and_set( volatile bool * mutex )
+static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool _res = true;
 
@@ -50,7 +50,7 @@ __inline__ bool _test_and_set( volatile bool * mutex )
     return _res;
 }
 #  elif defined(__i386__)
-__inline__ bool _test_and_set( volatile bool * mutex )
+static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool _res = true;
 
@@ -68,7 +68,7 @@ __inline__ bool _test_and_set( volatile bool * mutex )
     return _res;
 }
 #  elif defined(__ppc__) || defined(__powerpc__) || defined(__ppc64__) || defined(__powerpc64__)
-__inline__ bool _test_and_set( volatile bool * mutex )
+static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     bool _t   = false;
     bool _res = false;
@@ -92,7 +92,7 @@ __inline__ bool _test_and_set( volatile bool * mutex )
     return _res;
 }
 #  else
-__inline__ bool _test_and_set( volatile bool * mutex )
+static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = *mutex;
