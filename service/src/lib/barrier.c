@@ -17,7 +17,6 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = READ_ONCE( *mutex );
-    smp_mb();
     WRITE_ONCE( *mutex, 1 );
     return initial;
 }
@@ -25,7 +24,6 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
 __inline__ void _clear_mutex( volatile bool * mutex )
 {
     WRITE_ONCE( *mutex, 0 );
-    smp_mb();
     return;
 }
 # else
