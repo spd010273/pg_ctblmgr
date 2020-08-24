@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "../src/lib/barrier.h"
+#include "../src/lib/util.h"
 #include "../src/lib/buffer.h"
 
 #define NUM_TESTS 10

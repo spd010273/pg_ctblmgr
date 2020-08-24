@@ -2,10 +2,10 @@
 #define _BUFFER_H
 
 #include <stdbool.h>
+#include "util.h"
 #include "barrier.h"
 #include "slpq.h"
 #include "trie.h"
-#include "util.h"
 
 #define _BUFFER_ALLOC(sz) create_shared_memory(sz)
 #define _BUFFER_FREE(ptr,sz) free_shared_memory(ptr,sz)

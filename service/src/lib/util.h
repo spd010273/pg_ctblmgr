@@ -56,6 +56,8 @@
 #define MIN(x,y) (x>y?y:x)
 #define MAX_CHANNEL_LENGTH 64
 
+/* Structures and Flags */
+
 bool daemonize;
 char * conninfo;
 FILE * log_file;
@@ -90,11 +92,13 @@ struct worker ** workers;
 struct worker * parent;
 unsigned int num_workers;
 
+/* Function Declarations */
+
 void _parse_args( int, char ** );
 void _usage( char * ) __attribute__ ((noreturn));
 void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
 
-extern struct worker * new_worker(
+struct worker * new_worker(
     unsigned short,     // type
     unsigned long int,  // id
     int,                // argc
@@ -107,7 +111,7 @@ extern struct worker * new_worker(
     char                // wal_level
 );
 
-extern void worker_set_config(
+void worker_set_config(
     struct worker *,
     char *,
     char **,
@@ -115,20 +119,20 @@ extern void worker_set_config(
     char
 );
 
-extern bool parent_init( int, char ** );
-extern void free_worker( struct worker * );
-extern bool create_pid_file( void );
+bool parent_init( int, char ** );
+void free_worker( struct worker * );
+bool create_pid_file( void );
 
-extern void __sigterm( int );
-extern void __sigint( int );
-extern void __sighup( int );
-extern void __term( void ) __attribute__ ((noreturn));
+void __sigterm( int );
+void __sigint( int );
+void __sighup( int );
+void __term( void ) __attribute__ ((noreturn));
 
-extern void free_shared_memory( void *, size_t );
-extern void * create_shared_memory( size_t );
-extern void * resize_shared_memory( void *, size_t, size_t );
-extern void _set_process_title( char **, int, char *, unsigned int * );
+void free_shared_memory( void *, size_t );
+void * create_shared_memory( size_t );
+void * resize_shared_memory( void *, size_t, size_t );
+void _set_process_title( char **, int, char *, unsigned int * );
 
-extern struct worker * get_worker_by_channel( char * );
-extern struct worker * get_worker_by_pid( void );
+struct worker * get_worker_by_channel( char * );
+struct worker * get_worker_by_pid( void );
 #endif // UTIL_H

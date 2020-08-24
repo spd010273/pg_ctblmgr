@@ -12,6 +12,7 @@ char *           conninfo      = NULL;
 FILE *           log_file      = NULL;
 unsigned int     max_argv_size = 0;
 bool             daemonize     = false;
+bool             no_log        = false;
 
 sig_atomic_t got_sighup  = false;
 sig_atomic_t got_sigint  = false;
@@ -25,6 +26,7 @@ Usage: pg_ctblmgr\n \
     -d DB name (default: <DB user>)\n \
   [ -D daemonize\n \
     -v VERSION\n \
+    -l Log to stdout\n \
     -? HELP ]\n";
 
 void _parse_args( int argc, char ** argv )
@@ -37,7 +39,7 @@ void _parse_args( int argc, char ** argv )
 
     opterr = 0;
 
-    while( ( c = getopt( argc, argv, "U:p:d:h:Dv?" ) ) != -1 )
+    while( ( c = getopt( argc, argv, "U:p:d:h:Dvl?" ) ) != -1 )
     {
         switch( c )
         {
@@ -60,6 +62,9 @@ void _parse_args( int argc, char ** argv )
                 exit( 0 );
             case 'D':
                 daemonize = true;
+                break;
+            case 'l':
+                no_log = true;
                 break;
             default:
                 _usage( "Invalid argument" );
@@ -157,25 +162,43 @@ void _log( unsigned short log_level, char * message, ... )
     );
 
     // If we have a logfile, set that as the output handle
-    if( log_file != NULL )
+    if( no_log )
     {
-        output_handle = log_file;
+        if(
+               log_level == LOG_LEVEL_WARNING
+            || log_level == LOG_LEVEL_ERROR
+            || log_level == LOG_LEVEL_FATAL
+          )
+        {
+            output_handle = stderr;
+        }
+        else
+        {
+            output_handle = stdout;
+        }
     }
+    else
+    {
+        if( log_file != NULL )
+        {
+            output_handle = log_file;
+        }
 
-    if(
-            output_handle == NULL
-         && (
-                log_level == LOG_LEVEL_WARNING
-             || log_level == LOG_LEVEL_ERROR
-             || log_level == LOG_LEVEL_FATAL
-            )
-      )
-    {
-        output_handle = stderr;
-    }
-    else if( output_handle == NULL )
-    {
-        output_handle = stdout;
+        if(
+                output_handle == NULL
+             && (
+                    log_level == LOG_LEVEL_WARNING
+                 || log_level == LOG_LEVEL_ERROR
+                 || log_level == LOG_LEVEL_FATAL
+                )
+          )
+        {
+            output_handle = stderr;
+        }
+        else if( output_handle == NULL )
+        {
+            output_handle = stdout;
+        }
     }
 
     va_start( args, message );
@@ -418,24 +441,27 @@ void worker_set_config(
 
 bool parent_init( int argc, char ** argv )
 {
-    log_file = fopen( LOG_FILE_NAME, "a" );
-
-    if( log_file == NULL )
+    if( !no_log )
     {
-        _log(
-            LOG_LEVEL_ERROR,
-            "Failed to open '%s': %s",
-            LOG_FILE_NAME,
-            strerror( errno )
-        );
-        return false;
-    }
+        log_file = fopen( LOG_FILE_NAME, "a" );
 
-    _log(
-        LOG_LEVEL_DEBUG,
-        "Opened logfile '%s'",
-        LOG_FILE_NAME
-    );
+        if( log_file == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to open '%s': %s",
+                LOG_FILE_NAME,
+                strerror( errno )
+            );
+            return false;
+        }
+
+        _log(
+            LOG_LEVEL_DEBUG,
+            "Opened logfile '%s'",
+            LOG_FILE_NAME
+        );
+    }
 
     if( daemonize )
     {
@@ -879,7 +905,7 @@ void __term( void )
             me->pidfile = NULL;
         }
 
-        if( log_file != NULL )
+        if( log_file != NULL && !no_log )
         {
             fclose( log_file );
         }

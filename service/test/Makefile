@@ -15,9 +15,9 @@ ARCHFLAGS		= -m64 -mtune=generic
 CFLAGS			= $(INCLUDE) $(LIBS) $(FLAGS) $(STRICTURES) $(ARCHFLAGS)
 T_CS_SRCS		= ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_changeset.c
 T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
-T_B_SRCS		= ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
+T_B_SRCS		= ../src/lib/barrier.c ../src/lib/util.c ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
 T_B_OBJS		= $(T_B_SRCS:.c=.o)
-T_Q_SRCS		= ../src/lib/query.c ../src/lib/util.c src/t_query.c
+T_Q_SRCS		= ../src/lib/barrier.c ../src/lib/query.c ../src/lib/util.c src/t_query.c
 T_Q_OBJS		= $(T_Q_SRCS:.c=.o)
 LDFLAGS			= -lm -lpq
 

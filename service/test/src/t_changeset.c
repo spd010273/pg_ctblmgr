@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#include "../src/lib/changeset.h"
+#include "../../src/lib/changeset.h"
 
 /* Here we define the test changeset string, their WAL level, and the expected
  * output structure */
@@ -67,6 +67,7 @@ const char * expect_old[NUM_TESTS][3] = {
 
 const struct changeset changeset_expects[NUM_TESTS] = {
     {
+        0,
         ( char ** ) &(expect_keys[0]),      // keys
         ( char ** ) &(expect_vals[0]),      // vals
         1,                                  // num_keys
@@ -81,6 +82,7 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         0                                   // timestamp
     },
     {
+        0,
         ( char ** ) &(expect_keys[1]),
         ( char ** ) &(expect_vals[1]),
         1,
@@ -95,6 +97,7 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         1579120198
     },
     {
+        0,
         ( char ** ) &(expect_keys[2]),
         ( char ** ) &(expect_vals[2]),
         1,
@@ -109,6 +112,7 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         0
     },
     {
+        0,
         ( char ** ) &(expect_keys[3]),
         ( char ** ) &(expect_vals[3]),
         1,
@@ -123,6 +127,7 @@ const struct changeset changeset_expects[NUM_TESTS] = {
         1579120198
     },
     {
+        0,
         ( char ** ) &(expect_keys[4]),
         ( char ** ) &(expect_vals[4]),
         1,
@@ -206,7 +211,9 @@ static void print_expects( struct changeset * cs )
         cs->type == PGC_DML_UPDATE ? "UPDATE" :
         cs->type == PGC_DML_DELETE ? "DELETE" :
         cs->type == PGC_DML_TRUNCATE ? "TRUNCATE" :
-        cs->type == PGC_DML_TX_BARRIER ? "TRANSACTION" : "N/A",
+        cs->type == PGC_DML_BEGIN ? "BEGIN" :
+        cs->type == PGC_DML_ROLLBACK ? " ROLLBACK" :
+        cs->type == PGC_DML_COMMIT ? "COMMIT" : "N/A",
         cs->timestamp
     );
 
@@ -501,13 +508,17 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
             ex->type == PGC_DML_UPDATE ? "UPDATE" :
             ex->type == PGC_DML_DELETE ? "DELETE" :
             ex->type == PGC_DML_TRUNCATE ? "TRUNCATE" :
-            ex->type == PGC_DML_TX_BARRIER ? "TRANSACTION" : "N/A",
+            ex->type == PGC_DML_COMMIT ? "COMMIT" :
+            ex->type == PGC_DML_ROLLBACK ? "ROLLBACK" :
+            ex->type == PGC_DML_BEGIN ? "BEGIN" : "N/A",
             cs->type == PGC_DML_UNINITIALIZED ? "UNINITIALIZED" :
             cs->type == PGC_DML_INSERT ? "INSERT" :
             cs->type == PGC_DML_UPDATE ? "UPDATE" :
             cs->type == PGC_DML_DELETE ? "DELETE" :
             cs->type == PGC_DML_TRUNCATE ? "TRUNCATE" :
-            cs->type == PGC_DML_TX_BARRIER ? "TRANSACTION" : "N/A"
+            cs->type == PGC_DML_COMMIT ? "COMMIT" :
+            cs->type == PGC_DML_ROLLBACK ? "ROLLBACK" :
+            cs->type == PGC_DML_BEGIN ? "BEGIN" : "N/A"
         );
         return false;
     }
