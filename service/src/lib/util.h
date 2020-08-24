@@ -62,9 +62,9 @@ bool daemonize;
 char * conninfo;
 FILE * log_file;
 
-sig_atomic_t got_sighup;
-sig_atomic_t got_sigint;
-sig_atomic_t got_sigterm;
+volatile sig_atomic_t got_sighup;
+volatile sig_atomic_t got_sigint;
+volatile sig_atomic_t got_sigterm;
 
 struct pgc_conf {
     char         channel[MAX_CHANNEL_LENGTH];
@@ -94,11 +94,11 @@ unsigned int num_workers;
 
 /* Function Declarations */
 
-void _parse_args( int, char ** );
-void _usage( char * ) __attribute__ ((noreturn));
-void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
+extern void _parse_args( int, char ** );
+extern void _usage( char * ) __attribute__ ((noreturn));
+extern void _log( unsigned short, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
 
-struct worker * new_worker(
+extern struct worker * new_worker(
     unsigned short,     // type
     unsigned long int,  // id
     int,                // argc
@@ -111,7 +111,7 @@ struct worker * new_worker(
     char                // wal_level
 );
 
-void worker_set_config(
+extern void worker_set_config(
     struct worker *,
     char *,
     char **,
@@ -119,20 +119,20 @@ void worker_set_config(
     char
 );
 
-bool parent_init( int, char ** );
-void free_worker( struct worker * );
-bool create_pid_file( void );
+extern bool parent_init( int, char ** );
+extern void free_worker( struct worker * );
+extern bool create_pid_file( void );
 
-void __sigterm( int );
-void __sigint( int );
-void __sighup( int );
-void __term( void ) __attribute__ ((noreturn));
+extern void __sigterm( int );
+extern void __sigint( int );
+extern void __sighup( int );
+extern void __term( void ) __attribute__ ((noreturn));
 
-void free_shared_memory( void *, size_t );
-void * create_shared_memory( size_t );
-void * resize_shared_memory( void *, size_t, size_t );
-void _set_process_title( char **, int, char *, unsigned int * );
+extern void free_shared_memory( void *, size_t );
+extern void * create_shared_memory( size_t );
+extern void * resize_shared_memory( void *, size_t, size_t );
+extern void _set_process_title( char **, int, char *, unsigned int * );
 
-struct worker * get_worker_by_channel( char * );
-struct worker * get_worker_by_pid( void );
+extern struct worker * get_worker_by_channel( char * );
+extern struct worker * get_worker_by_pid( void );
 #endif // UTIL_H

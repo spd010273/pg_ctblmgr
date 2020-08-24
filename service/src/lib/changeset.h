@@ -54,7 +54,7 @@ struct changeset {
     time_t              timestamp;
 };
 
-struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level );
-void free_changeset( struct changeset * );
-void dump_changeset( struct changeset * );
+extern struct changeset * json_to_changeset( char *, pg_ctblmgr_wal_level );
+extern void free_changeset( struct changeset * );
+extern void dump_changeset( struct changeset * );
 #endif // CHANGESET_H

@@ -17,8 +17,8 @@ struct trie
     bool          is_leaf;
 };
 
-bool trie_insert( struct trie **, char *, void * );
-void * trie_search( struct trie *, char * );
-void * trie_delete( struct trie **, char * );
-void trie_free( struct trie ** );
+extern bool trie_insert( struct trie **, char *, void * );
+extern void * trie_search( struct trie *, char * );
+extern void * trie_delete( struct trie **, char * );
+extern void trie_free( struct trie ** );
 #endif // _TRIE_H

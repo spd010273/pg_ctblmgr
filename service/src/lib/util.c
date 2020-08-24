@@ -14,9 +14,9 @@ unsigned int     max_argv_size = 0;
 bool             daemonize     = false;
 bool             no_log        = false;
 
-sig_atomic_t got_sighup  = false;
-sig_atomic_t got_sigint  = false;
-sig_atomic_t got_sigterm = false;
+volatile sig_atomic_t got_sighup  = false;
+volatile sig_atomic_t got_sigint  = false;
+volatile sig_atomic_t got_sigterm = false;
 
 static const char * usage_string = "\
 Usage: pg_ctblmgr\n \

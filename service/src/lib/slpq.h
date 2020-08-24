@@ -31,10 +31,10 @@ struct slpq
     struct slpq_node * tail;
 };
 
-struct slpq * new_slpq( void );
-bool slpq_push( struct slpq *, void * );
-void * slpq_pop( struct slpq * );
-void * slpq_unshift( struct slpq * );
-bool slpq_shift( struct slpq *, void * );
-void slpq_free( struct slpq * );
+extern struct slpq * new_slpq( void );
+extern bool slpq_push( struct slpq *, void * );
+extern void * slpq_pop( struct slpq * );
+extern void * slpq_unshift( struct slpq * );
+extern bool slpq_shift( struct slpq *, void * );
+extern void slpq_free( struct slpq * );
 #endif // _SLPQ_H

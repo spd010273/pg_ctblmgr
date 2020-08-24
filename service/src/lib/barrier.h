@@ -25,8 +25,8 @@
 #endif // __STDC_VERSION__
 
 #if defined(__BUF_NO_ATOMICS__) || defined(__KERNEL_HAS_BARRIERS__)
-bool _test_and_set_mutex( volatile bool * );
-void _clear_mutex( volatile bool * );
+extern bool _test_and_set_mutex( volatile bool * );
+extern void _clear_mutex( volatile bool * );
 #define __TNS_MUTEX(val) _test_and_set_mutex(val)
 #define __C_MUTEX(val) _clear_mutex(val)
 #endif // __BUF_NO_ATOMICS || __KERNEL_HAS_BARRIERS__
