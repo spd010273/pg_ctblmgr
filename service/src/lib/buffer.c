@@ -17,10 +17,16 @@ void buffer_populate_trie(
         *b = ( struct buffer * ) _new_buffer();
 
     if( qual_name == NULL )
+    {
+        _log( LOG_LEVEL_DEBUG, "qual name is null" );
         return;
+    }
 
     if( !__TNS_MUTEX( (&((*b)->in_use)) ) )
+    {
+        _log( LOG_LEVEL_DEBUG, "Failed to acquire mutex" );
         return;
+    }
 
     for( i = 0; i < n_quals; i++ )
     {
@@ -33,14 +39,20 @@ void buffer_populate_trie(
             if( bp == NULL )
             {
                 __C_MUTEX( (&((*b)->in_use)) );
+                _log( LOG_LEVEL_DEBUG, "Failed to retreive new pin" );
                 return;
             }
 
             if( !trie_insert( &((*b)->trie), qual_name[i], ( void * ) bp ) )
             {
                 __C_MUTEX( (&((*b)->in_use)) );
+                _log( LOG_LEVEL_DEBUG, "Trie insert failed for qual %s", qual_name[i] );
                 return;
             }
+        }
+        else
+        {
+            _log( LOG_LEVEL_DEBUG, "Trie position already exists at %s (%p)", qual_name[i], data );
         }
     }
 
@@ -74,10 +86,16 @@ struct buffer_pin * buffer_get_pin_by_name(
     void *              data = NULL;
 
     if( b == NULL || qual_name == NULL )
+    {
+        _log( LOG_LEVEL_DEBUG, "buffer or qual is null" );
         return NULL;
+    }
 
     if( !__TNS_MUTEX( (&(b->in_use)) ) )
+    {
+        _log( LOG_LEVEL_DEBUG, "failed to acquire lock" );
         return NULL;
+    }
 
     data = trie_search( b->trie, qual_name );
     __C_MUTEX( (&(b->in_use)) );
@@ -85,9 +103,11 @@ struct buffer_pin * buffer_get_pin_by_name(
     if( data != NULL )
     {
         bp = ( struct buffer_pin * ) data;
+        _log( LOG_LEVEL_DEBUG, "Got pin %p", bp );
         return bp;
     }
 
+    _log( LOG_LEVEL_DEBUG, "No pin for qual %s", qual_name );
     return NULL;
 }
 

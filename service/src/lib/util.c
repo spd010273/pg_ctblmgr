@@ -268,6 +268,7 @@ struct worker * new_worker(
     pid_t           pid         = 0;
     char *          worker_name = NULL;
     unsigned int    size        = 0;
+    unsigned int    i           = 0;
 
     if( workerslot == NULL )
     {
@@ -352,6 +353,22 @@ struct worker * new_worker(
         free( worker_name );
         worker_name = NULL;
         result->status = WORKER_STATUS_STARTUP;
+        _log(
+            LOG_LEVEL_DEBUG,
+            "Initialized worker with pid %d with filter_tables:",
+            result->pid
+        );
+
+        for( i = 0; i < num_tables; i++ )
+        {
+            _log(
+                LOG_LEVEL_DEBUG,
+                "filter_tables[%u]: %s",
+                i,
+                filter_tables[i]
+            );
+        }
+        result->buffer = parent->buffer;
         function( ( void * ) workers[id] );
         exit( 0 );
     }
@@ -373,13 +390,15 @@ void worker_set_config(
 {
     unsigned int i = 0;
 
-    if( worker == NULL  )
+    if( worker == NULL )
     {
+        _log( LOG_LEVEL_DEBUG, "Cannot set worker config, NULL slot" );
         return;
     }
 
-    if( wal_level != 'R' || wal_level != 'F' || wal_level != 'M' )
+    if( wal_level != 'R' && wal_level != 'F' && wal_level != 'M' )
     {
+        _log( LOG_LEVEL_DEBUG, "invalid worker config WAL LEVEL: %c", wal_level );
         return;
     }
 
@@ -402,25 +421,25 @@ void worker_set_config(
     if( filter_tables != NULL )
     {
         worker->config.num_tables = num_tables;
-        worker->config.filter_tables = calloc(
-            num_tables,
-            sizeof( char * )
+        worker->config.filter_tables = ( char ** ) create_shared_memory(
+            num_tables * sizeof( char * )
         );
 
         if( worker->config.filter_tables == NULL )
         {
+            _log( LOG_LEVEL_DEBUG, "Worker config memory allocation failed" );
             return;
         }
 
         for( i = 0; i < num_tables; i++ )
         {
-            worker->config.filter_tables[i] = calloc(
-                strlen( filter_tables[i] ) + 1,
-                sizeof( char )
+            worker->config.filter_tables[i] = ( char * ) create_shared_memory(
+                ( strlen( filter_tables[i] ) + 1 ) * sizeof( char )
             );
 
             if( worker->config.filter_tables[i] == NULL )
             {
+                _log( LOG_LEVEL_DEBUG, "worker config filter table slot allocation failed" );
                 return;
             }
 
@@ -431,6 +450,7 @@ void worker_set_config(
             );
 
             worker->config.filter_tables[i][strlen(filter_tables[i]) + 1] = '\0';
+            _log( LOG_LEVEL_DEBUG, "added filter_table[%u]: %s", i, worker->config.filter_tables[i] );
         }
     }
 

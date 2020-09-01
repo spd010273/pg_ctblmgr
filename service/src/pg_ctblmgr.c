@@ -162,6 +162,7 @@ static void parent_main_loop( void )
                 cs = cs_array[i];
                 _log( LOG_LEVEL_DEBUG, "Got change LSN %s", offset_to_lsn( cs->lsn ) );
                 //dump_changeset( cs );
+                _log( LOG_LEVEL_DEBUG, "Propogating changes to %d workers", num_workers );
                 for( j = 0; j < num_workers; j++ )
                 {
                     memset( qual, 0, QUAL_MAX );
@@ -169,8 +170,9 @@ static void parent_main_loop( void )
                     strncat( qual, ".", 1 );
                     strncat( qual, cs->table_name, strlen( cs->table_name ) );
 
+                    _log( LOG_LEVEL_DEBUG, "Looking for a worker with qual %s", qual );
                     bp = buffer_get_pin_by_name( (workers[j])->buffer, qual );
-
+                    _log( LOG_LEVEL_DEBUG, "Got pin pointer %p", bp );
                     if( bp != NULL )
                     {
                         if( !buffer_pin_push( bp, ( void * ) cs ) )
@@ -181,6 +183,15 @@ static void parent_main_loop( void )
                                 cs->schema_name,
                                 cs->table_name,
                                 (workers[j])->pid
+                            );
+                        }
+                        else
+                        {
+                            _log(
+                                LOG_LEVEL_DEBUG,
+                                "Pushed changeset %p to bp %p",
+                                cs,
+                                bp
                             );
                         }
                     }
@@ -317,6 +328,7 @@ static int start_workers( void )
 
                     if( num_tables == 0 )
                     {
+                        _log( LOG_LEVEL_DEBUG, "Cannot start worker: no tables" );
                         return -1;
                     }
 
@@ -526,12 +538,18 @@ static void get_worker_pins( struct worker * me, struct buffer_pin *** bp_array 
     unsigned int i = 0;
 
     if( me == NULL || bp_array == NULL )
+    {
+        _log( LOG_LEVEL_DEBUG, "NULL worker or BP array" );
         return;
+    }
 
     if( me->config.num_tables == 0 )
+    {
+        _log( LOG_LEVEL_DEBUG, "no pins, num tables == 0" );
         return;
+    }
 
-    if( *bp_array == NULL )
+    if( *bp_array != NULL )
     {
         free( *bp_array );
         (*bp_array) = NULL;
@@ -544,7 +562,10 @@ static void get_worker_pins( struct worker * me, struct buffer_pin *** bp_array 
     );
 
     if( *bp_array == NULL )
+    {
+        _log( LOG_LEVEL_DEBUG, "Failed to allocate BP array" );
         return;
+    }
 
     for( i = 0; i < me->config.num_tables; i++ )
     {
@@ -636,6 +657,12 @@ static bool initialize_buffer( struct worker * me )
         num_tables
     );
 
+    _log(
+        LOG_LEVEL_DEBUG,
+        "Populated trie with %u tables",
+        num_tables
+    );
+
     for( i = 0; i < num_tables; i++ )
     {
         free( filter_tables[i] );
@@ -648,9 +675,9 @@ static bool initialize_buffer( struct worker * me )
 
 static void get_filter_tables_by_channel(
     struct worker * me,
-    char * channel,
-    char *** filter,
-    unsigned int * num_tables
+    char *          channel,
+    char ***        filter,
+    unsigned int *  num_tables
 )
 {
     PGresult *   filter_result = NULL;
