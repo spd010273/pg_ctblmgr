@@ -583,7 +583,9 @@ static void pg_ctblmgr_decode_change(
                          && index->rd_index->indisunique
                          && index->rd_index->indimmediate
                          && RelationGetIndexPredicate( index ) == NIL
+#if (PG_VERSION_NUM < 12000 )
                          && IndexIsValid( index->rd_index )
+#endif
                          && index->rd_rel->relam == BTREE_AM_OID
                          && index->rd_index->indnatts > 0
                       )

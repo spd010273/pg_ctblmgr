@@ -167,9 +167,7 @@ void * buffer_pin_pop( struct buffer_pin * bp )
     void * data = NULL;
 
     if( bp == NULL )
-    {
         return NULL;
-    }
 
     if( !__TNS_MUTEX( (&(bp->in_use)) ) )
         return NULL;
@@ -182,9 +180,7 @@ void * buffer_pin_pop( struct buffer_pin * bp )
 bool buffer_pin_push( struct buffer_pin * bp, void * data )
 {
     if( bp == NULL || data == NULL )
-    {
         return false;
-    }
 
     if( !__TNS_MUTEX( (&(bp->in_use)) ) )
         return false;
@@ -204,9 +200,7 @@ bool remove_buffer_pin_by_name( struct buffer * b, char * qual_name )
     struct buffer_pin * bp = NULL;
 
     if( b == NULL || qual_name == NULL )
-    {
         return false;
-    }
 
     if( !__TNS_MUTEX( (&(b->in_use)) ) )
         return false;
@@ -249,14 +243,10 @@ void * buffer_pop( struct buffer * b, char * qual )
     struct buffer_pin * bp = NULL;
 
     if( b == NULL || qual == NULL )
-    {
         return NULL;
-    }
 
     if( !__TNS_MUTEX( (&(b->in_use)) ) )
-    {
         return NULL;
-    }
 
     bp = ( struct buffer_pin * ) trie_search( b->trie, qual );
 
