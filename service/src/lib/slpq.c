@@ -182,7 +182,14 @@ static void _dump_slpq( struct slpq * head )
         return;
     }
 
-    _log( LOG_LEVEL_DEBUG, "SLPQ %p size %u, H: %p, T: %p", head, head->size, head->head, head->tail );
+    _log(
+        LOG_LEVEL_DEBUG,
+        "SLPQ %p size %u, H: %p, T: %p",
+        head,
+        ( unsigned int ) head->size,
+        head->head,
+        head->tail
+    );
 
     n = head->head;
     while( n != NULL )

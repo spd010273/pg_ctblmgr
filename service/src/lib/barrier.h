@@ -4,6 +4,15 @@
 #include <stdbool.h>
 #include <linux/version.h>
 
+/*
+ * This big ole heap of mess declares:
+ * -  __TNS_MUTEX: Test and Set mutex
+ * -  __C_MUTEX: clear mutex
+ *
+ * based on the availability (or lack thereof) of atomics in the standard
+ * library. If it is not present, we use best-effort internal functions
+ * which use inline ASM to minimize exposure to race conditions.
+ */
 #if __STDC_VERSION__ >= 201112L
 # ifdef __STDC_NO_ATOMICS__
     // Barriers via syscall introduced in kernel 4.16

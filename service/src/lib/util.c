@@ -724,7 +724,9 @@ void free_shared_memory( void * data, size_t size )
         return;
 
     munmap( data, size );
+    _log( LOG_LEVEL_DEBUG, "Free'd %p of size %lu", data, size );
     data = NULL;
+    return;
 }
 
 void * create_shared_memory( size_t size )
@@ -749,6 +751,7 @@ void * create_shared_memory( size_t size )
         return NULL;
     }
 
+    _log( LOG_LEVEL_DEBUG, "Shared memory created at %p of size %lu", ptr, size );
     return ptr;
 }
 
@@ -760,12 +763,14 @@ void * resize_shared_memory( void * ptr, size_t old_size, size_t size )
         return NULL;
 
     new = create_shared_memory( size );
+    _log( LOG_LEVEL_DEBUG, "Resized %p to %p, new size %lu old size %lu", ptr, new, size, old_size );
 
     if( new == NULL )
         return NULL;
 
     memcpy( new, ptr, old_size );
     free_shared_memory( ptr, old_size );
+    _log( LOG_LEVEL_DEBUG, "Resize: free'd %p of %lu", ptr, old_size );
     return new;
 }
 
