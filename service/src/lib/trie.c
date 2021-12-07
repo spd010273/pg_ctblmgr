@@ -171,7 +171,8 @@ static bool _trie_has_children( struct trie * node )
 static struct trie * _new_trie_node( void )
 {
     struct trie * node = NULL;
-    unsigned int i = 0;
+    unsigned int  i    = 0;
+
     node = ( struct trie * ) _TRIE_ALLOC( sizeof( struct trie ) );
 
     if( node == NULL )

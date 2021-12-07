@@ -9,4 +9,5 @@ CREATE TABLE IF NOT EXISTS @extschema@.tb_maintenance_group
 );
 
 COMMENT ON TABLE @extschema@.tb_maintenance_group IS 'Defines a group for maintainence objects, used to organize and control WAL for these objects';
+COMMENT ON COLUMN @extschema@.tb_maintenance_group.title IS 'User-facing title of this group';
 COMMENT ON COLUMN @extschema@.tb_maintenance_group.wal_level IS 'Defines the verbosity of WAL for these objects, can be F for full, R for reduced, or M for minimal';

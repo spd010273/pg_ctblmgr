@@ -15,7 +15,7 @@ ARCHFLAGS		= -m64 -mtune=generic
 CFLAGS			= $(INCLUDE) $(LIBS) $(FLAGS) $(STRICTURES) $(ARCHFLAGS)
 SRCS			= $(wildcard src/*.c) $(wildcard src/lib/*.c)
 OBJS			= $(SRCS:.c=.o)
-LDFLAGS 		= -lm -lpq
+LDFLAGS 		= -lm -lpq -lrt
 
 pg_ctblmgr: $(OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)

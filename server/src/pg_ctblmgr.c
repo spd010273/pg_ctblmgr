@@ -5,6 +5,7 @@ void _PG_init( void )
     // this is a stub for now, we may need to read in GUCs
     // that determine whether minimal JSON records are output or not
     // NOTE: We'll need to set up a queue of guc_change entries in SHM
+    // if we are to add any type of EM behavior
     return;
 }
 
