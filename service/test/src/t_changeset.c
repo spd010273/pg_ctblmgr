@@ -145,7 +145,7 @@ const struct changeset changeset_expects[NUM_TESTS] = {
 
 /* End test definitions */
 int main( void );
-static void print_expects( struct changeset * );
+static void print_expects( struct changeset * ) __attribute__((unused));
 static void print_array( char **, unsigned int );
 static bool check_expects( struct changeset *, struct changeset * );
 

@@ -19,8 +19,8 @@
 #ifndef _SHM_H
 #define _SHM_H
 
-#define __TESTING__ // code coverage
-#define SHM_DEBUG 1
+//#define __TESTING__ // code coverage
+//#define SHM_DEBUG 1
 
 #ifdef __TESTING__
  #include <unistd.h>
@@ -64,6 +64,10 @@
 #include <stdlib.h>
 #include <stddef.h>
 
+#ifdef _POSIX_C_SOURCE
+ #include <signal.h>
+#endif // _POSIX_C_SOURCE
+
 #include "barrier.h"
 
 /* likely/unlikely are branch hints, we may be using an older Cxx without atomic primitives or branch hinting */
@@ -92,7 +96,7 @@
  *   |                                                             |       .
  *   +-------------------------------------------------------------+ High Virtual Address
  *   |                                                             |
- *   |                      ARGV[] / environ                       |
+ *   |                       ARGV[] / environ                      |
  *   |                                                             |
  *   +-------------------------------------------------------------+
  *   |                                                             |
@@ -103,7 +107,7 @@
  *   |                              |                              |
  *   |                              v                              |
  *   |                                                             |
- *   |                     Unallocated space                       |
+ *   |                      Unallocated space                      |
  *   |                                                             |
  *   |                              ^                              |
  *   |                              |                              |
@@ -135,6 +139,20 @@
  * but this may be a bad assumption
  */
 
+#define SHM_ENABLE_RUNTIME_SANITY_CHECK
+
+#ifndef STACK_GROWS_DOWNWARD
+ #if defined( __i386__ ) || defined( __x86__ )|| defined( __amd64__ ) || defined( __x86_64__ )
+    #define STACK_GROWS_DOWNWARD
+ #endif // x86 + x86-64
+ #if defined( __ppc__ ) || defined( __ppc64__ ) || defined( __powerpc__ ) || defined( __powerpc64__ )
+    #define STACK_GROWS_DOWNWARD
+ #endif // PowerPC
+ #if defined( __arm__ )
+    #define STACK_GROWS_DOWNWARD
+ #endif // Arm - Stack dir is configurable.
+#endif // STACK_GROWS_DOWNWARD
+
 #ifdef STACK_GROWS_DOWNWARD
  #define SHM_HEAP_GROWS_UPWARD 1
  #undef SHM_HEAP_GROWS_DOWNWARD
@@ -144,16 +162,23 @@
 #endif // STACK_GROWS_DOWNWARD
 
 #ifdef SHM_HEAP_GROWS_DOWNWARD // When the heap grows 'downward' - towards a lower virtual address
- #define _PTR_ADD_OFFSET(y,z) ( y - z )
- #define _PTR_REMOVE_OFFSET(y,z) ( y + z )
- #define _PTR_BOUND_CHECK(p,b,s) ( ((char *) p <= (char *) b) && ((char *) p >= ((char *) b + (size_t) s)) )
- #define _PTR_GET_OFFSET(b,o) ( (char *) b - (char *) o )
-#else // When the heap grows 'upwards' - towards larger virtual addresses. This is the default for most archs
- #define _PTR_ADD_OFFSET(y,z) ( y + z )
- #define _PTR_REMOVE_OFFSET(y,z) ( y - z )
- #define _PTR_BOUND_CHECK(p,b,s) ( ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) )
+ // _PTR_ADD_OFFSET( pointer, offset )
+ #define _PTR_ADD_OFFSET(y,z) ( (char *) y + (size_t) z )
+ // _PTR_REMOVE_OFFSET( pointer, offset )
+ #define _PTR_REMOVE_OFFSET(y,z) ( (char *) y - (size_t)z )
+ // _PTR_GET_OFFSET( base_address, target )
  #define _PTR_GET_OFFSET(b,o) ( (char *) o - (char *) b )
+#else // When the heap grows 'upwards' - towards larger virtual addresses. This is the default for most archs
+ // _PTR_ADD_OFFSET( pointer, offset )
+ #define _PTR_ADD_OFFSET(y,z) ( (char *) y - (size_t) z )
+ // _PTR_REMOVE_OFFSET( pointer, offset )
+ #define _PTR_REMOVE_OFFSET(y,z) ( (char *) y + (size_t) z )
+ // _PTR_GET_OFFSET( base_address, target )
+ #define _PTR_GET_OFFSET(b,o) ( (char *) b - (char *) o )
 #endif // SHM_HEAP_GROWS_DOWNWARD
+// This should be agnostic of all archs
+
+#define _PTR_BOUND_CHECK(p,b,s) ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) )
 
 #define DEFAULT_PAGE_SIZE 8192 // bytes
 #define ZERO_BUFFER_SIZE DEFAULT_PAGE_SIZE
@@ -185,14 +210,20 @@ typedef enum {
     SHM_DETACH
 } shm_op;
 
+// TODO: Need to remove stale segments/control if found on startup
+//  - These are easily discovered but we'll need to load them in and kill(0) the PID
+//  to see if it's valid
+//  Also need a free / unmap all
 /* Interface functions / flags */
-
 extern void shm_init( void );
 extern void shm_child_init( void );
 extern void * map_segment( shm_handle );
 extern void * new_segment( size_t );
 extern void unmap_segment( void * );
 extern void free_segment( void * );
+extern void unmap_all( void );
+extern void map_all( void );
+extern void zero_segment( shm_handle );
 
 /* * * Local mapping of shared objects * * */
 /*
@@ -208,7 +239,7 @@ extern void free_segment( void * );
 
 typedef struct shm_segment {
     shm_handle handle;          // Mapped segment ID
-    char *     mapped_address;  // Address it was mapped to in the process' memory map
+    char *     mapped_address;  // Address it was mapped to in the process' memory map this is the address of the header
     size_t     mapped_size;     // Size mapped in
 } shm_segment;
 
@@ -238,9 +269,8 @@ typedef struct seg_header {
 #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0xE02EA7F3
 #define CONTROL_HANDLE_INVALID ( ( uint64_t ) 0 - 1 )
 #define CONTROL_HEADER_MAGIC ( uint32_t ) 0x9F0522BE
-#define GET_USER_PTR(x) ( _PTR_ADD_OFFSET( ( ( char * ) x ), offsetof( seg_header, data ) ) )
-#define GET_HDR_PTR(x) ( _PTR_REMOVE_OFFSET( ( ( char * ) x ), offsetof( seg_header, data ) ) )
-
+#define GET_USER_PTR(x) ( (void *) _PTR_REMOVE_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data )) ) )
+#define GET_HDR_PTR(x) ( (void *) _PTR_ADD_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data ) ) ) )
 /*
  * Pointer dereference helpers / logic
  * __ref:
@@ -262,7 +292,9 @@ typedef struct __ref {
 } __ref;
 
 
-extern inline void * get_ptr( __ref ) __attribute__((always_inline));
-extern inline __ref get_ref( shm_segment, void * ) __attribute__((always_inline));
+extern inline void * get_ptr( __ref );
+extern inline __ref get_ref( void * );
+extern ctrl_header * get_control_header( void );
+
 
 #endif // _SHM_H
