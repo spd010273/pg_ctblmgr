@@ -50,7 +50,12 @@ int main( void )
     fprintf( stdout, "PHASE 2 TEST\n" );
     fprintf( stdout, "Getting reference to pass to child\n" );
     data = get_ref( mapped_addr );
-    fprintf( stdout, "Generated ref %lu, %zu\n", ( uint64_t ) data._segment, data._offset );
+    fprintf(
+        stdout,
+        "Generated ref %lu, %zu\n",
+        ( uint64_t ) data._segment,
+        ( size_t ) data._offset
+    );
     child = fork();
 
     if( child == 0 ) // child
@@ -289,7 +294,7 @@ static void check_ref_logic( void * mapped_address, size_t size )
                 stderr,
                 "FAILED: dereferenced __ref (%lu,%zu) = %p != %p\n",
                 ( uint64_t ) test_ref._segment,
-                test_ref._offset,
+                ( size_t ) test_ref._offset,
                 ( void * ) t,
                 ( void * ) d
             );

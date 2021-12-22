@@ -92,6 +92,9 @@ __inline__ void * get_ptr( __ref ref )
     mapped_address = __segment_lut[ref._segment].mapped_address;
 
     if( unlikely( mapped_address == NULL ) )
+#ifndef SHM_AUTO_MAP
+        return NULL;
+#else
     {
         // Segment not mapped
         _shm_log(
@@ -112,6 +115,7 @@ __inline__ void * get_ptr( __ref ref )
 
         mapped_address = __segment_lut[ref._segment].mapped_address;
     }
+#endif // SHM_AUTO_MAP
 
     mapped_size = __segment_lut[ref._segment].mapped_size;
     ret         = _PTR_ADD_OFFSET( GET_USER_PTR( mapped_address ), offset );
@@ -248,8 +252,9 @@ void shm_init( void )
 
     _shm_log(
         LL_SHM_DEBUG,
-        "HANDLE SIZE: %zu bytes",
-        sizeof( shm_handle )
+        "HANDLE SIZE: %zu bytes\nOFFSET SIZE: %zu bytes",
+        sizeof( shm_handle ),
+        sizeof( offset_t )
     );
  #ifdef _SHM_PACK_STRUCT
     _shm_log(
@@ -529,7 +534,10 @@ void * new_segment( size_t size )
         return NULL;
     }
 
-    if( control_header->entry_count + 1 > SHM_MAX_SEGMENTS )
+    if(
+            control_header->entry_count + 1 > SHM_MAX_SEGMENTS
+         && ( control_header->entry_count + 1 > control_header->entry_count )
+      )
     {
         __C_MUTEX( &(control_header->locked) );
         _shm_log(

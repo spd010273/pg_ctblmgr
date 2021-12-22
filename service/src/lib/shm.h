@@ -74,9 +74,39 @@
 
 #include "barrier.h"
 
+/*
+ * Important setup parameters.
+ *   SHM_ENABLE_RUNTIME_SANITY_CHECK: Verifies stack and heap growth directions
+ *     at initialization. Some assumptions / conventions are used but we will
+ *     not know if they are correct until runtime.
+ *   SHM_ENABLE_STRUCT_PACKING: Allows struct packing, which is used if the
+ *     architecture word size is sufficient to justify struct packing for
+ *     things like offset-based references and headers. This can save a decent
+ *     amount of memory but is only useful under certain conditions
+ *   DEFAULT_PAGE_SIZE: Default page size in cases where the OS does not
+ *     provide a method for determining it at runtime.
+ *   SHM_MAX_SEGMENTS: The maximum number of segments allowed to be attached to
+ *     a single control header. This limits the header's size, and being
+ *     statically defined, limits code complexity. This also controls the
+ *     typedefs for segment handles and can, if sufficiently small, allow
+ *     for efficient dereferencing
+ *   SHM_SEGMENT_MAX_SIZE: The maximum size of a single segment, in pages.
+ *     This controls the maximum memory allocation to
+ *     SHM_SEGMENT_MAX_SIZE * PAGE_SIZE
+ *   SHM_AUTO_MAP: Allows automatic mapping when dereferencing a __ref pointing
+ *     to an as-of-not-yet-mapped segment. Otherwise dereferencing will return
+ *     a NULL pointer
+ *   SHM_ENABLE_HUGETLB: Attempt to use the system's hugepage settings to
+ *     fulfill requests to allocate large segments. For typical x86
+ *     applications, this can be 2MB, and up to 1GB iff PDPE1GB is supported.
+ *     I hope to include PSE support as well
+ */
 #define SHM_ENABLE_RUNTIME_SANITY_CHECK 1
 #define SHM_ENABLE_STRUCT_PACKING 1
-#define DEFAULT_PAGE_SIZE 8192 // bytes
+#define SHM_MAX_SEGMENTS 1024
+#define SHM_SEGMENT_MAX_SIZE 256 // In pages
+#define SHM_AUTO_MAP 1 
+//#define SHM_ENABLE_HUGETLB
 
 /* likely/unlikely are branch hints, we may be using an older Cxx without atomic primitives or branch hinting */
 #ifdef __builtin_expect
@@ -91,6 +121,11 @@
  #define unlikely(x) ( !!(x) )
 #endif // __builtin_expect
 
+#ifdef __ultrasparc__
+ #define DEFAULT_PAGE_SIZE 8192
+#else
+ #define DEFAULT_PAGE_SIZE 4096
+#endif // __ultrasparc__
 /*
  * HEAP directionality logic
  *  We assume the heap grows in the opposite direction from the stack.
@@ -211,21 +246,20 @@
 #define SHM_FILE_OCTAL 0600
 
 #define SHM_ID_NAME_SIZE 64
-#define SHM_MAX_SEGMENTS 1024
 
-#if ( SHM_MAX_SEGMENTS > 0 ) && ( SHM_MAX_SEGMENTS <= UCHAR_MAX )
+#if defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > 0 ) && ( SHM_MAX_SEGMENTS <= UCHAR_MAX )
 typedef uint8_t shm_handle;
 typedef uint8_t handle_iter;
  #ifdef SHM_ENABLE_STRUCT_PACKING
   #define _SHM_PACK_STRUCT
  #endif // SHM_ENABLE_STRUCT_PACKING
-#elif ( SHM_MAX_SEGMENTS > UCHAR_MAX ) && ( SHM_MAX_SEGMENTS <= USHRT_MAX )
+#elif defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > UCHAR_MAX ) && ( SHM_MAX_SEGMENTS <= USHRT_MAX )
 typedef uint16_t shm_handle;
 typedef uint16_t handle_iter;
  #ifdef SHM_ENABLE_STRUCT_PACKING
   #define _SHM_PACK_STRUCT
  #endif // SHM_ENABLE_STRUCT_PACKING
-#elif ( SHM_MAX_SEGMENTS > USHRT_MAX ) && ( SHM_MAX_SEGMENTS <= UINT_MAX )
+#elif defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > USHRT_MAX ) && ( SHM_MAX_SEGMENTS <= UINT_MAX )
 typedef uint32_t shm_handle;
 typedef uint32_t handle_iter;
  #if defined( __sys64 ) && defined( SHM_ENABLE_STRUCT_PACKING )
@@ -234,7 +268,27 @@ typedef uint32_t handle_iter;
 #else
 typedef uint64_t shm_handle;
 typedef uint64_t handle_iter;
+ #ifndef SHM_MAX_SEGMENTS
+  #define SHM_MAX_SEGMENTS UINT_MAX
+ #endif // SHM_MAX_SEGMENTS
 #endif // handle setup
+
+#ifdef SHM_SEGMENT_MAX_SIZE
+ #define MAX_OFFSET SHM_SEGMENT_MAX_SIZE * DEFAULT_PAGE_SIZE
+#else
+ #define MAX_OFFSET UINT_MAX
+ #define SHM_SEGMENT_MAX_SIZE ( MAX_OFFSET / DEFAULT_PAGE_SIZE )
+#endif // SHM_SEGMENT_MAX_SIZE
+
+#if defined( MAX_OFFSET ) && ( MAX_OFFSET > 0 ) && ( MAX_OFFSET <= UCHAR_MAX )
+typedef uint8_t offset_t;
+#elif defined( MAX_OFFSET ) && ( MAX_OFFSET > UCHAR_MAX ) && ( MAX_OFFSET <= USHRT_MAX )
+typedef uint16_t offset_t;
+#elif defined( MAX_OFFSET ) && ( MAX_OFFSET > USHRT_MAX ) && ( MAX_OFFSET <= UINT_MAX )
+typedef uint32_t offset_t;
+#else
+typedef uint64_t offset_t;
+#endif // offset setup
 
 typedef enum {
     SHM_CREATE,
@@ -341,12 +395,12 @@ typedef struct seg_header {
 #ifdef _SHM_PACK_STRUCT
 typedef struct __ref {
     shm_handle _segment; // ID of the segment this ref points to
-    size_t     _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
+    offset_t   _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
 } __attribute__((packed)) __ref;
 #else
 typedef struct __ref {
     shm_handle _segment;
-    size_t     _offset;
+    offset_t   _offset;
 } __ref;
 #endif // _SHM_PACK_STRUCT
 
