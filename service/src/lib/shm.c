@@ -39,7 +39,7 @@ static bool _close_segment_descriptor( int, char *, bool );
 #endif // SHM_USE_POSIX || SHM_USE_MMAP
 
 static size_t _get_system_page_size( void );
-static size_t _round_to_multiple_of_page_size( size_t ) __attribute__((unused));
+static size_t _round_to_multiple_of_page_size( size_t );
 static size_t _get_ctrl_header_size( uint32_t );
 static inline shm_handle _get_handle_from_ptr( void * ) __attribute__((always_inline));
 static void _free_segment( shm_handle );
@@ -74,7 +74,7 @@ static uint16_t      cleanup_list_len    = 0;
 // Given a segment ID, lets us get the mapping info
 static shm_segment   __segment_lut[SHM_MAX_SEGMENTS] = {{0}};
 
-inline void * get_ptr( __ref ref )
+__inline__ void * get_ptr( __ref ref )
 {
     void * mapped_address = NULL;
     void * ret            = NULL;
@@ -97,7 +97,7 @@ inline void * get_ptr( __ref ref )
         _shm_log(
             LL_SHM_DEBUG,
             "get_ptr() attempting to map a segment %lu",
-            ref._segment
+            ( uint64_t ) ref._segment
         );
 
         if( unlikely( map_segment( ref._segment ) == NULL ) )
@@ -105,7 +105,7 @@ inline void * get_ptr( __ref ref )
             _shm_log(
                 LL_SHM_ERROR,
                 "get_ptr() failed to automap segment %lu",
-                ref._segment
+                ( uint64_t ) ref._segment
             );
             return NULL;
         }
@@ -129,7 +129,7 @@ inline void * get_ptr( __ref ref )
     return ret;
 }
 
-inline __ref get_ref( void * ptr )
+__inline__ __ref get_ref( void * ptr )
 {
     __ref      ret    = {0};
     shm_handle handle = 0;
@@ -178,7 +178,7 @@ inline __ref get_ref( void * ptr )
         _shm_log(
             LL_SHM_ERROR,
             "Mapped address for segment handle %lu is null",
-            handle
+            ( uint64_t ) handle
         );
         return ret;
     }
@@ -195,11 +195,11 @@ inline __ref get_ref( void * ptr )
 
 void shm_init( void )
 {
-    void *     mapped_address   = NULL;
-    size_t     mapped_size      = 0;
-    size_t     ctrl_header_size = 0;
-    shm_handle ctrl_handle      = CONTROL_HANDLE_INVALID;
-    uint32_t   i                = 0;
+    void *      mapped_address   = NULL;
+    size_t      mapped_size      = 0;
+    size_t      ctrl_header_size = 0;
+    shm_handle  ctrl_handle      = CONTROL_HANDLE_INVALID;
+    handle_iter i                = 0;
 
 #ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK
     /*
@@ -213,18 +213,63 @@ void shm_init( void )
 #endif // SHM_ENABLE_RUNTIME_SANITY_CHECK
 
 #ifdef SHM_DEBUG
-    _shm_log( LL_SHM_DEBUG, "SHM DEBUG ENABLED:\n  Heap Growth Direction: " );
+    _shm_log( LL_SHM_DEBUG, "SHM DEBUG ENABLED:" );
  #ifdef SHM_HEAP_GROWS_DOWNWARD
-    _shm_log( LL_SHM_DEBUG, "DOWN (Towards lower virtual addresses)\n" );
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Heap Growth Direction: DOWN (Towards lower virtual addresses)"
+    );
  #else
-    _shm_log( LL_SHM_DEBUG, "UP (Towards higher virtual addresses)" );
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Heap Growth Direction: UP (Towards higher virtual addresses)"
+    );
  #endif // SHM_HEAP_GROWS_DOWNWARD
-    _shm_log( LL_SHM_DEBUG, "  Stack Growth Direction: " );
  #ifdef STACK_GROWS_DOWNWARD
-    _shm_log( LL_SHM_DEBUG, "DOWN (Towards lower virtual addresses)\n" );
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Stack Growth Direction: DOWN (Towards lower virtual addresses)"
+    );
  #else
-    _shm_log( LL_SHM_DEBUG, "UP (Towards higher virtual addresses)" );
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Stack Growth Direction: UP (Towards higher virtual addresses)"
+    );
  #endif // STACK_GROWS_DOWNWARD
+ 
+    _shm_log(
+        LL_SHM_DEBUG,
+        "MAGIC BYTES:\n"
+        "  control header: %x\n"
+        "  segment header: %x",
+        CONTROL_HEADER_MAGIC,
+        SEGMENT_HEADER_MAGIC
+    );
+
+    _shm_log(
+        LL_SHM_DEBUG,
+        "HANDLE SIZE: %zu bytes",
+        sizeof( shm_handle )
+    );
+ #ifdef _SHM_PACK_STRUCT
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Using packed structures\n"
+        "  __ref size: %lu bytes\n"
+        "  __segment_lut[] element size: %lu bytes",
+        sizeof( __ref ),
+        sizeof( shm_segment )
+    );
+ #else
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Using word-aligned structures\n"
+        "  __ref size: %lu bytes\n"
+        "  __segment_lut[] element size: %lu bytes",
+        sizeof( __ref ),
+        sizeof( shm_segment )
+    );
+ #endif // _SHM_PACK_STRUCT
 #endif // SHM_DEBUG
 
     p_pid = ( pid_t ) getpid();
@@ -251,7 +296,7 @@ void shm_init( void )
         _shm_log(
             LL_SHM_DEBUG,
             "Attemtping initialization with handle %lu",
-            ctrl_handle
+            ( uint64_t ) ctrl_handle
         );
 
         if(
@@ -269,7 +314,7 @@ void shm_init( void )
             _shm_log(
                 LL_SHM_DEBUG,
                 "Mapped control handle %lu to %p",
-                ctrl_handle,
+                ( uint64_t ) ctrl_handle,
                 mapped_address
             );
             break;
@@ -285,14 +330,14 @@ void shm_init( void )
     control_header_size         = ( size_t ) mapped_size;
     control_header->magic       = ( uint32_t ) CONTROL_HEADER_MAGIC;
     control_header->owner       = getpid();
-    control_header->entry_count = 0;
-    control_header->max_entries = SHM_MAX_SEGMENTS;
+    control_header->entry_count = ( handle_iter ) 0;
+    control_header->max_entries = ( handle_iter ) SHM_MAX_SEGMENTS;
     control_header->locked      = false;
 
     _cleanup_old_segments();
 
     // Blank out the allocations
-    for( i = 0; i < ( uint32_t ) SHM_MAX_SEGMENTS; i++ )
+    for( i = 0; i < control_header->max_entries; i++ )
     {
         control_header->segments[i]     = (shm_handle) SEGMENT_HANDLE_INVALID;
         __segment_lut[i].mapped_address = NULL;
@@ -304,7 +349,7 @@ void shm_init( void )
         LL_SHM_DEBUG,
         "SHM INITED: mapped control segment to %p, handle %lu",
         control_header,
-        control_handle
+        ( uint64_t ) control_handle
     );
 
     shm_inited = true;
@@ -535,7 +580,7 @@ void * new_segment( size_t size )
             "real_size: %zu\n"
             "mapped_size: %zu\n"
             "User address: %p",
-            new_handle,
+            ( uint64_t ) new_handle,
             mapped_address,
             size,
             real_size,
@@ -560,7 +605,7 @@ static inline shm_handle _get_handle_from_ptr( void * ptr )
 {
     seg_header * header = NULL;
     shm_handle   handle = SEGMENT_HANDLE_INVALID;
-    uint32_t     i      = 0;
+    handle_iter  i      = 0;
 
     if( unlikely( ptr == NULL ) )
     {
@@ -594,7 +639,7 @@ static inline shm_handle _get_handle_from_ptr( void * ptr )
     // TODO: Implement reverse lookup for header pointers (locally mapped) to shm_handle,
     // This is exhaustive but safe as we don't have to dereference the header pointer, just do
     // comparisons
-    for( i = 0; i < ( uint32_t ) SHM_MAX_SEGMENTS; i++ )
+    for( i = 0; i < ( handle_iter ) SHM_MAX_SEGMENTS; i++ )
     {
         if(
                ( void * ) __segment_lut[i].mapped_address == ( void * ) header
@@ -628,7 +673,7 @@ static inline shm_handle _get_handle_from_ptr( void * ptr )
         _shm_log(
             LL_SHM_ERROR,
             "Invalid header magic for segment %lu",
-            handle
+            ( uint64_t ) handle
         );
         return ( shm_handle ) SEGMENT_HANDLE_INVALID;
     }
@@ -761,7 +806,6 @@ void free_segment( void * ptr )
 {
     seg_header * header = NULL;
     shm_handle   handle = SEGMENT_HANDLE_INVALID;
-    void *       base   = NULL;
 
     handle = _get_handle_from_ptr( ptr );
 
@@ -790,10 +834,10 @@ void free_segment( void * ptr )
 // Unmaps all segments, including control
 void unmap_all( void )
 {
-    shm_handle ctrl           = ( shm_handle ) CONTROL_HANDLE_INVALID;
-    shm_handle seg            = ( shm_handle ) SEGMENT_HANDLE_INVALID;
-    void *     mapped_address = NULL;
-    uint32_t   i              = 0;
+    shm_handle  ctrl           = ( shm_handle ) CONTROL_HANDLE_INVALID;
+    shm_handle  seg            = ( shm_handle ) SEGMENT_HANDLE_INVALID;
+    void *      mapped_address = NULL;
+    handle_iter i              = 0;
 
     if( control_header == NULL )
     {
@@ -819,6 +863,9 @@ void unmap_all( void )
             continue;
 
         seg = control_header->segments[i];
+        
+        if( seg == SEGMENT_HANDLE_INVALID )
+            continue;
 
         mapped_address = ( void * ) __segment_lut[seg].mapped_address;
 
@@ -848,7 +895,7 @@ void unmap_all( void )
         _shm_log(
             LL_SHM_ERROR,
             "Failed to detach control handle %lu",
-            ctrl
+            ( uint64_t ) ctrl
         );
     }
 
@@ -1390,8 +1437,8 @@ static bool _shm_posix(
         SHM_ID_NAME_SIZE,
         "/%s%lu.%lu",
         SHM_FILE_POSIX_PREFIX,
-        ( uint64_t ) ( control_handle == CONTROL_HANDLE_INVALID )
-            ? 0 : control_handle,
+        ( uint64_t ) ( control_handle == CONTROL_HANDLE_INVALID
+            ? 0 : control_handle ),
         ( uint64_t ) handle
     );
 
@@ -1409,7 +1456,7 @@ static bool _shm_posix(
                 "Cannot unmap %p from %s (%lu)",
                 mapped_address,
                 name,
-                handle
+                ( uint64_t ) handle
             );
             return false;
         }
@@ -1952,7 +1999,8 @@ static void _cleanup_old_segments( void )
 #ifdef SHM_DEBUG
 static void __dump_ctrl_header( ctrl_header * header )
 {
-    uint32_t i = 0;
+    handle_iter i = 0;
+
     if( header == NULL )
         return;
     _shm_log(
@@ -1961,14 +2009,14 @@ static void __dump_ctrl_header( ctrl_header * header )
           "MAGIC: %u\n  " \
           "OWNER: %d\n  " \
           "LOCKED: %s\n  " \
-          "ENTRY_COUNT: %u\n  " \
-          "MAX_ENTRIES: %u\n  " \
+          "ENTRY_COUNT: %lu\n  " \
+          "MAX_ENTRIES: %lu\n  " \
           "SEGMENTS[]:",
         header->magic,
         header->owner,
         header->locked ? "TRUE" : "FALSE",
-        header->entry_count,
-        header->max_entries
+        ( uint64_t ) header->entry_count,
+        ( uint64_t ) header->max_entries
     );
 
     for( i = 0; i < header->max_entries; i++ )
@@ -1977,9 +2025,9 @@ static void __dump_ctrl_header( ctrl_header * header )
             continue;
         _shm_log(
             LL_SHM_DEBUG,
-            "    [%u]: %lu",
-            i,
-            header->segments[i]
+            "    [%lu]: %lu",
+            ( uint64_t ) i,
+            ( uint64_t ) header->segments[i]
         );
     }
 
@@ -2006,7 +2054,7 @@ static void __dump_seg_header( seg_header * header )
         header->locked ? "TRUE" : "FALSE",
         header->entry_count,
         header->ref_count,
-        header->control,
+        ( uint64_t ) header->control,
         header->data
     );
 
@@ -2115,7 +2163,6 @@ static void _shm_log( shm_ll log_level, char * message, ... )
     FILE *         output_handle = NULL;
     struct timeval tv            = {0};
     char           buff_time[28] = {0};
-    uint8_t        ll_len        = 0;
 
     if( unlikely( message == NULL ) )
         return;

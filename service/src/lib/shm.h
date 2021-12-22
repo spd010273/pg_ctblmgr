@@ -20,7 +20,7 @@
 #define _SHM_H
 
 //#define __TESTING__ // code coverage
-//#define SHM_DEBUG 1
+#define SHM_DEBUG 1
 
 #ifdef __TESTING__
  #include <unistd.h>
@@ -56,6 +56,7 @@
  #endif // SHM_SHARE_MMU
 #endif // SHM_USE_SYSV
 
+#include <limits.h>
 #include <stdbool.h>
 #include <string.h>
 #include <errno.h>
@@ -65,12 +66,17 @@
 #include <stddef.h>
 #include <time.h>
 #include <stdarg.h>
+#include <sys/time.h>
 
 #ifdef _POSIX_C_SOURCE
  #include <signal.h>
 #endif // _POSIX_C_SOURCE
 
 #include "barrier.h"
+
+#define SHM_ENABLE_RUNTIME_SANITY_CHECK 1
+#define SHM_ENABLE_STRUCT_PACKING 1
+#define DEFAULT_PAGE_SIZE 8192 // bytes
 
 /* likely/unlikely are branch hints, we may be using an older Cxx without atomic primitives or branch hinting */
 #ifdef __builtin_expect
@@ -141,7 +147,11 @@
  * but this may be a bad assumption
  */
 
-#define SHM_ENABLE_RUNTIME_SANITY_CHECK
+#if defined( __amd64__ ) || defined( __x86_64__ ) || defined( __ppc64__ ) || defined( __powerpc64__ )
+ #define __sys64
+#elif defined( __i386__ ) || defined( __x86__ ) || defined( __ppc__ ) || defined( __powerpc__ )
+ #define __sys32
+#endif // __sysXX
 
 #ifndef STACK_GROWS_DOWNWARD
  #if defined( __i386__ ) || defined( __x86__ )|| defined( __amd64__ ) || defined( __x86_64__ )
@@ -182,7 +192,6 @@
 
 #define _PTR_BOUND_CHECK(p,b,s) ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) )
 
-#define DEFAULT_PAGE_SIZE 8192 // bytes
 #define ZERO_BUFFER_SIZE DEFAULT_PAGE_SIZE
 
 #ifndef MAP_NOSYNC
@@ -204,7 +213,29 @@
 #define SHM_ID_NAME_SIZE 64
 #define SHM_MAX_SEGMENTS 1024
 
+#if ( SHM_MAX_SEGMENTS > 0 ) && ( SHM_MAX_SEGMENTS <= UCHAR_MAX )
+typedef uint8_t shm_handle;
+typedef uint8_t handle_iter;
+ #ifdef SHM_ENABLE_STRUCT_PACKING
+  #define _SHM_PACK_STRUCT
+ #endif // SHM_ENABLE_STRUCT_PACKING
+#elif ( SHM_MAX_SEGMENTS > UCHAR_MAX ) && ( SHM_MAX_SEGMENTS <= USHRT_MAX )
+typedef uint16_t shm_handle;
+typedef uint16_t handle_iter;
+ #ifdef SHM_ENABLE_STRUCT_PACKING
+  #define _SHM_PACK_STRUCT
+ #endif // SHM_ENABLE_STRUCT_PACKING
+#elif ( SHM_MAX_SEGMENTS > USHRT_MAX ) && ( SHM_MAX_SEGMENTS <= UINT_MAX )
+typedef uint32_t shm_handle;
+typedef uint32_t handle_iter;
+ #if defined( __sys64 ) && defined( SHM_ENABLE_STRUCT_PACKING )
+  #define _SHM_PACK_STRUCT
+ #endif // __sys64 && SHM_ENABLE_STRUCT_PACKING
+#else
 typedef uint64_t shm_handle;
+typedef uint64_t handle_iter;
+#endif // handle setup
+
 typedef enum {
     SHM_CREATE,
     SHM_DESTROY,
@@ -238,20 +269,28 @@ extern void zero_segment( shm_handle );
  * mapped locations.
  */
 
+#ifdef _SHM_PACK_STRUCT
+typedef struct shm_segment {
+    shm_handle handle;
+    void *     mapped_address;
+    size_t     mapped_size;
+} __attribute__((packed)) shm_segment;
+#else
 typedef struct shm_segment {
     shm_handle handle;          // Mapped segment ID
-    char *     mapped_address;  // Address it was mapped to in the process' memory map this is the address of the header
-    size_t     mapped_size;     // Size mapped in
+    void *     mapped_address;  // Address it was mapped to in the process' memory map this is the address of the header
+    size_t     mapped_size;     // Size mapped in bytes
 } shm_segment;
+#endif // _SHM_PACK_STRUCT
 
 // Global stuff
 typedef struct ctrl_header {
-    uint32_t   magic;           // Should be CONTROL_HEADER_MAGIC at all times
-    pid_t      owner;           // Parent process owning this segment
-    bool       locked;          // Indicates a PID is modifying accounting info
-    uint32_t   entry_count;     // # Allocated segments
-    uint32_t   max_entries;     // SHM_MAX_SEGMENTS
-    shm_handle segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
+    uint32_t    magic;           // Should be CONTROL_HEADER_MAGIC at all times
+    pid_t       owner;           // Parent process owning this segment
+    bool        locked;          // Indicates a PID is modifying accounting info
+    handle_iter entry_count;     // # Allocated segments
+    handle_iter max_entries;     // SHM_MAX_SEGMENTS
+    shm_handle  segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
 } ctrl_header;
 
@@ -265,11 +304,23 @@ typedef struct seg_header {
     char *     data;            // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
 } seg_header;
 
-/* Page Headers - these are stored in shared memory */
-#define SEGMENT_HANDLE_INVALID ( ( uint64_t ) 0 - 2 )
-#define SEGMENT_HEADER_MAGIC ( uint32_t ) 0xE02EA7F3
-#define CONTROL_HANDLE_INVALID ( ( uint64_t ) 0 - 1 )
-#define CONTROL_HEADER_MAGIC ( uint32_t ) 0x9F0522BE
+/*
+ * Page Headers - these are stored in shared memory
+ *  we use different magic numbers with the packing
+ *  settings to avoid mis-interpreting the headers
+ */
+#define SEGMENT_HANDLE_INVALID ( ( shm_handle ) ( ( uint64_t ) 0 - 2 ) )
+#ifdef _SHM_PACK_STRUCT
+ #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0x3FA7B00B
+#else
+ #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0xE02EA7F3
+#endif // _SHM_PACK_STRUCT
+#define CONTROL_HANDLE_INVALID ( ( shm_handle ) ( ( uint64_t ) 0 - 1 ) )
+#ifdef _SHM_PACK_STRUCT
+ #define CONTROL_HEADER_MAGIC ( uint32_t ) 0xBE22420A
+#else
+ #define CONTROL_HEADER_MAGIC ( uint32_t ) 0x9F0522BE
+#endif // _SHM_PACK_STRUCT
 #define GET_USER_PTR(x) ( (void *) _PTR_REMOVE_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data )) ) )
 #define GET_HDR_PTR(x) ( (void *) _PTR_ADD_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data ) ) ) )
 /*
@@ -287,14 +338,20 @@ typedef struct seg_header {
  *   Given a __ref and a populated __segment_lut[], we can resolve an absolute
  *   local address from a base address / segment_id and offset
  */
+#ifdef _SHM_PACK_STRUCT
 typedef struct __ref {
-    shm_handle  _segment; // ID of the segment this ref points to
-    size_t      _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
+    shm_handle _segment; // ID of the segment this ref points to
+    size_t     _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
+} __attribute__((packed)) __ref;
+#else
+typedef struct __ref {
+    shm_handle _segment;
+    size_t     _offset;
 } __ref;
+#endif // _SHM_PACK_STRUCT
 
-
-extern inline void * get_ptr( __ref );
-extern inline __ref get_ref( void * );
+extern __inline__ void * get_ptr( __ref );
+extern __inline__ __ref get_ref( void * );
 extern ctrl_header * get_control_header( void );
 
 // Logging helpers
