@@ -63,6 +63,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <time.h>
+#include <stdarg.h>
 
 #ifdef _POSIX_C_SOURCE
  #include <signal.h>
@@ -118,15 +120,15 @@
  *   |                                                             |
  *   +-------------------------------------------------------------+
  *   |                                                             |
- *   |                   .bss (uninitialized data)                 | 
+ *   |                   .bss (uninitialized data)                 |
  *   |                                                             |
  *   +-------------------------------------------------------------+
  *   |                                                             |
- *   |                   .data (initialized data)                  | 
+ *   |                   .data (initialized data)                  |
  *   |                                                             |
  *   +-------------------------------------------------------------+
  *   |                                                             |
- *   |                 .text (program code segments)               | 
+ *   |                 .text (program code segments)               |
  *   |                                                             |
  *   +-------------------------------------------------------------+ Low Virtual Address
  *   |                                                             |      .
@@ -209,7 +211,6 @@ typedef enum {
     SHM_ATTACH,
     SHM_DETACH
 } shm_op;
-
 // TODO: Need to remove stale segments/control if found on startup
 //  - These are easily discovered but we'll need to load them in and kill(0) the PID
 //  to see if it's valid
@@ -296,5 +297,11 @@ extern inline void * get_ptr( __ref );
 extern inline __ref get_ref( void * );
 extern ctrl_header * get_control_header( void );
 
+// Logging helpers
+
+typedef enum {
+    LL_SHM_ERROR,
+    LL_SHM_DEBUG
+} shm_ll;
 
 #endif // _SHM_H
