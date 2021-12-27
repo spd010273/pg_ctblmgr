@@ -103,9 +103,9 @@
  */
 #define SHM_ENABLE_RUNTIME_SANITY_CHECK 1
 #define SHM_ENABLE_STRUCT_PACKING 1
-#define SHM_MAX_SEGMENTS 1024
+#define SHM_MAX_SEGMENTS 255
 #define SHM_SEGMENT_MAX_SIZE 256 // In pages
-#define SHM_AUTO_MAP 1 
+#define SHM_AUTO_MAP 1
 //#define SHM_ENABLE_HUGETLB
 
 /* likely/unlikely are branch hints, we may be using an older Cxx without atomic primitives or branch hinting */
@@ -208,20 +208,22 @@
  #undef SHM_HEAP_GROWS_UPWARD
 #endif // STACK_GROWS_DOWNWARD
 
+// There's a chance this could all be handled by the compiler and I am drastically overthinking things,
+// in which case it's really easy to remove the extra crap
 #ifdef SHM_HEAP_GROWS_DOWNWARD // When the heap grows 'downward' - towards a lower virtual address
  // _PTR_ADD_OFFSET( pointer, offset )
- #define _PTR_ADD_OFFSET(y,z) ( (char *) y + (size_t) z )
+ #define _PTR_ADD_OFFSET(y,z) ( (uint8_t *) y - (size_t) z )
  // _PTR_REMOVE_OFFSET( pointer, offset )
- #define _PTR_REMOVE_OFFSET(y,z) ( (char *) y - (size_t)z )
+ #define _PTR_REMOVE_OFFSET(y,z) ( (uint8_t *) y + (size_t)z )
  // _PTR_GET_OFFSET( base_address, target )
- #define _PTR_GET_OFFSET(b,o) ( (char *) o - (char *) b )
+ #define _PTR_GET_OFFSET(b,o) ( (uint8_t *) b - (uint8_t *) o )
 #else // When the heap grows 'upwards' - towards larger virtual addresses. This is the default for most archs
  // _PTR_ADD_OFFSET( pointer, offset )
- #define _PTR_ADD_OFFSET(y,z) ( (char *) y - (size_t) z )
+ #define _PTR_ADD_OFFSET(y,z) ( (uint8_t *) y + (size_t) z )
  // _PTR_REMOVE_OFFSET( pointer, offset )
- #define _PTR_REMOVE_OFFSET(y,z) ( (char *) y + (size_t) z )
+ #define _PTR_REMOVE_OFFSET(y,z) ( (uint8_t *) y - (size_t) z )
  // _PTR_GET_OFFSET( base_address, target )
- #define _PTR_GET_OFFSET(b,o) ( (char *) b - (char *) o )
+ #define _PTR_GET_OFFSET(b,o) ( (uint8_t *) o - (uint8_t *) b )
 #endif // SHM_HEAP_GROWS_DOWNWARD
 // This should be agnostic of all archs
 
@@ -247,47 +249,66 @@
 
 #define SHM_ID_NAME_SIZE 64
 
+// typedef our handles and iterator into the smallest possible size to fit them
+// This may allow the handle and offset to be packed into a single uint
 #if defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > 0 ) && ( SHM_MAX_SEGMENTS <= UCHAR_MAX )
 typedef uint8_t shm_handle;
 typedef uint8_t handle_iter;
+ #define SHM_HANDLE_SIZE 8
+ #define SHM_HANDLE_MASK 0xFF
  #ifdef SHM_ENABLE_STRUCT_PACKING
   #define _SHM_PACK_STRUCT
  #endif // SHM_ENABLE_STRUCT_PACKING
 #elif defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > UCHAR_MAX ) && ( SHM_MAX_SEGMENTS <= USHRT_MAX )
 typedef uint16_t shm_handle;
 typedef uint16_t handle_iter;
+ #define SHM_HANDLE_SIZE 16
+ #define SHM_HANDLE_MASK 0xFFFF
  #ifdef SHM_ENABLE_STRUCT_PACKING
   #define _SHM_PACK_STRUCT
  #endif // SHM_ENABLE_STRUCT_PACKING
 #elif defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > USHRT_MAX ) && ( SHM_MAX_SEGMENTS <= UINT_MAX )
 typedef uint32_t shm_handle;
 typedef uint32_t handle_iter;
+ #define SHM_HANDLE_SIZE 32
+ #define SHM_HANDLE_MASK 0xFFFFFFFF
  #if defined( __sys64 ) && defined( SHM_ENABLE_STRUCT_PACKING )
   #define _SHM_PACK_STRUCT
  #endif // __sys64 && SHM_ENABLE_STRUCT_PACKING
 #else
 typedef uint64_t shm_handle;
 typedef uint64_t handle_iter;
+ #define SHM_HANDLE_SIZE 64
+ #define SHM_HANDLE_MASK 0xFFFFFFFFFFFFFFFF
  #ifndef SHM_MAX_SEGMENTS
   #define SHM_MAX_SEGMENTS UINT_MAX
  #endif // SHM_MAX_SEGMENTS
 #endif // handle setup
 
 #ifdef SHM_SEGMENT_MAX_SIZE
- #define MAX_OFFSET SHM_SEGMENT_MAX_SIZE * DEFAULT_PAGE_SIZE
+ #define SHM_MAX_OFFSET SHM_SEGMENT_MAX_SIZE * DEFAULT_PAGE_SIZE
 #else
- #define MAX_OFFSET UINT_MAX
- #define SHM_SEGMENT_MAX_SIZE ( MAX_OFFSET / DEFAULT_PAGE_SIZE )
+ #define SHM_MAX_OFFSET UINT_MAX
+ #define SHM_SEGMENT_MAX_SIZE ( SHM_MAX_OFFSET / DEFAULT_PAGE_SIZE )
 #endif // SHM_SEGMENT_MAX_SIZE
 
-#if defined( MAX_OFFSET ) && ( MAX_OFFSET > 0 ) && ( MAX_OFFSET <= UCHAR_MAX )
+// Like the handle, size the offset typedef to the smallest possible type
+#if defined( SHM_MAX_OFFSET ) && ( SHM_MAX_OFFSET > 0 ) && ( SHM_MAX_OFFSET <= UCHAR_MAX )
 typedef uint8_t offset_t;
-#elif defined( MAX_OFFSET ) && ( MAX_OFFSET > UCHAR_MAX ) && ( MAX_OFFSET <= USHRT_MAX )
+#define SHM_OFFSET_SIZE 8
+#define SHM_OFFSET_MASK 0xFF
+#elif defined( SHM_MAX_OFFSET ) && ( SHM_MAX_OFFSET > UCHAR_MAX ) && ( SHM_MAX_OFFSET <= USHRT_MAX )
 typedef uint16_t offset_t;
-#elif defined( MAX_OFFSET ) && ( MAX_OFFSET > USHRT_MAX ) && ( MAX_OFFSET <= UINT_MAX )
+#define SHM_OFFSET_SIZE 16
+#define SHM_OFFSET_MASK 0xFFFF
+#elif defined( SHM_MAX_OFFSET ) && ( SHM_MAX_OFFSET > USHRT_MAX ) && ( SHM_MAX_OFFSET <= UINT_MAX )
 typedef uint32_t offset_t;
+#define SHM_OFFSET_SIZE 32
+#define SHM_OFFSET_MASK 0xFFFFFFFF
 #else
 typedef uint64_t offset_t;
+#define SHM_OFFSET_SIZE 64
+#define SHM_OFFSET_MASK 0xFFFFFFFFFFFFFFFF
 #endif // offset setup
 
 typedef enum {
@@ -375,8 +396,9 @@ typedef struct seg_header {
 #else
  #define CONTROL_HEADER_MAGIC ( uint32_t ) 0x9F0522BE
 #endif // _SHM_PACK_STRUCT
-#define GET_USER_PTR(x) ( (void *) _PTR_REMOVE_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data )) ) )
-#define GET_HDR_PTR(x) ( (void *) _PTR_ADD_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data ) ) ) )
+#define GET_USER_PTR(x) ( (void *) _PTR_ADD_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data )) ) )
+#define GET_HDR_PTR(x) ( (void *) _PTR_REMOVE_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data ) ) ) )
+
 /*
  * Pointer dereference helpers / logic
  * __ref:
@@ -393,10 +415,31 @@ typedef struct seg_header {
  *   local address from a base address / segment_id and offset
  */
 #ifdef _SHM_PACK_STRUCT
+ #ifdef __sys64
+  #if SHM_OFFSET_SIZE + SHM_HANDLE_SIZE < 64
+   #define __SHM_NO_STRUCT
+   #define __SHM_RPAD_WIDTH 64 - SHM_OFFSET_SIZE - SHM_HANDLE_SIZE
+  #endif // SHM_OFFSET_SIZE + SHM_HANDLE_SIZE
+ #elif defined( __sys32 )
+  #if SHM_OFFSET_SIZE + SHM_HANDLE_SIZE < 32
+   #define __SHM_NO_STRUCT
+   #define __SHM_RPAD_WIDTH 32 - SHM_OFFSET_SIZE - SHM_HANDLE_SIZE
+  #endif // SHM_OFFSET_SIZE + SHM_HANDLE_SIZE
+ #endif // arch width
+#endif // SHM_PACK_STRUCT
+#ifdef _SHM_PACK_STRUCT
+ #ifndef __SHM_NO_STRUCT
 typedef struct __ref {
     shm_handle _segment; // ID of the segment this ref points to
     offset_t   _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
 } __attribute__((packed)) __ref;
+ #else
+  #ifdef __sys32
+typedef uint32_t __ref;
+  #elif defined( __sys64 )
+typedef uint64_t __ref;
+  #endif // arch
+ #endif // __SHM_NO_STRUCT
 #else
 typedef struct __ref {
     shm_handle _segment;
@@ -408,6 +451,8 @@ extern __inline__ void * get_ptr( __ref );
 extern __inline__ __ref get_ref( void * );
 extern ctrl_header * get_control_header( void );
 
+extern offset_t ref_get_offset( __ref );
+extern shm_handle ref_get_segment( __ref );
 // Logging helpers
 
 typedef enum {

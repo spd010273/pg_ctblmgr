@@ -74,51 +74,133 @@ static uint16_t      cleanup_list_len    = 0;
 // Given a segment ID, lets us get the mapping info
 static shm_segment   __segment_lut[SHM_MAX_SEGMENTS] = {{0}};
 
+static __inline__ offset_t _ref_get_offset( __ref ) __attribute__((always_inline));
+static __inline__ shm_handle _ref_get_segment( __ref ) __attribute__((always_inline));
+static __inline__ __ref _ref_set_offset( __ref, offset_t ) __attribute__((always_inline));
+static __inline__ __ref _ref_set_segment( __ref, shm_handle ) __attribute__((always_inline));
+
+// External-facing getters for test harness
+offset_t ref_get_offset( __ref ref )
+{
+    return _ref_get_offset( ref );
+}
+
+shm_handle ref_get_segment( __ref ref )
+{
+    return _ref_get_segment( ref );
+}
+
+/*
+ * Setters and getters for __ref type. Depending on optimizations, this may be
+ * a struct or crammed into a uint32_t or uint64_t.
+ */
+static __inline__ offset_t _ref_get_offset( __ref ref )
+{
+    #ifdef __SHM_NO_STRUCT
+    /*
+     * Shift out any right-side padding, then mask off the offset then trim
+     * to the appropriate length
+     */
+    return ( offset_t ) ( ref >> ( __SHM_RPAD_WIDTH ) ) & SHM_OFFSET_MASK;
+    #else
+    return ( offset_t ) ( ref._offset );
+    #endif // __SHM_NO_STRUCT
+}
+
+static __inline__ shm_handle _ref_get_segment( __ref ref )
+{
+    #ifdef __SHM_NO_STRUCT
+    /*
+     * Shift out the right-side padding and offset, masking the segment
+     * and trimming with a final cast
+     */
+    return ( shm_handle ) ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) & SHM_HANDLE_MASK;
+    #else
+    return ( shm_handle ) ( ref._segment );
+    #endif // __SHM_NO_STRUCT
+}
+
+static __inline__ __ref _ref_set_offset( __ref ref, offset_t offset )
+{
+    #ifdef __SHM_NO_STRUCT
+    /*
+     * Mask off and clear the offset portion of __ref. For a 64-bit example
+     * with 16-bit segments and 32-bit offsets, we're targeting the 0xFF'd
+     * portion: 0x0000FFFFFFFF0000
+     */
+    ref = ref & ~( ( ( __ref ) SHM_OFFSET_MASK << ( __SHM_RPAD_WIDTH ) ) );
+    ref = ref | ( ( ( __ref )  offset << ( __SHM_RPAD_WIDTH ) ) );
+    #else
+    ref._offset = offset;
+    #endif // _SHM_NO_STRUCT
+    return ref;
+}
+
+static __inline__ __ref _ref_set_segment( __ref ref, shm_handle segment )
+{
+    #ifdef __SHM_NO_STRUCT
+    /*
+     * Mask off and clear the segment portion of __ref. For a 64-bit example
+     * with 16-bit segments and 32-bit offsets, we're targeting the 0xFF'd
+     * portion: 0xFFFF000000000000
+     */
+    ref = ref & ~( ( ( __ref ) SHM_HANDLE_MASK << ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) );
+    ref = ref | ( ( ( __ref ) segment << ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) );
+    #else
+    ref._segment = segment;
+    #endif // _SHM_NO_STRUCT
+    return ref;
+}
+
 __inline__ void * get_ptr( __ref ref )
 {
-    void * mapped_address = NULL;
-    void * ret            = NULL;
-    size_t offset         = 0;
-    size_t mapped_size    = 0;
+    void *   mapped_address     = NULL;
+    void *   ret                = NULL;
+    size_t   mapped_size        = 0;
+    register shm_handle segment = SEGMENT_HANDLE_INVALID;
+
+    segment = _ref_get_segment( ref );
 
     // Check that segment is initialized and valid
-    if( unlikely( ref._segment == SEGMENT_HANDLE_INVALID ) )
+    if( unlikely( segment == SEGMENT_HANDLE_INVALID ) )
         return NULL;
     // Check that the requested segment is within the bounds of the LUT
-    if( unlikely( ref._segment > ( shm_handle ) SHM_MAX_SEGMENTS ) )
+    if( unlikely( segment > ( shm_handle ) SHM_MAX_SEGMENTS ) )
         return NULL;
 
-    offset         = ref._offset;
-    mapped_address = __segment_lut[ref._segment].mapped_address;
+    mapped_address = __segment_lut[segment].mapped_address;
 
     if( unlikely( mapped_address == NULL ) )
-#ifndef SHM_AUTO_MAP
+    #ifndef SHM_AUTO_MAP
         return NULL;
-#else
+    #else
     {
         // Segment not mapped
         _shm_log(
             LL_SHM_DEBUG,
             "get_ptr() attempting to map a segment %lu",
-            ( uint64_t ) ref._segment
+            ( uint64_t ) segment
         );
 
-        if( unlikely( map_segment( ref._segment ) == NULL ) )
+        if( unlikely( map_segment( segment ) == NULL ) )
         {
             _shm_log(
                 LL_SHM_ERROR,
                 "get_ptr() failed to automap segment %lu",
-                ( uint64_t ) ref._segment
+                ( uint64_t ) segment
             );
             return NULL;
         }
 
-        mapped_address = __segment_lut[ref._segment].mapped_address;
+        mapped_address = __segment_lut[segment].mapped_address;
     }
-#endif // SHM_AUTO_MAP
+    #endif // SHM_AUTO_MAP
 
-    mapped_size = __segment_lut[ref._segment].mapped_size;
-    ret         = _PTR_ADD_OFFSET( GET_USER_PTR( mapped_address ), offset );
+    mapped_size = __segment_lut[segment].mapped_size;
+    ret         = _PTR_ADD_OFFSET(
+        GET_USER_PTR( mapped_address ),
+        ( size_t ) _ref_get_offset( ref )
+    );
 
     if( unlikely( !_PTR_BOUND_CHECK( ret, mapped_address, mapped_size ) ) )
     {
@@ -138,7 +220,7 @@ __inline__ __ref get_ref( void * ptr )
     __ref      ret    = {0};
     shm_handle handle = 0;
 
-    ret._segment = SEGMENT_HANDLE_INVALID;
+    ret = _ref_set_segment( ret, SEGMENT_HANDLE_INVALID );
 
     if( unlikely( ptr == NULL ) )
         return ret;
@@ -187,12 +269,15 @@ __inline__ __ref get_ref( void * ptr )
         return ret;
     }
 
-    ret._offset  = ( size_t ) ( _PTR_GET_OFFSET(
+    ret = _ref_set_offset(
+        ret,
+        _PTR_GET_OFFSET(
             GET_USER_PTR( __segment_lut[handle].mapped_address ),
             ptr
         )
     );
-    ret._segment = handle;
+
+    ret = _ref_set_segment( ret, handle );
 
     return ret;
 }
@@ -205,7 +290,7 @@ void shm_init( void )
     shm_handle  ctrl_handle      = CONTROL_HANDLE_INVALID;
     handle_iter i                = 0;
 
-#ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK
+    #ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK
     /*
      * sanity check for stack / heap growth directions.
      * This gives us the opportunity to fail in development
@@ -214,33 +299,47 @@ void shm_init( void )
      */
     if( !directionality_check() )
         exit( 1 );
-#endif // SHM_ENABLE_RUNTIME_SANITY_CHECK
+    #endif // SHM_ENABLE_RUNTIME_SANITY_CHECK
 
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     _shm_log( LL_SHM_DEBUG, "SHM DEBUG ENABLED:" );
- #ifdef SHM_HEAP_GROWS_DOWNWARD
+     #ifdef SHM_HEAP_GROWS_DOWNWARD
     _shm_log(
         LL_SHM_DEBUG,
         "Heap Growth Direction: DOWN (Towards lower virtual addresses)"
     );
- #else
+     #else
     _shm_log(
         LL_SHM_DEBUG,
         "Heap Growth Direction: UP (Towards higher virtual addresses)"
     );
- #endif // SHM_HEAP_GROWS_DOWNWARD
- #ifdef STACK_GROWS_DOWNWARD
+     #endif // SHM_HEAP_GROWS_DOWNWARD
+     #ifdef STACK_GROWS_DOWNWARD
     _shm_log(
         LL_SHM_DEBUG,
         "Stack Growth Direction: DOWN (Towards lower virtual addresses)"
     );
- #else
+     #else
     _shm_log(
         LL_SHM_DEBUG,
         "Stack Growth Direction: UP (Towards higher virtual addresses)"
     );
- #endif // STACK_GROWS_DOWNWARD
- 
+     #endif // STACK_GROWS_DOWNWARD
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Compiled configuration:\n"
+        "  Max Segments: %lu\n"
+        "  Segment Max Pages: %lu\n"
+        "  Max offset: %lu\n"
+        "  Default page size %lu bytes\n"
+        "  System page size %lu bytes",
+        ( uint64_t ) SHM_MAX_SEGMENTS,
+        ( uint64_t ) SHM_SEGMENT_MAX_SIZE,
+        ( uint64_t ) SHM_MAX_OFFSET,
+        ( uint64_t ) DEFAULT_PAGE_SIZE,
+        ( uint64_t ) _get_system_page_size()
+    );
+
     _shm_log(
         LL_SHM_DEBUG,
         "MAGIC BYTES:\n"
@@ -252,11 +351,13 @@ void shm_init( void )
 
     _shm_log(
         LL_SHM_DEBUG,
-        "HANDLE SIZE: %zu bytes\nOFFSET SIZE: %zu bytes",
+        "HANDLE/OFFSETS:\n"
+        "  HANDLE SIZE: %zu bytes\n"
+        "  OFFSET SIZE: %zu bytes",
         sizeof( shm_handle ),
         sizeof( offset_t )
     );
- #ifdef _SHM_PACK_STRUCT
+     #ifdef _SHM_PACK_STRUCT
     _shm_log(
         LL_SHM_DEBUG,
         "Using packed structures\n"
@@ -265,7 +366,7 @@ void shm_init( void )
         sizeof( __ref ),
         sizeof( shm_segment )
     );
- #else
+     #else
     _shm_log(
         LL_SHM_DEBUG,
         "Using word-aligned structures\n"
@@ -274,23 +375,22 @@ void shm_init( void )
         sizeof( __ref ),
         sizeof( shm_segment )
     );
- #endif // _SHM_PACK_STRUCT
-#endif // SHM_DEBUG
+     #endif // _SHM_PACK_STRUCT
+    #endif // SHM_DEBUG
 
     p_pid = ( pid_t ) getpid();
 
     ctrl_header_size = _get_ctrl_header_size( ( uint32_t ) SHM_MAX_SEGMENTS );
     //ctrl_header_size = _round_to_multiple_of_page_size( ctrl_header_size );
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     _shm_log(
         LL_SHM_DEBUG,
         "Attempting to map control segment, header size %zu,"
-        " rounded-to-page-size %zu, page_size %zu",
+        " rounded-to-page-size %zu",
         _get_ctrl_header_size( ( uint32_t ) SHM_MAX_SEGMENTS ),
-        ctrl_header_size,
-        _get_system_page_size()
+        ctrl_header_size
     );
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
 
     while( mapped_address == NULL && mapped_size == 0 )
     {
@@ -871,7 +971,7 @@ void unmap_all( void )
             continue;
 
         seg = control_header->segments[i];
-        
+
         if( seg == SEGMENT_HANDLE_INVALID )
             continue;
 
@@ -1718,21 +1818,78 @@ static size_t _get_system_page_size( void )
 static inline bool _shm_check_owner( ctrl_header * header )
 {
     if( unlikely( !_shm_check_control( header ) ) )
+#ifdef SHM_DEBUG
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Control header failed sanity checks"
+        );
+#endif // SHM_DEBUG
         return false;
+#ifdef SHM_DEBUG
+    }
+
+#endif // SHM_DEBUG
     if( likely( header->owner == getpid() || header->owner == getppid() ) )
         return true;
 
+#ifdef SHM_DEBUG
+    _shm_log(
+        LL_SHM_ERROR,
+        "Control header (%d) is not owned by this PID (%d) parent %d",
+        header->owner,
+        getpid(),
+        getppid()
+    );
+#endif // SHM_DEBUG
     return false;
 }
 
 static inline bool _shm_check_control( ctrl_header * header )
 {
     if( unlikely( header == NULL ) )
+#ifdef SHM_DEBUG
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Control header check failed:"
+            " Header pointer is null"
+        );
+#endif // SHM_DEBUG
         return false;
+#ifdef SHM_DEBUG
+    }
+#endif // SHM_DEBUG
     if( unlikely( header->magic != CONTROL_HEADER_MAGIC ) )
+#ifdef SHM_DEBUG
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Control header check failed:"
+            " Bad magic %lu in header, %lu in macro\n",
+            ( uint64_t ) header->magic,
+            ( uint64_t ) CONTROL_HEADER_MAGIC
+        );
+#endif // SHM_DEBUG
         return false;
+#ifdef SHM_DEBUG
+    }
+#endif // SHM_DEBUG
     if( unlikely( header->entry_count > header->max_entries ) )
+#ifdef SHM_DEBUG
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Control header check failed:"
+            " entry count (%lu) exceeds max entries (%lu)",
+            ( uint64_t ) header->entry_count,
+            ( uint64_t ) header->max_entries
+        );
+#endif // SHM_DEBUG
         return false;
+#ifdef SHM_DEBUG
+    }
+#endif // SHM_DEBUG
 
     return true;
 }

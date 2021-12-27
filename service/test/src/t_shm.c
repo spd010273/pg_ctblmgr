@@ -22,8 +22,10 @@ const char * bits[16] = {
 static void fill_block( void *, size_t );
 static void check_block( void *, size_t );
 static void child_routine( __ref );
-static void print_block( void *, size_t );
-static void random_fill( void *, size_t ) __attribute__((unused));
+static void print_block( void *, size_t ) __attribute__((unused));
+static void random_fill( void *, size_t );
+static void check_ref_logic( void *, size_t );
+
 int main( void )
 {
     pid_t child = 0;
@@ -36,26 +38,32 @@ int main( void )
 
 
     // Begin - Phase I
-    fprintf( stdout, "PHASE 1 TEST\n" );
+    fprintf( stdout, "PHASE 1: Single process test\n" );
     shm_init();
     mapped_addr = new_segment( TEST_SIZE );
-    fprintf( stdout, "got mapping of %p\n", mapped_addr );
 
+    if( mapped_addr == NULL )
+    {
+        fprintf(
+            stderr,
+            "FAILED: Could not map new segment\n"
+        );
+        exit( 1 );
+    }
     //print_block( mapped_addr, ( size_t ) TEST_SIZE );
+    fprintf( stdout, "  Write test..." );
     fill_block( mapped_addr, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Read test..." );
     check_block( mapped_addr, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
     //print_block( mapped_addr, ( size_t ) TEST_SIZE );
-
+    fprintf( stdout, "  Reference / dereference logic..." );
+    check_ref_logic( mapped_addr, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
     // Begin - Phase II
-    fprintf( stdout, "PHASE 2 TEST\n" );
-    fprintf( stdout, "Getting reference to pass to child\n" );
+    fprintf( stdout, "PHASE 2: SMP test\n" );
     data = get_ref( mapped_addr );
-    fprintf(
-        stdout,
-        "Generated ref %lu, %zu\n",
-        ( uint64_t ) data._segment,
-        ( size_t ) data._offset
-    );
     child = fork();
 
     if( child == 0 ) // child
@@ -92,39 +100,39 @@ static void print_bin( uint64_t data )
 // XXX overrunning bounds of memory array by a large-ish amound
 static void child_routine( __ref data )
 {
-    ctrl_header * orig_mapped = NULL;
-    ctrl_header * header      = NULL;
-    void *        mapping     = NULL;
-
-    orig_mapped = get_control_header();
+    void * mapping = NULL;
     shm_child_init();
-    header = get_control_header();
 
-    if( header != orig_mapped )
+    // attempt the auto pointer deref
+    mapping = get_ptr( data );
+    if( mapping == NULL )
     {
         fprintf(
             stderr,
-            "Child: control mapped %p, original (parent): %p\n",
-            ( void * ) header,
-            ( void * ) orig_mapped
+            "FAILED: Child got NULL mapping\n"
         );
+        exit( 1 );
     }
 
-    // attempt the auto pointer deref
-    fprintf(  stdout, "Attempting automap\n" );
-    mapping = get_ptr( data );
-    fprintf( stdout, "Got mapping for foreign segment %p\n", mapping );
+    fprintf( stdout, "  Child read test (from parent)..." );
     check_block( mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, "Child mapping good, performing write test\n" );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Child write test..." );
     fill_block( mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, "Child write test done, performing readback prior to exiting\n" );
+    fprintf( stdout, " Done.\n" );
+
+    fprintf( stdout, "  Child read test..." );
     check_block( mapping, ( size_t ) TEST_SIZE );
-    print_block( mapping, ( size_t ) TEST_SIZE );
-    zero_segment( data._segment );
-    fprintf( stdout, "===========================================================\n" );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Child zero fill..." );
+    zero_segment( ref_get_segment( data ) );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Child random fill..." );
     random_fill(mapping, ( size_t ) TEST_SIZE );
-    print_block( mapping, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Child unmapping segment..." );
     unmap_all();
+    fprintf( stdout, " Done.\n" );
     return;
 }
 
@@ -268,9 +276,9 @@ static void check_block( void * mapped_addr, size_t size )
 static void check_ref_logic( void * mapped_address, size_t size )
 {
     uint64_t * ptr = NULL;
-    uint64_t i = 0;
-    uint64_t * d = NULL;
-    uint64_t * t = NULL;
+    uint64_t   i   = 0;
+    uint64_t * d   = NULL;
+    uint64_t * t   = NULL;
 
     __ref test_ref = {0};
     ptr = ( uint64_t * ) mapped_address;
@@ -279,8 +287,10 @@ static void check_ref_logic( void * mapped_address, size_t size )
     {
         d = ptr + i;
         test_ref = get_ref( ( void * ) d );
+        fprintf( stdout, "%p: ", d );
+        print_bin( ( uint64_t ) test_ref );
 
-        if( test_ref._segment == SEGMENT_HANDLE_INVALID )
+        if( ref_get_segment( test_ref ) == SEGMENT_HANDLE_INVALID )
         {
             fprintf( stderr, "FAILED: Could not generate a reference for address %p\n", d );
             return;
@@ -293,8 +303,8 @@ static void check_ref_logic( void * mapped_address, size_t size )
             fprintf(
                 stderr,
                 "FAILED: dereferenced __ref (%lu,%zu) = %p != %p\n",
-                ( uint64_t ) test_ref._segment,
-                ( size_t ) test_ref._offset,
+                ( uint64_t ) ref_get_segment( test_ref ),
+                ( size_t ) ref_get_offset( test_ref ),
                 ( void * ) t,
                 ( void * ) d
             );
