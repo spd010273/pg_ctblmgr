@@ -25,12 +25,14 @@ static void child_routine( __ref );
 static void print_block( void *, size_t ) __attribute__((unused));
 static void random_fill( void *, size_t );
 static void check_ref_logic( void *, size_t );
+static void child_routine_refcheck( __ref );
 
 int main( void )
 {
     pid_t child = 0;
     __ref data = {0};
     void * mapped_addr = NULL;
+    uint64_t * test = NULL;
 
     // Phase I - initialize, allocate a segment, blank and write the whole page
     // Phase II - fork(), have the child verify the page and blank the page
@@ -58,9 +60,6 @@ int main( void )
     check_block( mapped_addr, ( size_t ) TEST_SIZE );
     fprintf( stdout, " Done.\n" );
     //print_block( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, "  Reference / dereference logic..." );
-    check_ref_logic( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
     // Begin - Phase II
     fprintf( stdout, "PHASE 2: SMP test\n" );
     data = get_ref( mapped_addr );
@@ -73,8 +72,77 @@ int main( void )
     }
 
     wait( NULL );
+    fprintf( stdout, "  Read test (from child)..." );
+    check_block( mapped_addr, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Reference / dereference logic..." );
+    check_ref_logic( mapped_addr, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
+
+    fprintf( stdout, "PHASE 3: SMP reference checking\n" );
+    fprintf( stdout, "  Sending ref to child..." );
+
+    test = ( uint64_t * ) mapped_addr + sizeof( uint64_t );
+    *test = 0x12348765;
+    data = get_ref( test );
+    child = fork();
+    if( child == 0  ) // child
+    {
+        child_routine_refcheck( data );
+        exit ( 1 );
+    }
+
+    wait( NULL );
+    if( *test != 0x43215678 )
+    {
+        fprintf(
+            stderr,
+            "FAILED: data mismatch, got %p, expected %p\n",
+            ( void * ) *test,
+            ( void * ) 0x43215678
+        );
+        exit( 1 );
+    }
+
+    fprintf( stdout, " Done.\n" );
     unmap_all();
+
+    fprintf( stdout, "All tests passed.\n" );
     return 0;
+}
+
+static void child_routine_refcheck( __ref data )
+{
+    uint64_t * test = NULL;
+
+    shm_child_init();
+    test = ( uint64_t * ) get_ptr( data );
+
+    if( test == NULL )
+    {
+        fprintf(
+            stderr,
+            "FAILED: dereferenced __ref is NULL\n"
+        );
+        exit( 1 );
+    }
+
+    if( *test != 0x12348765 )
+    {
+        fprintf(
+            stderr,
+            "FAILED: data mismatch, got %p, expected %p\n",
+            ( void * ) *test,
+            ( void * ) 0x12348765
+        );
+        exit ( 1 );
+    }
+
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Sending ref to parent..." );
+    *test = 0x43215678;
+    unmap_all();
+    return;
 }
 
 static void print_byte( uint8_t data )
@@ -129,6 +197,9 @@ static void child_routine( __ref data )
     fprintf( stdout, " Done.\n" );
     fprintf( stdout, "  Child random fill..." );
     random_fill(mapping, ( size_t ) TEST_SIZE );
+    fprintf( stdout, " Done.\n" );
+    fprintf( stdout, "  Child write test (for parent)..." );
+    fill_block( mapping, ( size_t ) TEST_SIZE );
     fprintf( stdout, " Done.\n" );
     fprintf( stdout, "  Child unmapping segment..." );
     unmap_all();
@@ -246,6 +317,8 @@ static void check_block( void * mapped_addr, size_t size )
         {
             fprintf( stderr, "Failed pattern " );
             print_bin( data64 );
+            fprintf( stderr, "Got " );
+            print_bin( *( ptr + i ) );
             return;
         }
 
@@ -275,20 +348,18 @@ static void check_block( void * mapped_addr, size_t size )
 
 static void check_ref_logic( void * mapped_address, size_t size )
 {
-    uint64_t * ptr = NULL;
+    uint8_t *  ptr = NULL;
     uint64_t   i   = 0;
-    uint64_t * d   = NULL;
-    uint64_t * t   = NULL;
+    uint8_t *  d   = NULL;
+    uint8_t *  t   = NULL;
 
     __ref test_ref = {0};
-    ptr = ( uint64_t * ) mapped_address;
+    ptr = ( uint8_t * ) mapped_address;
 
     for( i = 0; i < size; i++ )
     {
-        d = ptr + i;
+        d = ( ( uint8_t * ) ptr + i );
         test_ref = get_ref( ( void * ) d );
-        fprintf( stdout, "%p: ", d );
-        print_bin( ( uint64_t ) test_ref );
 
         if( ref_get_segment( test_ref ) == SEGMENT_HANDLE_INVALID )
         {
@@ -310,6 +381,8 @@ static void check_ref_logic( void * mapped_address, size_t size )
             );
             return;
         }
+
+        *t = 42; // Final check for SIGSEGV ;)
     }
 
     return;

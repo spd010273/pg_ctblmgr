@@ -20,7 +20,7 @@
 #define _SHM_H
 
 //#define __TESTING__ // code coverage
-#define SHM_DEBUG 1
+//#define SHM_DEBUG 1
 
 #ifdef __TESTING__
  #include <unistd.h>

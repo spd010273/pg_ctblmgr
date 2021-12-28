@@ -687,13 +687,15 @@ void * new_segment( size_t size )
             "Requested size: %zu\n"
             "real_size: %zu\n"
             "mapped_size: %zu\n"
-            "User address: %p",
+            "User address: %p\n"
+            "end address: %p",
             ( uint64_t ) new_handle,
             mapped_address,
             size,
             real_size,
             mapped_size,
-            GET_USER_PTR( mapped_address )
+            GET_USER_PTR( mapped_address ),
+            _PTR_ADD_OFFSET( mapped_address, size )
         );
 #endif // SHM_DEBUG
 
