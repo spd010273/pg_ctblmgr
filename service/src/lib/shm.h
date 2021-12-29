@@ -323,9 +323,12 @@ typedef enum {
 //  Also need a free / unmap all
 /* Interface functions / flags */
 extern void shm_init( void );
+extern bool shm_is_init( void );
 extern void shm_child_init( void );
 extern void * map_segment( shm_handle );
 extern void * new_segment( size_t );
+
+extern shm_handle get_handle_from_ptr( void * );
 extern void unmap_segment( void * );
 extern void free_segment( void * );
 extern void unmap_all( void );
@@ -360,7 +363,7 @@ typedef struct shm_segment {
 
 // Global stuff
 typedef struct ctrl_header {
-    uint32_t    magic;           // Should be CONTROL_HEADER_MAGIC at all times
+    uint64_t    magic;           // Should be CONTROL_HEADER_MAGIC at all times
     pid_t       owner;           // Parent process owning this segment
     bool        locked;          // Indicates a PID is modifying accounting info
     handle_iter entry_count;     // # Allocated segments
@@ -370,7 +373,7 @@ typedef struct ctrl_header {
 } ctrl_header;
 
 typedef struct seg_header {
-    uint32_t   magic;           // Should be SEGMENT_HEADER_MAGIC at all times
+    uint64_t   magic;           // Should be SEGMENT_HEADER_MAGIC at all times
     pid_t      owner;           // Parent process owning this segment
     bool       locked;          // Shared between allocator and shm.c
     uint32_t   entry_count;     // FOR ALLOCATOR USE
@@ -386,15 +389,15 @@ typedef struct seg_header {
  */
 #define SEGMENT_HANDLE_INVALID ( ( shm_handle ) ( ( uint64_t ) 0 - 2 ) )
 #ifdef _SHM_PACK_STRUCT
- #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0x3FA7B00B
+ #define SEGMENT_HEADER_MAGIC ( uint64_t ) 0xC0FFEEBE
 #else
- #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0xE02EA7F3
+ #define SEGMENT_HEADER_MAGIC ( uint64_t ) 0xF00DFACE
 #endif // _SHM_PACK_STRUCT
 #define CONTROL_HANDLE_INVALID ( ( shm_handle ) ( ( uint64_t ) 0 - 1 ) )
 #ifdef _SHM_PACK_STRUCT
- #define CONTROL_HEADER_MAGIC ( uint32_t ) 0xBE22420A
+ #define CONTROL_HEADER_MAGIC ( uint64_t ) 0xC0DEDEAD
 #else
- #define CONTROL_HEADER_MAGIC ( uint32_t ) 0x9F0522BE
+ #define CONTROL_HEADER_MAGIC ( uint64_t ) 0x1337C0DE
 #endif // _SHM_PACK_STRUCT
 #define GET_USER_PTR(x) ( (void *) _PTR_ADD_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data )) ) )
 #define GET_HDR_PTR(x) ( (void *) _PTR_REMOVE_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data ) ) ) )

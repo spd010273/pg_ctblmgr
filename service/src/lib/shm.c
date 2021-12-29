@@ -41,7 +41,7 @@ static bool _close_segment_descriptor( int, char *, bool );
 static size_t _get_system_page_size( void );
 static size_t _round_to_multiple_of_page_size( size_t );
 static size_t _get_ctrl_header_size( uint32_t );
-static inline shm_handle _get_handle_from_ptr( void * ) __attribute__((always_inline));
+static __inline__ shm_handle _get_handle_from_ptr( void * ) __attribute__((always_inline));
 static void _free_segment( shm_handle );
 static void _append_to_cleanup_list( shm_handle );
 static void _cleanup_old_segments( void );
@@ -290,6 +290,8 @@ void shm_init( void )
     shm_handle  ctrl_handle      = CONTROL_HANDLE_INVALID;
     handle_iter i                = 0;
 
+    if( shm_inited == true )
+        return;
     #ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK
     /*
      * sanity check for stack / heap growth directions.
@@ -459,6 +461,11 @@ void shm_init( void )
 
     shm_inited = true;
     return;
+}
+
+bool shm_is_init( void )
+{
+    return shm_inited;
 }
 
 void shm_child_init( void )
@@ -711,7 +718,7 @@ void * new_segment( size_t size )
     return NULL;
 }
 
-static inline shm_handle _get_handle_from_ptr( void * ptr )
+static __inline__ shm_handle _get_handle_from_ptr( void * ptr )
 {
     seg_header * header = NULL;
     shm_handle   handle = SEGMENT_HANDLE_INVALID;
@@ -789,6 +796,11 @@ static inline shm_handle _get_handle_from_ptr( void * ptr )
     }
 
     return handle;
+}
+
+shm_handle get_handle_from_ptr( void * ptr )
+{
+    return _get_handle_from_ptr( ptr );
 }
 
 void unmap_segment( void * ptr )
