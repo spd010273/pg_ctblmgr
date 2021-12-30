@@ -20,7 +20,7 @@
 #define _SHM_H
 
 //#define __TESTING__ // code coverage
-//#define SHM_DEBUG 1
+#define SHM_DEBUG 1
 
 #ifdef __TESTING__
  #include <unistd.h>
@@ -337,7 +337,8 @@ extern void free_segment( void * );
 extern void unmap_all( void );
 extern void map_all( void );
 extern void zero_segment( shm_handle );
-
+extern size_t get_segment_size( shm_handle ); // Returns the size available to the user
+                                              // IE: mapped_size - sizeof( seg_header )
 /* * * Local mapping of shared objects * * */
 /*
  * We need to create local allocations to track the base addresses of objects
@@ -354,7 +355,7 @@ extern void zero_segment( shm_handle );
 typedef struct shm_segment {
     shm_handle handle;
     void *     mapped_address;
-    size_t     mapped_size;
+    size_t     mapped_size; // This is not the user requested size, but the actual size of the segment. Typically a 
 } __attribute__((packed)) shm_segment;
 #else
 typedef struct shm_segment {
@@ -366,7 +367,7 @@ typedef struct shm_segment {
 
 // Global stuff
 typedef struct ctrl_header {
-    uint64_t    magic;           // Should be CONTROL_HEADER_MAGIC at all times
+    uint32_t    magic;           // Should be CONTROL_HEADER_MAGIC at all times
     pid_t       owner;           // Parent process owning this segment
     bool        locked;          // Indicates a PID is modifying accounting info
     handle_iter entry_count;     // # Allocated segments
@@ -376,7 +377,7 @@ typedef struct ctrl_header {
 } ctrl_header;
 
 typedef struct seg_header {
-    uint64_t   magic;           // Should be SEGMENT_HEADER_MAGIC at all times
+    uint32_t   magic;           // Should be SEGMENT_HEADER_MAGIC at all times
     pid_t      owner;           // Parent process owning this segment
     bool       locked;          // Shared between allocator and shm.c
     uint32_t   entry_count;     // FOR ALLOCATOR USE
@@ -392,15 +393,15 @@ typedef struct seg_header {
  */
 #define SEGMENT_HANDLE_INVALID ( ( shm_handle ) ( ( uint64_t ) 0 - 2 ) )
 #ifdef _SHM_PACK_STRUCT
- #define SEGMENT_HEADER_MAGIC ( uint64_t ) 0xC0FFEEBE
+ #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0xC0FFEEBE
 #else
- #define SEGMENT_HEADER_MAGIC ( uint64_t ) 0xF00DFACE
+ #define SEGMENT_HEADER_MAGIC ( uint32_t ) 0xF00DFACE
 #endif // _SHM_PACK_STRUCT
 #define CONTROL_HANDLE_INVALID ( ( shm_handle ) ( ( uint64_t ) 0 - 1 ) )
 #ifdef _SHM_PACK_STRUCT
- #define CONTROL_HEADER_MAGIC ( uint64_t ) 0xC0DEDEAD
+ #define CONTROL_HEADER_MAGIC ( uint32_t ) 0xC0DEDEAD
 #else
- #define CONTROL_HEADER_MAGIC ( uint64_t ) 0x1337C0DE
+ #define CONTROL_HEADER_MAGIC ( uint32_t ) 0x1337C0DE
 #endif // _SHM_PACK_STRUCT
 #define GET_USER_PTR(x) ( (void *) _PTR_ADD_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data )) ) )
 #define GET_HDR_PTR(x) ( (void *) _PTR_REMOVE_OFFSET( ( ( char * ) x ), ( offsetof( seg_header, data ) ) ) )
@@ -454,11 +455,11 @@ typedef struct __ref {
 } __ref;
 #endif // _SHM_PACK_STRUCT
 
-extern __inline__ void * get_ptr( __ref );
-extern __inline__ __ref get_ref( void * );
+extern __inline__ void * get_ptr( __ref ); // Get local pointer to mapping
+extern __inline__ __ref get_ref( void * ); // Get absolute ref
 extern ctrl_header * get_control_header( void );
-extern __inline__ bool ref_is_null( __ref );
-extern __inline__ __ref get_null_ref( void );
+extern __inline__ bool ref_is_null( __ref ); // check if ref is null
+extern __inline__ __ref get_null_ref( void ); // Get a reference null
 
 extern offset_t ref_get_offset( __ref );
 extern shm_handle ref_get_segment( __ref );

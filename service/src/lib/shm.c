@@ -449,7 +449,7 @@ void shm_init( void )
     control_handle              = ctrl_handle;
     control_header              = ( ctrl_header * ) mapped_address;
     control_header_size         = ( size_t ) mapped_size;
-    control_header->magic       = ( uint32_t ) CONTROL_HEADER_MAGIC;
+    control_header->magic       = CONTROL_HEADER_MAGIC;
     control_header->owner       = getpid();
     control_header->entry_count = ( handle_iter ) 0;
     control_header->max_entries = ( handle_iter ) SHM_MAX_SEGMENTS;
@@ -695,7 +695,7 @@ void * new_segment( size_t size )
         __segment_lut[new_handle].handle         = new_handle;
 
         header = ( seg_header * ) mapped_address;
-        header->magic       = ( uint32_t ) SEGMENT_HEADER_MAGIC;
+        header->magic       = SEGMENT_HEADER_MAGIC;
         header->owner       = p_pid;
         header->locked      = false;
         header->entry_count = 0;
@@ -1065,6 +1065,16 @@ void zero_segment( shm_handle segment )
     );
 
     return;
+}
+
+size_t get_segment_size( shm_handle segment )
+{
+    if( unlikely( segment > SHM_MAX_SEGMENTS ) )
+        return 0;
+    if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
+        return 0;
+
+    return __segment_lut[segment].mapped_size - offsetof( seg_header, data ); 
 }
 
 void map_all( void )
@@ -1894,9 +1904,9 @@ static inline bool _shm_check_control( ctrl_header * header )
         _shm_log(
             LL_SHM_ERROR,
             "Control header check failed:"
-            " Bad magic %lu in header, %lu in macro\n",
-            ( uint64_t ) header->magic,
-            ( uint64_t ) CONTROL_HEADER_MAGIC
+            " Bad magic %x in header, %x in macro\n",
+            header->magic,
+            CONTROL_HEADER_MAGIC
         );
 #endif // SHM_DEBUG
         return false;
@@ -2041,9 +2051,9 @@ static void _cleanup_old_segments( void )
                 // Doesn't belong to pg_ctblmgr?
                 _shm_log(
                     LL_SHM_ERROR,
-                    "Bad magic, expected %u, got %u",
-                    ( uint32_t ) CONTROL_HEADER_MAGIC,
-                    ( uint32_t ) header->magic
+                    "Bad magic, expected %x, got %x",
+                    CONTROL_HEADER_MAGIC,
+                    header->magic
                 );
                 continue;
             }
@@ -2199,7 +2209,7 @@ static void __dump_ctrl_header( ctrl_header * header )
     _shm_log(
         LL_SHM_DEBUG,
         "Header data:\n  " \
-          "MAGIC: %u\n  " \
+          "MAGIC: %x\n  " \
           "OWNER: %d\n  " \
           "LOCKED: %s\n  " \
           "ENTRY_COUNT: %lu\n  " \
@@ -2235,7 +2245,7 @@ static void __dump_seg_header( seg_header * header )
     _shm_log(
         LL_SHM_DEBUG,
         "Header data:\n  " \
-          "MAGIC: %u\n  " \
+          "MAGIC: %x\n  " \
           "OWNER: %d\n  " \
           "LOCKED: %s\n  " \
           "ENTRY_COUNT: %u\n  " \
