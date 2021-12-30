@@ -90,6 +90,15 @@ shm_handle ref_get_segment( __ref ref )
     return _ref_get_segment( ref );
 }
 
+__ref ref_set_segment( __ref ref, shm_handle segment )
+{
+    return _ref_set_segment( ref, segment );
+}
+
+__ref ref_set_offset( __ref ref, offset_t offset )
+{
+    return _ref_set_offset( ref, offset );
+}
 /*
  * Setters and getters for __ref type. Depending on optimizations, this may be
  * a struct or crammed into a uint32_t or uint64_t.
@@ -159,6 +168,9 @@ __inline__ void * get_ptr( __ref ref )
     size_t   mapped_size        = 0;
     register shm_handle segment = SEGMENT_HANDLE_INVALID;
 
+    if( ref_is_null( ref ) )
+        return NULL;
+
     segment = _ref_get_segment( ref );
 
     // Check that segment is initialized and valid
@@ -220,7 +232,9 @@ __inline__ __ref get_ref( void * ptr )
     __ref      ret    = {0};
     shm_handle handle = 0;
 
+    // Initialize as a canonical NULL ref
     ret = _ref_set_segment( ret, SEGMENT_HANDLE_INVALID );
+    ret = _ref_set_offset( ret, __OFFSET_MAX );
 
     if( unlikely( ptr == NULL ) )
         return ret;
@@ -2247,6 +2261,17 @@ ctrl_header * get_control_header( void )
     header = control_header;
 
     return header;
+}
+
+__inline__ bool ref_is_null( __ref ref )
+{
+    return ( _ref_get_segment( ref ) == SEGMENT_HANDLE_INVALID );
+}
+
+__inline__ __ref get_null_ref( void )
+{
+    __ref nullref = {0};
+    return ref_set_segment( nullref, SEGMENT_HANDLE_INVALID );
 }
 
 #ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK

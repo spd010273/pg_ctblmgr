@@ -296,18 +296,22 @@ typedef uint64_t handle_iter;
 #if defined( SHM_MAX_OFFSET ) && ( SHM_MAX_OFFSET > 0 ) && ( SHM_MAX_OFFSET <= UCHAR_MAX )
 typedef uint8_t offset_t;
 #define SHM_OFFSET_SIZE 8
+#define __OFFSET_MAX UCHAR_MAX
 #define SHM_OFFSET_MASK 0xFF
 #elif defined( SHM_MAX_OFFSET ) && ( SHM_MAX_OFFSET > UCHAR_MAX ) && ( SHM_MAX_OFFSET <= USHRT_MAX )
 typedef uint16_t offset_t;
 #define SHM_OFFSET_SIZE 16
+#define __OFFSET_MAX USHRT_MAX
 #define SHM_OFFSET_MASK 0xFFFF
 #elif defined( SHM_MAX_OFFSET ) && ( SHM_MAX_OFFSET > USHRT_MAX ) && ( SHM_MAX_OFFSET <= UINT_MAX )
 typedef uint32_t offset_t;
 #define SHM_OFFSET_SIZE 32
+#define __OFFSET_MAX UINT_MAX
 #define SHM_OFFSET_MASK 0xFFFFFFFF
 #else
 typedef uint64_t offset_t;
 #define SHM_OFFSET_SIZE 64
+#define __OFFSET_MAX ULONG_MAX;
 #define SHM_OFFSET_MASK 0xFFFFFFFFFFFFFFFF
 #endif // offset setup
 
@@ -327,7 +331,6 @@ extern bool shm_is_init( void );
 extern void shm_child_init( void );
 extern void * map_segment( shm_handle );
 extern void * new_segment( size_t );
-
 extern shm_handle get_handle_from_ptr( void * );
 extern void unmap_segment( void * );
 extern void free_segment( void * );
@@ -436,6 +439,7 @@ typedef struct __ref {
     shm_handle _segment; // ID of the segment this ref points to
     offset_t   _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
 } __attribute__((packed)) __ref;
+
  #else
   #ifdef __sys32
 typedef uint32_t __ref;
@@ -453,9 +457,13 @@ typedef struct __ref {
 extern __inline__ void * get_ptr( __ref );
 extern __inline__ __ref get_ref( void * );
 extern ctrl_header * get_control_header( void );
+extern __inline__ bool ref_is_null( __ref );
+extern __inline__ __ref get_null_ref( void );
 
 extern offset_t ref_get_offset( __ref );
 extern shm_handle ref_get_segment( __ref );
+extern __ref ref_set_segment( __ref, shm_handle );
+extern __ref ref_set_offset( __ref, offset_t );
 // Logging helpers
 
 typedef enum {

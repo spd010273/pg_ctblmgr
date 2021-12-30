@@ -18,6 +18,7 @@ static shalloc_control * mapped_control          = NULL;
 static bool              _slab_init              = false;
 static pid_t             p_pid                   = 0;
 
+static __inline__ context_t get_ctx_by_id( const char * );
 static bool check_shalloc_header( header_iter );
 static __inline__ bool check_context( context_t ) __attribute__((always_inline));
 
@@ -54,6 +55,8 @@ bool slab_init( void )
             mapped_control->headers[i].n_allocs    = 0;
             mapped_control->headers[i].freelist    = NULL;
             mapped_control->headers[i].n_freelist  = 0;
+            mapped_control->headers[i].self        = INVALID_CONTEXT;
+            mapped_control->headers[i].locked      = false;
             memset(
                 mapped_control->headers[i].object_id,
                 '\0',
@@ -114,31 +117,106 @@ context_t new_slab( const char * tag, size_t object_size )
         tag
     );
 
+    ret = get_ctx_by_id( ident );
+
+    if( ret == INVALID_CONTEXT )
+    {
+        // Allocate a new context
+        
+        // lock and inc next_header index and return as the new
+        // context
+        if( !__TNS_MUTEX( &(mapped_control->locked) ) )
+            return INVALID_CONTEXT;
+
+        if( mapped_control->next_header + 1 > _SHALLOC_MAX_SLABS )
+        {
+            __C_MUTEX( &(mapped_control->locked) );
+            return INVALID_CONTEXT;
+        }
+
+        ret = ( context_t ) mapped_control->next_header;
+        mapped_control->next_header += 1;
+
+        __C_MUTEX( &(mapped_control->locked) );
+
+        // Setup our header to a semi-initialized state - we'll
+        // handle setup of allocs[] and freelist[] later
+        mapped_control->headers[ret].object_size = object_size;
+        mapped_control->headers[ret].n_allocs    = 0;
+        mapped_control->headers[ret].n_freelist  = 0;
+        mapped_control->headers[ret].self        = ret;
+        mapped_control->headers[ret].locked      = false;
+        strncpy(
+            mapped_control->headers[ret].object_id,
+            ident,
+            _SHALLOC_MAX_IDENT
+        );
+    }
+
     return ret;
 }
 
-void * scalloc( context_t ctx, size_t size, uint64_t count )
+__ref scalloc( context_t ctx, size_t size, uint64_t count )
 {
-    if( !check_context( ctx ) )
-        return NULL;
+    shalloc_header * header = NULL;
+    __ref            retref = {0};
 
-    return NULL;
+    if( !check_context( ctx ) )
+        return get_null_ref();
+
+    header = &(mapped_control->headers[ctx]);
+
+    return retref;
 }
 
-void * smalloc( context_t ctx, size_t size )
+__ref smalloc( context_t ctx, size_t size )
 {
-    if( !check_context( ctx ) )
-        return NULL;
+    shalloc_header * header = NULL;
+    __ref            retref = {0};
 
-    return NULL;
+    retref = get_null_ref();
+
+    if( !check_context( ctx ) )
+        return get_null_ref();
+
+    header = &(mapped_control->headers[ctx]);
+
+    return retref;
 }
 
-void sfree( context_t ctx, void * pointer )
+void sfree( context_t ctx, __ref pointer )
 {
+    shalloc_header * header = NULL;
+
     if( !check_context( ctx ) )
         return;
 
+    header = &(mapped_control->headers[ctx]);
+
     return;
+}
+
+static __inline__ context_t get_ctx_by_id( const char * ident )
+{
+    header_iter i        = ( header_iter ) 0;
+    char *      i_ident = NULL;
+    bool        found    = false;
+
+    for( i = 0; i < ( header_iter ) _SHALLOC_MAX_SLABS; i++ )
+    {
+        i_ident = mapped_control->headers[i].object_id;
+
+        if( strncmp( i_ident, ident, _SHALLOC_MAX_IDENT ) == 0 )
+        {
+            found = true;
+            break;
+        }
+    }
+
+    if( found == true )
+        return ( context_t ) i;
+
+    return INVALID_CONTEXT;
 }
 
 static bool check_slab_state( void )
@@ -233,9 +311,12 @@ static __inline__ bool check_context( context_t ctx )
         return false;
     if( unlikely( mapped_control == NULL ) ) // check that we're mapped
         return false;
-    if( unlikely( ctx < ( context_t ) _SHALLOC_MAX_SLABS ) ) // Ensure no overrun
+    if( unlikely( ctx >= ( context_t ) _SHALLOC_MAX_SLABS ) ) // Ensure no overrun
         return false;
     if( unlikely( mapped_control->headers[ctx].magic != _SHALLOC_HEADER_MAGIC ) ) // See if it's reachable
         return false;
+    if( unlikely( mapped_control->headers[ctx].self != ctx ) )
+        return false;
+
     return true;
 }
