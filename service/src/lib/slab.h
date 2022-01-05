@@ -18,7 +18,7 @@
 #define SLAB_DEFAULT_ALLOCATION 32
 #include <stdint.h>
 #include <stdbool.h>
-#include <strings.h>
+#include <string.h>
 #include "barrier.h"
 #include "shm.h"
 

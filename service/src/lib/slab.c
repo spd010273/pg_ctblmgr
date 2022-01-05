@@ -27,12 +27,12 @@ static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always
 static __inline__ __ref _get_alloc_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
 
 static __inline__ __ref _shmalloc( context_t ctx, size_t size );
-static __inline__ uint64_t _get_fsm_length( shalloc_header * ) __attribute__((always_inline));
-static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
-static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
-static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
-static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t ) __attribute__((always_inline)); 
-static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t, bool ) __attribute__((always_inline));
+static __inline__ uint64_t _get_fsm_length( shalloc_header * );// __attribute__((always_inline));
+static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t, bool );// __attribute__((always_inline));
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
@@ -204,7 +204,7 @@ __ref smalloc( context_t ctx, size_t size )
     if( !check_context( ctx ) )
         return get_null_ref();
 
-    header = &(mapped_control->headers[ctx]);
+    retref = _shmalloc( ctx, size );
 
     return retref;
 }
@@ -264,8 +264,15 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
          && header->max_allocations == 0
       )
     {
+        fprintf( stderr, "Initializing slab\n" );
         if( !_init_slab( ctx, header, false ) )
+        {
+            fprintf(
+                stderr,
+                "Attempt to allocate to uninitialized segment\n"
+            );
             return get_null_ref();
+        }
     }
 
     if( num_objects >= ( header->max_allocations - header->n_allocs ) )
@@ -276,20 +283,27 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
         // This / should / be easy - we only need to relocate the free list
         // to the end of the new, extended page. This will preserve existing
         // __refs
+        fprintf( stderr, "NEED REALLOC\n" );
     }
 
     // Layout & usage of free list:
     // [ front - single allocs ..... contiguous allocs - rear ]
-    if( !__TNS_MUTEX( &(header->locked) ) )
+    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+    {
+        fprintf( stderr, "Failed to acquire segment lock\n" );
         return get_null_ref();
+    }
 
     if( num_objects > 1 )
     {
         errno = 0;
         index = _get_fsm_slot_by_width( header, num_objects );
 
-        if( unlikely( errno = ENOSPC ) ) // Need to reallocate
+        if( unlikely( errno == ENOSPC ) ) // Need to reallocate
+        {
+            fprintf( stderr, "NEED REALLOC 2\n" );
             return get_null_ref();
+        }
 
         retref = _get_alloc_element_by_index( header, index );
         header->n_allocs += num_objects;
@@ -299,6 +313,9 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
         index = header->i_front_fsm_bit;
         if( likely( !_get_fsm_element_by_index( header, index ) ) )
         { // Indexed search
+            #ifdef SLAB_DEBUG
+            fprintf( stdout, "DEBUG: Making indexed allocation\n" );
+            #endif // SLAB_DEBUG
             _set_fsm_element_by_index( header, index );
             retref = _get_alloc_element_by_index( header, index );
             header->i_front_fsm_bit = index + 1;
@@ -306,6 +323,9 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
         }
         else
         { // Exhaustive search
+            #ifdef SLAB_DEBUG
+            fprintf( stdout, "DEBUG: Performing exhaustive allocation search\n" );
+            #endif // SLAB_DEBUG
             for( index = 0; index < ( FSM_WIDTH * _get_fsm_length( header ) ); index++ )
             {
                 if( !_get_fsm_element_by_index( header, index ) )
@@ -354,7 +374,7 @@ static __inline__ void _set_fsm_element_by_index(
         return;
 
     fsm_index  = ind / FSM_WIDTH;
-    fsm_offset = ind % FSM_WIDTH; 
+    fsm_offset = ind % FSM_WIDTH;
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
         fsm_index
@@ -381,7 +401,7 @@ static __inline__ void _clear_fsm_element_by_index(
         return;
 
     fsm_index  = ind / FSM_WIDTH;
-    fsm_offset = ind % FSM_WIDTH; 
+    fsm_offset = ind % FSM_WIDTH;
 
     fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
@@ -434,13 +454,14 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
 
     bit_position = __find_fsm_spot( header, width, false );
 
+    fprintf( stdout, "Got bit position %lu for initial FSM search (req: %lu)\n", bit_position, width );
     if( unlikely( bit_position == ULONG_MAX ) )
         bit_position = __find_fsm_spot( header, width, true );
-   
+
     if( unlikely( bit_position == ULONG_MAX ) )
     {
         errno = ENOSPC;
-        return 0;    
+        return 0;
     }
 
     // Mark field as used
@@ -466,24 +487,39 @@ static __inline__ uint64_t __find_fsm_spot(
     uint64_t       current_offset = 0;
     uint8_t *      start          = NULL;
     uint64_t       fsm_length     = _get_fsm_length( header );
-    uint64_t       bytes_shifted  = 0; 
+    uint64_t       bytes_shifted  = 0;
 
+    fprintf( stdout, "Checking FSM( %p, %lu, %s )\n", header, requested_length, best_fit == true ? "T" : "F" ); 
+    fprintf( stdout, "fsm_length: %lu words. %lu bits\n", fsm_length, fsm_length * FSM_WIDTH );
     if( unlikely( requested_length > ( fsm_length * FSM_WIDTH ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Requested length exceeds FSM width\n" );
+    #endif // SLAB_DEBUG
         return ULONG_MAX;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     if( unlikely( best_fit ) )
         current_offset = ( fsm_length * FSM_WIDTH ) - FSM_WIDTH;
     else
         current_offset = header->i_rear_fsm_word * sizeof( fsm_t );
-        
+
     start = _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
         current_offset
     );
 
     if( unlikely( start == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "NULL start position for FSM search\n" );
+    #endif // SLAB_DEBUg
         return ULONG_MAX;
-
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
     i    = ( fsm_t ) *start;
     mask = ~( mask << requested_length );
 
@@ -500,15 +536,22 @@ static __inline__ uint64_t __find_fsm_spot(
             shifted      = 0;
             current_byte = _PTR_ADD_OFFSET( start, current_offset );
             if( unlikely( current_byte == NULL ) )
+            {
+                fprintf( stderr, "NULL current_byte\n" );
                 return ULONG_MAX;
+            }
             i |= ( ( ( fsm_t ) *current_byte ) << ( FSM_WIDTH - 8 ) );
         }
 
         if( unlikely( current_offset == 0 && i == 0 ) )
+        {
+            fprintf( stderr, "Overrun FSM search bounds\n" );
             return ULONG_MAX;
+        }
     }
 
     header->i_rear_fsm_word -= bytes_shifted / sizeof( fsm_t ); // update index
+    fprintf( stdout, "Base pos: %lu, return: %lu\n", position, position + requested_length - 1 );
     return position + requested_length - 1;
 }
 
@@ -563,6 +606,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     header->segment         = handle;
     header->max_allocations = ( get_segment_size( handle ) - ( 4 * sizeof( canary_t ) ) )
                             / ( header->object_size + sizeof( __ref ) );
+    fprintf( stdout, "Max allocations is %lu objects of size %lu\n", header->max_allocations, header->object_size );
     header->n_allocs        = 0;
     header->c_allocstart    = ( canary_t ) random();
     header->c_allocend      = ( canary_t ) random();
@@ -601,7 +645,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     // rightmost
     header->i_rear_fsm_word  = _get_fsm_length( header );
     header->i_front_fsm_bit  = 0;
-    
+
     if(
            ref_is_null( header->allocs )
         || ref_is_null( header->fsm )
@@ -638,7 +682,10 @@ static __inline__ bool _check_canaries( shalloc_header * header )
         return false;
 
     // Check start of slab
-    c_ptr = get_ptr( header->c_allocstart );
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Checking allocstart canary\n" );
+    #endif // SLAB_DEBUG
+    c_ptr = get_ptr( header->loc_c_allocstart );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -646,7 +693,10 @@ static __inline__ bool _check_canaries( shalloc_header * header )
         return _fail_canary();
 
     // Check end of slab
-    c_ptr = get_ptr( header->c_allocend );
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Checking allocend canary\n" );
+    #endif // SLAB_DEBUG
+    c_ptr = get_ptr( header->loc_c_allocend );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -654,7 +704,10 @@ static __inline__ bool _check_canaries( shalloc_header * header )
         return _fail_canary();
 
     // Check start of FSM
-    c_ptr = get_ptr( header->c_fsmstart );
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Checking fsmstart canary\n" );
+    #endif // SLAB_DEBUG
+    c_ptr = get_ptr( header->loc_c_fsmstart );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -662,7 +715,10 @@ static __inline__ bool _check_canaries( shalloc_header * header )
         return _fail_canary();
 
     // Check end of FSM
-    c_ptr = get_ptr( header->c_fsmend );
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Checking fsmend canary\n" );
+    #endif // SLAB_DEBUG
+    c_ptr = get_ptr( header->loc_c_fsmend );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -784,15 +840,54 @@ static bool check_shalloc_header( header_iter index )
 static __inline__ bool check_context( context_t ctx )
 {
     if( unlikely( ctx == INVALID_CONTEXT ) ) // Sanity check the context
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Context check failed: INVALID_CONTEXT\n" );
+    #endif // SLAB_DEBUG
         return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
     if( unlikely( mapped_control == NULL ) ) // check that we're mapped
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Context check failed: control segment not mapped\n" );
+    #endif // SLAB_DEBUG
         return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
     if( unlikely( ctx >= ( context_t ) _SHALLOC_MAX_SLABS ) ) // Ensure no overrun
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Context check failed: context out of bounds\n" );
+    #endif // SLAB_DEBUG
         return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
     if( unlikely( mapped_control->headers[ctx].magic != _SHALLOC_HEADER_MAGIC ) ) // See if it's reachable
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Context check failed: context's magic is bad\n" );
+    #endif // SLAB_DEBUG
         return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
     if( unlikely( mapped_control->headers[ctx].self != ctx ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Context check failed: context not initialized\n" );
+    #endif // SLAB_DEBUG
         return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     return true;
 }

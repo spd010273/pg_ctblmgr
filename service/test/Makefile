@@ -21,7 +21,7 @@ T_Q_SRCS		= ../src/lib/barrier.c ../src/lib/query.c ../src/lib/util.c src/t_quer
 T_Q_OBJS		= $(T_Q_SRCS:.c=.o)
 T_SHM_SRCS		= ../src/lib/shm.c ../src/lib/barrier.c src/t_shm.c
 T_SHM_OBJS		= $(T_SHM_SRCS:.c=.o)
-T_SLAB_SRCS		= ../src/lib/slab.c ../src/lib/shm.c ../src/lib/barriers.c
+T_SLAB_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c src/t_slab.c
 T_SLAB_OBJS		= $(T_SLAB_SRCS:.c=.o)
 LDFLAGS			= -lm -lpq -lrt
 
@@ -40,7 +40,7 @@ t_shm: $(T_SHM_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 t_slab: $(T_SLAB_OBJS)
-	$(CC) -o $@ $^ $(CLAGS) $(LDFLAGS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 .PHONY: clean
 clean:
