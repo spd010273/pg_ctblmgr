@@ -18,12 +18,21 @@ static shalloc_control * mapped_control          = NULL;
 static bool              _slab_init              = false;
 static pid_t             p_pid                   = 0;
 
-static __inline__ __ref _shmalloc( context_t ctx, size_t size ) __attribute__((always_inline));
+static __inline__ bool _fail_canary( void ) __attribute__((always_inline));
 static __inline__ bool _init_slab( context_t, shalloc_header *, bool );
-static __inline__ context_t get_ctx_by_id( const char * );
-static bool check_shalloc_header( header_iter );
+static __inline__ context_t get_ctx_by_id( const char * ) __attribute__((always_inline));
+static __inline__ bool check_shalloc_header( header_iter ) __attribute__((always_inline));
 static __inline__ bool check_context( context_t ) __attribute__((always_inline));
 static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always_inline));
+static __inline__ __ref _get_alloc_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
+
+static __inline__ __ref _shmalloc( context_t ctx, size_t size );
+static __inline__ uint64_t _get_fsm_length( shalloc_header * ) __attribute__((always_inline));
+static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
+static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
+static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
+static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t ) __attribute__((always_inline)); 
+static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t, bool ) __attribute__((always_inline));
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
@@ -52,24 +61,23 @@ bool slab_init( void )
 
         for( i = 0; i < _SHALLOC_MAX_SLABS; i++ )
         {
-            mapped_control->headers[i].magic           = ( uint64_t ) _SHALLOC_HEADER_MAGIC;
-            mapped_control->headers[i].segment         = SEGMENT_HANDLE_INVALID;
-            mapped_control->headers[i].object_size     = 0;
-            mapped_control->headers[i].allocs          = get_null_ref();
-            mapped_control->headers[i].n_allocs        = 0;
-            mapped_control->headers[i].freelist        = get_null_ref();
-            mapped_control->headers[i].n_freelist      = 0;
-            mapped_control->headers[i].self            = INVALID_CONTEXT;
-            mapped_control->headers[i].locked          = false;
+            mapped_control->headers[i].magic       = ( uint64_t ) _SHALLOC_HEADER_MAGIC;
+            mapped_control->headers[i].segment     = SEGMENT_HANDLE_INVALID;
+            mapped_control->headers[i].object_size = 0;
+            mapped_control->headers[i].allocs      = get_null_ref();
+            mapped_control->headers[i].n_allocs    = 0;
+            mapped_control->headers[i].fsm         = get_null_ref();
+            mapped_control->headers[i].self        = INVALID_CONTEXT;
+            mapped_control->headers[i].locked      = false;
 
-            mapped_control->headers[i].c_allocstart        = ( canary_t ) random();
-            mapped_control->headers[i].c_allocend          = ( canary_t ) random();
-            mapped_control->headers[i].c_freeliststart     = ( canary_t ) random();
-            mapped_control->headers[i].c_freelistend       = ( canary_t ) random();
-            mapped_control->headers[i].loc_c_allocstart    = get_null_ref();
-            mapped_control->headers[i].loc_c_allocend      = get_null_ref();
-            mapped_control->headers[i].loc_c_freeliststart = get_null_ref();
-            mapped_control->headers[i].loc_c_freelistend   = get_null_ref();
+            mapped_control->headers[i].c_allocstart     = ( canary_t ) random();
+            mapped_control->headers[i].c_allocend       = ( canary_t ) random();
+            mapped_control->headers[i].c_fsmstart       = ( canary_t ) random();
+            mapped_control->headers[i].c_fsmend         = ( canary_t ) random();
+            mapped_control->headers[i].loc_c_allocstart = get_null_ref();
+            mapped_control->headers[i].loc_c_allocend   = get_null_ref();
+            mapped_control->headers[i].loc_c_fsmstart   = get_null_ref();
+            mapped_control->headers[i].loc_c_fsmend     = get_null_ref();
 
             memset(
                 mapped_control->headers[i].object_id,
@@ -136,7 +144,7 @@ context_t new_slab( const char * tag, size_t object_size )
     if( ret == INVALID_CONTEXT )
     {
         // Allocate a new context
-        
+
         // lock and inc next_header index and return as the new
         // context
         if( !__TNS_MUTEX( &(mapped_control->locked) ) )
@@ -154,13 +162,15 @@ context_t new_slab( const char * tag, size_t object_size )
         __C_MUTEX( &(mapped_control->locked) );
 
         // Setup our header to a semi-initialized state - we'll
-        // handle setup of allocs[] and freelist[] later
-        mapped_control->headers[ret].object_size     = object_size;
-        mapped_control->headers[ret].n_allocs        = 0;
-        mapped_control->headers[ret].n_freelist      = 0;
-        mapped_control->headers[ret].self            = ret;
-        mapped_control->headers[ret].locked          = false;
-        mapped_control->headers[ret].max_allocations = 0;
+        // handle setup of allocs[] and fsm[] later
+        mapped_control->headers[ret].object_size      = object_size;
+        mapped_control->headers[ret].n_allocs         = 0;
+        mapped_control->headers[ret].self             = ret;
+        mapped_control->headers[ret].locked           = false;
+        mapped_control->headers[ret].max_allocations  = 0;
+        mapped_control->headers[ret].i_rear_fsm_word  = 0;
+        mapped_control->headers[ret].i_front_fsm_bit  = 0;
+
         strncpy(
             mapped_control->headers[ret].object_id,
             ident,
@@ -226,10 +236,27 @@ void sfree( context_t ctx, __ref pointer )
 
 static __inline__ __ref _shmalloc( context_t ctx, size_t size )
 {
-    shalloc_header * header = NULL;
-    __ref            retref = {0};
+    shalloc_header * header      = NULL;
+    __ref            retref      = {0};
+    uint64_t         num_objects = 0;
+    uint64_t         index       = 0;
 
-    header = &(mapped_control->headers[ctx]);
+    // this is unsafe, but the callers check our context prior
+    // to this dereference happening
+    header      = &(mapped_control->headers[ctx]);
+    num_objects = size / header->object_size;
+
+    if( size % header->object_size != 0 )
+    {
+        fprintf(
+            stderr,
+            "requested allocation size %zu is not a multiple of slab's object"
+            " size %zu\n",
+            size,
+            header->object_size
+        );
+        return get_null_ref();
+    }
 
     // Check to see if this context has ever been allocated.
     if(
@@ -241,30 +268,288 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
             return get_null_ref();
     }
 
+    if( num_objects >= ( header->max_allocations - header->n_allocs ) )
+    {
+        // TODO: Reallocate entire segment
+        // or come up with a clever way to extend (shm.c) the segment
+        // then shake out the extension to the page
+        // This / should / be easy - we only need to relocate the free list
+        // to the end of the new, extended page. This will preserve existing
+        // __refs
+    }
+
+    // Layout & usage of free list:
+    // [ front - single allocs ..... contiguous allocs - rear ]
+    if( !__TNS_MUTEX( &(header->locked) ) )
+        return get_null_ref();
+
+    if( num_objects > 1 )
+    {
+        errno = 0;
+        index = _get_fsm_slot_by_width( header, num_objects );
+
+        if( unlikely( errno = ENOSPC ) ) // Need to reallocate
+            return get_null_ref();
+
+        retref = _get_alloc_element_by_index( header, index );
+        header->n_allocs += num_objects;
+    }
+    else
+    {
+        index = header->i_front_fsm_bit;
+        if( likely( !_get_fsm_element_by_index( header, index ) ) )
+        { // Indexed search
+            _set_fsm_element_by_index( header, index );
+            retref = _get_alloc_element_by_index( header, index );
+            header->i_front_fsm_bit = index + 1;
+            header->n_allocs += 1;
+        }
+        else
+        { // Exhaustive search
+            for( index = 0; index < ( FSM_WIDTH * _get_fsm_length( header ) ); index++ )
+            {
+                if( !_get_fsm_element_by_index( header, index ) )
+                {
+                    _set_fsm_element_by_index( header, index );
+                    retref = _get_alloc_element_by_index( header, index );
+                    header->i_front_fsm_bit = index + 1;
+                    header->n_allocs += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    __C_MUTEX( &(header->locked) );
+
     return retref;
+}
+
+static __inline__ __ref _get_alloc_element_by_index( shalloc_header * header, uint64_t ind )
+{
+    if( unlikely( header == NULL ) )
+        return get_null_ref();
+
+    if( unlikely( ind >= header->max_allocations ) )
+        return get_null_ref();
+
+    return get_ref(
+        _PTR_ADD_OFFSET(
+            get_ptr( header->allocs ),
+            ( header->object_size ) * ind
+        )
+    );
+}
+
+static __inline__ void _set_fsm_element_by_index(
+    shalloc_header * header,
+    uint64_t         ind
+)
+{
+    uint32_t fsm_index  = 0;
+    uint8_t  fsm_offset = 0;
+    fsm_t *  fsm_word   = NULL;
+
+    if( unlikely( header == NULL ) )
+        return;
+
+    fsm_index  = ind / FSM_WIDTH;
+    fsm_offset = ind % FSM_WIDTH; 
+    fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
+        get_ptr( header->fsm ),
+        fsm_index
+    );
+
+    if( fsm_word == NULL )
+        return;
+
+    *fsm_word |= ( fsm_t ) 1 << fsm_offset;
+
+    return;
+}
+
+static __inline__ void _clear_fsm_element_by_index(
+    shalloc_header * header,
+    uint64_t         ind
+)
+{
+    uint64_t fsm_index  = 0;
+    uint8_t  fsm_offset = 0;
+    fsm_t *  fsm_word   = NULL;
+
+    if( unlikely( header == NULL ) )
+        return;
+
+    fsm_index  = ind / FSM_WIDTH;
+    fsm_offset = ind % FSM_WIDTH; 
+
+    fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+        get_ptr( header->fsm ),
+        fsm_index
+    );
+
+    if( fsm_word == NULL )
+        return;
+
+    *fsm_word &= ~( ( fsm_t ) 1 << fsm_offset );
+
+    return;
+}
+
+static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint64_t ind )
+{
+    uint64_t fsm_index  = 0;
+    uint8_t  fsm_offset = 0;
+    fsm_t *  fsm_word   = NULL;
+
+    if( unlikely( header == NULL ) )
+    {
+        errno = EINVAL;
+        return false;
+    }
+
+    fsm_index  = ind / FSM_WIDTH;
+    fsm_offset = ind % FSM_WIDTH;
+    fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
+        get_ptr( header->fsm ),
+        fsm_index
+    );
+
+    if( fsm_word == NULL )
+    {
+        errno = EINVAL;
+        return true;
+    }
+
+    if( ( ( *fsm_word >> fsm_offset ) & ( fsm_t ) 1 ) > 0 )
+        return true;
+
+    return false;
+}
+
+static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint64_t width )
+{
+    uint64_t bit_position = 0;
+    uint64_t fsm_index    = 0;
+
+    bit_position = __find_fsm_spot( header, width, false );
+
+    if( unlikely( bit_position == ULONG_MAX ) )
+        bit_position = __find_fsm_spot( header, width, true );
+   
+    if( unlikely( bit_position == ULONG_MAX ) )
+    {
+        errno = ENOSPC;
+        return 0;    
+    }
+
+    // Mark field as used
+    for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
+    {
+        _set_fsm_element_by_index( header, fsm_index );
+    }
+
+    return bit_position;
+}
+
+static __inline__ uint64_t __find_fsm_spot(
+    shalloc_header * header,
+    uint64_t         requested_length,
+    bool             best_fit
+)
+{
+    register fsm_t mask           = ( fsm_t ) ULONG_MAX;
+    register fsm_t i              = 0;
+    uint64_t       position       = 0;
+    uint8_t        shifted        = 0;
+    uint8_t *      current_byte   = NULL;
+    uint64_t       current_offset = 0;
+    uint8_t *      start          = NULL;
+    uint64_t       fsm_length     = _get_fsm_length( header );
+    uint64_t       bytes_shifted  = 0; 
+
+    if( unlikely( requested_length > ( fsm_length * FSM_WIDTH ) ) )
+        return ULONG_MAX;
+
+    if( unlikely( best_fit ) )
+        current_offset = ( fsm_length * FSM_WIDTH ) - FSM_WIDTH;
+    else
+        current_offset = header->i_rear_fsm_word * sizeof( fsm_t );
+        
+    start = _PTR_ADD_OFFSET(
+        get_ptr( header->fsm ),
+        current_offset
+    );
+
+    if( unlikely( start == NULL ) )
+        return ULONG_MAX;
+
+    i    = ( fsm_t ) *start;
+    mask = ~( mask << requested_length );
+
+    while( ( mask & ~i ) != mask )
+    {
+        position++;
+        shifted++;
+        i = i >> 1;
+
+        if( unlikely( shifted >= 8 && current_offset > 0 ) )
+        {
+            current_offset--;
+            bytes_shifted++;
+            shifted      = 0;
+            current_byte = _PTR_ADD_OFFSET( start, current_offset );
+            if( unlikely( current_byte == NULL ) )
+                return ULONG_MAX;
+            i |= ( ( ( fsm_t ) *current_byte ) << ( FSM_WIDTH - 8 ) );
+        }
+
+        if( unlikely( current_offset == 0 && i == 0 ) )
+            return ULONG_MAX;
+    }
+
+    header->i_rear_fsm_word -= bytes_shifted / sizeof( fsm_t ); // update index
+    return position + requested_length - 1;
+}
+
+// Gets the number of fsm_t's we'll need to store the bitmap of allocations
+static __inline__ uint64_t _get_fsm_length( shalloc_header * header )
+{
+    uint64_t fsm_length = 0;
+    if( unlikely( header == NULL ) )
+        return 0;
+
+    fsm_length = header->max_allocations / FSM_WIDTH;
+
+    if( header->max_allocations % FSM_WIDTH != 0 )
+        fsm_length++;
+
+    return fsm_length;
 }
 
 static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool zero_fill )
 {
-    shm_handle handle          = SEGMENT_HANDLE_INVALID;
-    void *     mapped_address  = NULL; 
-    void *     alloc           = NULL;
-    void *     freelist        = NULL;
-    void *     c_allocstart    = NULL;
-    void *     c_allocend      = NULL;
-    void *     c_freeliststart = NULL;
-    void *     c_freelistend   = NULL;
-    void *     temp            = NULL;
-    __ref      tempref         = {0};
-    uint64_t   i               = 0;
-    bool       canary_check    = false;
+    shm_handle handle         = SEGMENT_HANDLE_INVALID;
+    void *     mapped_address = NULL;
+    void *     alloc          = NULL;
+    void *     fsm            = NULL;
+    void *     c_allocstart   = NULL;
+    void *     c_allocend     = NULL;
+    void *     c_fsmstart     = NULL;
+    void *     c_fsmend       = NULL;
+    void *     temp           = NULL;
+    uint64_t   i              = 0;
 
     if( ctx == INVALID_CONTEXT || header == NULL )
         return false;
 
-    // Don't want to trash an initialized segment
+    // Don't want to trash an initialized segment and be idempotent
     if( header->segment != SEGMENT_HANDLE_INVALID )
-        return false;
+    {
+        // Seems to be already allocated
+        if( header->n_allocs > 0 || header->max_allocations > 0 )
+            return true;
+    }
 
     mapped_address = new_segment(
         SLAB_DEFAULT_ALLOCATION * header->object_size
@@ -278,49 +563,48 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     header->segment         = handle;
     header->max_allocations = ( get_segment_size( handle ) - ( 4 * sizeof( canary_t ) ) )
                             / ( header->object_size + sizeof( __ref ) );
-    header->n_freelist      = header->max_allocations;
     header->n_allocs        = 0;
     header->c_allocstart    = ( canary_t ) random();
     header->c_allocend      = ( canary_t ) random();
-    header->c_freeliststart = ( canary_t ) random();
-    header->c_freelistend   = ( canary_t ) random();
+    header->c_fsmstart      = ( canary_t ) random();
+    header->c_fsmend        = ( canary_t ) random();
 
     // Layout setup - we'll calculate locally for readability, then convert to __ref
-    c_allocstart    = mapped_address;
-    alloc           = ( void * ) _PTR_ADD_OFFSET( c_allocstart, sizeof( canary_t ) );
-    c_allocend      = ( void * ) _PTR_ADD_OFFSET( alloc, ( header->object_size * header->max_allocations ) );
-    c_freeliststart = ( void * ) _PTR_ADD_OFFSET( c_allocend, sizeof( canary_t ) );
-    freelist        = ( void * ) _PTR_ADD_OFFSET( c_freeliststart, sizeof( canary_t ) );
-    c_freelistend   = ( void * ) _PTR_ADD_OFFSET( freelist, ( sizeof( __ref ) * header->max_allocations ) );
+    c_allocstart = mapped_address;
+    alloc        = ( void * ) _PTR_ADD_OFFSET( c_allocstart, sizeof( canary_t ) );
+    c_allocend   = ( void * ) _PTR_ADD_OFFSET( alloc, ( header->object_size * header->max_allocations ) );
+    c_fsmstart   = ( void * ) _PTR_ADD_OFFSET( c_allocend, sizeof( canary_t ) );
+    fsm          = ( void * ) _PTR_ADD_OFFSET( c_fsmstart, sizeof( canary_t ) );
+    c_fsmend     = ( void * ) _PTR_ADD_OFFSET( fsm, ( sizeof( fsm_t ) * _get_fsm_length( header ) ) );
 
     // Write out canaries
-    *( ( canary_t * ) c_allocstart )    = header->c_allocstart;
-    *( ( canary_t * ) c_allocend )      = header->c_allocend;
-    *( ( canary_t * ) c_freeliststart ) = header->c_freeliststart;
-    *( ( canary_t * ) c_freelistend )   = header->c_freelistend;
+    *( ( canary_t * ) c_allocstart ) = header->c_allocstart;
+    *( ( canary_t * ) c_allocend )   = header->c_allocend;
+    *( ( canary_t * ) c_fsmstart )   = header->c_fsmstart;
+    *( ( canary_t * ) c_fsmend )     = header->c_fsmend;
 
-    // Initialize freelist to point to every alloc element
-    for( i = 0; i < header->n_freelist; i++ )
+    // Initialize FSM to point to every alloc element
+    for( i = 0; i < _get_fsm_length( header ); i++ )
     {
-        // Get location of alloc element
-        temp = ( void * ) ( ( uint8_t * ) alloc + ( i * header->object_size ) );
-        tempref = get_ref( temp );
-
-        // Get location of freelist element to write to
-        temp = ( void * ) ( ( uint8_t * ) freelist + ( i * sizeof( __ref ) ) );
-        *( ( __ref * ) temp ) = tempref;
+        temp = ( void * ) _PTR_ADD_OFFSET( fsm, ( sizeof( fsm_t ) * i ) );
+        *( ( fsm_t * ) temp ) = ( fsm_t ) 0;
     }
 
-    header->allocs              = get_ref( alloc );
-    header->freelist            = get_ref( freelist );
-    header->loc_c_allocstart    = get_ref( c_allocstart );
-    header->loc_c_allocend      = get_ref( c_allocend );
-    header->loc_c_freeliststart = get_ref( c_freeliststart );
-    header->loc_c_freelistend   = get_ref( c_freelistend );
-
+    header->allocs           = get_ref( alloc );
+    header->fsm              = get_ref( fsm );
+    header->loc_c_allocstart = get_ref( c_allocstart );
+    header->loc_c_allocend   = get_ref( c_allocend );
+    header->loc_c_fsmstart   = get_ref( c_fsmstart );
+    header->loc_c_fsmend     = get_ref( c_fsmend );
+    // Indexes to the word and bit positions in the FSM. We ignore endian-ness
+    // and treat it as an array with 0'th position being leftmost and nth being
+    // rightmost
+    header->i_rear_fsm_word  = _get_fsm_length( header );
+    header->i_front_fsm_bit  = 0;
+    
     if(
            ref_is_null( header->allocs )
-        || ref_is_null( header->freelist )
+        || ref_is_null( header->fsm )
       )
     {
         return false;
@@ -331,56 +615,60 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
         memset(
             get_ptr( header->allocs ),
             ( unsigned char ) _ZERO_FILL_BYTE,
-            ( header->object_size * header->n_freelist )
+            ( header->object_size * header->max_allocations )
         );
     }
 
-    canary_check = _check_canaries( header );
+    return _check_canaries( header );
+}
 
+static __inline__ bool _fail_canary( void )
+{
 #ifdef _FORCE_SIGSEGV_ON_CANARY_FAILURE
-    if( !canary_check )
-        *( ( int * ) 0 ) = 42;
+    *( ( uint8_t * ) 0 ) = 42;
 #endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
-
-    return canary_check;
+    return false;
 }
 
 static __inline__ bool _check_canaries( shalloc_header * header )
 {
-    canary_t * c_ptr = NULL;
+    register canary_t * c_ptr = NULL;
 
-    if( header == NULL )
+    if( unlikely( header == NULL ) )
         return false;
-    // Check allocstart canary
+
+    // Check start of slab
     c_ptr = get_ptr( header->c_allocstart );
 
-    if( c_ptr == NULL )
+    if( unlikely( c_ptr == NULL ) )
         return false;
-    if( header->c_allocstart != *c_ptr )
-        return false;
+    if( unlikely( header->c_allocstart != *c_ptr ) )
+        return _fail_canary();
 
-    // Check allocend canary
+    // Check end of slab
     c_ptr = get_ptr( header->c_allocend );
 
-    if( c_ptr == NULL )
+    if( unlikely( c_ptr == NULL ) )
         return false;
-    if( header->c_allocend != *c_ptr )
-        return false;
+    if( unlikely( header->c_allocend != *c_ptr ) )
+        return _fail_canary();
 
-    // Check freeliststart canary
-    c_ptr = get_ptr( header->c_freeliststart );
+    // Check start of FSM
+    c_ptr = get_ptr( header->c_fsmstart );
 
-    if( c_ptr == NULL )
+    if( unlikely( c_ptr == NULL ) )
         return false;
-    if( header->c_freeliststart != *c_ptr )
-        return false;
+    if( unlikely( header->c_fsmstart != *c_ptr ) )
+        return _fail_canary();
 
-    c_ptr = get_ptr( header->c_freelistend );
+    // Check end of FSM
+    c_ptr = get_ptr( header->c_fsmend );
 
-    if( c_ptr == NULL )
+    if( unlikely( c_ptr == NULL ) )
         return false;
-    if( header->c_freelistend != *c_ptr )
-        return false;
+    if( unlikely( header->c_fsmend != *c_ptr ) )
+        return _fail_canary();
+
     return true;
 }
 
@@ -440,8 +728,8 @@ static bool check_slab_state( void )
     {
         fprintf(
             stderr,
-            "Bad magic: %p\n",
-            ( void * ) mapped_control->magic
+            "Bad magic: %x\n",
+            mapped_control->magic
         );
     #endif // SLAB_DEBUG
         return false;
@@ -480,8 +768,8 @@ static bool check_shalloc_header( header_iter index )
     {
         fprintf(
             stderr,
-            "Bad header magic %p at index %lu\n",
-            ( void * ) header->magic,
+            "Bad header magic %x at index %lu\n",
+            header->magic,
             ( uint64_t ) index
         );
     #endif // SLAB_DEBUG

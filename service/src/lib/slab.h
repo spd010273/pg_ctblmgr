@@ -50,10 +50,14 @@ typedef uint64_t context_t;
  #define INVALID CONTEXT ( uint64_t ) _INVALID_CONTEXT
 #endif // iter setup
 
-#if defined( __sys64 )
-typedef uint64_t canary_t;
-#elif defined( __sys64 )
+#if defined( __sys32 )
 typedef uint32_t canary_t;
+typedef uint32_t fsm_t;
+ #define FSM_WIDTH 32
+#else
+typedef uint64_t canary_t;
+typedef uint64_t fsm_t;
+ #define FSM_WIDTH 64
 #endif // canary
 
 // context_t is used to identify which slab is used for a given compilation unit.
@@ -64,29 +68,30 @@ typedef uint32_t canary_t;
 // Note - these are both stored together in the control segment for the slab allocator
 // XXX: Need to move this struct to the control_segment for shm.c to avoid wasting a page
 typedef struct shalloc_header {
-    uint64_t       magic;
+    uint32_t       magic;
     shm_handle     segment; // NOTE: this is the data segment, not the segment this header is stored in
     size_t         object_size;
     __ref          allocs; // This is an array of __refs that has n_allocs positions, with element 0 at this __ref's location
-    uint64_t       n_allocs;
-    __ref          freelist; // This is an array of __refs that has n_freelist positions, with element 0 at this __ref's location
-    uint64_t       n_freelist;
-    uint64_t       max_allocations;
+    uint32_t       n_allocs;
+    __ref          fsm; // Free Space Map - bitmap of the free allocations slots. 0 = unallocated, 1 = allocated
+    uint32_t       max_allocations;
     char           object_id[_SHALLOC_MAX_IDENT];
-    context_t      self;
+    context_t      self; // our index in the headers[]
     bool           locked;
+    uint64_t       i_front_fsm_bit;
+    uint64_t       i_rear_fsm_word;
     canary_t       c_allocstart;
     canary_t       c_allocend;
-    canary_t       c_freeliststart;
-    canary_t       c_freelistend;
+    canary_t       c_fsmstart;
+    canary_t       c_fsmend;
     __ref          loc_c_allocstart;
     __ref          loc_c_allocend;
-    __ref          loc_c_freeliststart;
-    __ref          loc_c_freelistend;
+    __ref          loc_c_fsmstart;
+    __ref          loc_c_fsmend;
 } shalloc_header;
 
 typedef struct shalloc_control {
-    uint64_t       magic;
+    uint32_t       magic;
     shalloc_header headers[_SHALLOC_MAX_SLABS];
     header_iter    next_header; //next free header
     bool           locked; 
