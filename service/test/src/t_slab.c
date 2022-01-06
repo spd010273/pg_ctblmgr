@@ -6,7 +6,7 @@
 #include <sys/wait.h>
 
 #include "../src/lib/slab.h"
-#define TEST_SIZE 32
+#define TEST_SIZE 256
 int main( void );
 
 int main( void )
@@ -22,6 +22,7 @@ int main( void )
         return 1;
     }
 
+    slab_set_count_hint( slab, TEST_SIZE );
     slab = new_slab( "TEST", sizeof( uint64_t ) );
 
     if( slab == INVALID_CONTEXT )
@@ -49,6 +50,30 @@ int main( void )
     for( i = 0; i < TEST_SIZE; i++ )
     {
         ptr[i] = TEST_SIZE - i;
+        fprintf(
+            stdout,
+            "%p [%lu] (%p): %lu (%x)\n",
+            ptr,
+            i,
+            &(ptr[i]),
+            TEST_SIZE - i,
+            ( uint32_t ) ( TEST_SIZE - i )
+        );
+    }
+
+    // Canary check should pass as we've stayed within allocated bounds
+    if( !force_canary_check( slab ) )
+    {
+        fprintf( stderr, "Canary check failed after bounded write\n" );
+        return 1;
+    }
+
+    ptr[i+1]=42;
+
+    if( force_canary_check( slab ) )
+    {
+        fprintf( stderr, "Canary check passed after unbounded write\n" );
+        return 1;
     }
 
     return 0;

@@ -13,9 +13,50 @@
 #ifndef _SLAB_H
 #define _SLAB_H
 
+/*
+ * This library maps on top of the shm.c's segments to form a basic
+ * slab allocator. 
+ *
+ * Segments will be laid out as:
+ * +--------------------------------------------------------+ lower virtual addresses
+ * |                   SHM segment header                   |
+ * +--------------------------------------------------------+
+ * |                        Canary                          |
+ * +--------------------------------------------------------+
+ * |                                                        |
+ * |                                                        |
+ * |                    Allocation Area                     |
+ * |                                                        |
+ * |                                                        |
+ * +--------------------------------------------------------|
+ * |                        Canary                          |
+ * +--------------------------------------------------------+
+ * |                    Free Space Map                      |
+ * +--------------------------------------------------------+ higher virtual address
+ *
+ * Here, the Free Space Map (FSM)'s bit positions coincide with
+ * positions in the allocation area. The FSM bitmap, and as a
+ * consequence, the allocation area, is biased towards making
+ * single allocations towards the front (lower address) of the
+ * array, and larger consecutive allocations towards the rear
+ * of the array.
+ *
+ * Segment resizes leave existing allocations referentially intact
+ * while only requiring the movement of the FSM to the end of the
+ * resized segment.
+ */
+
 #define SLAB_DEBUG 1
+
+// since we're wrapping shm.c, we can control whether map_all() is called
+// by a forkee upon initialization. By lazy loading - we defer loading in
+// and mapping a segment until a reference to that segment is dereferenced
 #define SLAB_LAZY_LOAD 1
+
+// When the slab is initialized, we allocate for this many objects,
+// This can be overridden at runtime with slab_set_count_hint()
 #define SLAB_DEFAULT_ALLOCATION 32
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -60,6 +101,8 @@ typedef uint64_t fsm_t;
  #define FSM_WIDTH 64
 #endif // canary
 
+//typedef uint8_t fsm_t;
+//#define FSM_WIDTH 8
 // context_t is used to identify which slab is used for a given compilation unit.
 // IE the unit will initialize the slab with some string identifier, and use the
 // static context returned when doing allocs/frees. It creates a little boilerplate
@@ -71,6 +114,7 @@ typedef struct shalloc_header {
     uint32_t       magic;
     shm_handle     segment; // NOTE: this is the data segment, not the segment this header is stored in
     size_t         object_size;
+    size_t         count_hint;
     __ref          allocs; // This is an array of __refs that has n_allocs positions, with element 0 at this __ref's location
     uint32_t       n_allocs;
     __ref          fsm; // Free Space Map - bitmap of the free allocations slots. 0 = unallocated, 1 = allocated
@@ -81,11 +125,9 @@ typedef struct shalloc_header {
     uint64_t       i_front_fsm_bit;
     uint64_t       i_rear_fsm_word;
     canary_t       c_allocstart;
-    canary_t       c_allocend;
     canary_t       c_fsmstart;
     canary_t       c_fsmend;
     __ref          loc_c_allocstart;
-    __ref          loc_c_allocend;
     __ref          loc_c_fsmstart;
     __ref          loc_c_fsmend;
 } shalloc_header;
@@ -99,9 +141,10 @@ typedef struct shalloc_control {
 
 extern bool slab_init( void );
 extern context_t new_slab( const char *, size_t );
+extern void slab_set_count_hint( context_t, size_t );
 extern __ref scalloc( context_t, size_t, uint64_t );
 extern __ref smalloc( context_t, size_t );
 extern __ref srealloc( context_t, __ref, size_t );
-
 extern void sfree( context_t, __ref );
+extern bool force_canary_check( context_t );
 #endif // _SLAB_H

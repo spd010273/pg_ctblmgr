@@ -69,13 +69,12 @@ bool slab_init( void )
             mapped_control->headers[i].fsm         = get_null_ref();
             mapped_control->headers[i].self        = INVALID_CONTEXT;
             mapped_control->headers[i].locked      = false;
+            mapped_control->headers[i].count_hint  = 0;
 
             mapped_control->headers[i].c_allocstart     = ( canary_t ) random();
-            mapped_control->headers[i].c_allocend       = ( canary_t ) random();
             mapped_control->headers[i].c_fsmstart       = ( canary_t ) random();
             mapped_control->headers[i].c_fsmend         = ( canary_t ) random();
             mapped_control->headers[i].loc_c_allocstart = get_null_ref();
-            mapped_control->headers[i].loc_c_allocend   = get_null_ref();
             mapped_control->headers[i].loc_c_fsmstart   = get_null_ref();
             mapped_control->headers[i].loc_c_fsmend     = get_null_ref();
 
@@ -473,6 +472,18 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     return bit_position;
 }
 
+/*
+ * Note : This is currently broken for request lengths > 64 as that exceeds the bounds of the mask
+ * We could solve this problem by using SIMD?
+ * Perhaps treat the FSM as a matrix and perform our search on that?
+ * Edit - this can most likely be done with SIMD / AVX / AVX2 intrinsics but a fallback is needed for
+ * archs that do not support AVX
+ */
+
+
+
+
+
 static __inline__ uint64_t __find_fsm_spot(
     shalloc_header * header,
     uint64_t         requested_length,
@@ -488,9 +499,14 @@ static __inline__ uint64_t __find_fsm_spot(
     uint8_t *      start          = NULL;
     uint64_t       fsm_length     = _get_fsm_length( header );
     uint64_t       bytes_shifted  = 0;
+    bool           need_lookahead = false;
+    uint32_t       lookahead_num  = 0; // number of bits we'll need to mask ahead of our first match
+    bool           finished       = false;
 
-    fprintf( stdout, "Checking FSM( %p, %lu, %s )\n", header, requested_length, best_fit == true ? "T" : "F" ); 
+    fprintf( stdout, "Checking FSM( %p, %lu, %s )\n", header, requested_length, best_fit == true ? "T" : "F" );
     fprintf( stdout, "fsm_length: %lu words. %lu bits\n", fsm_length, fsm_length * FSM_WIDTH );
+    if( unlikely( requested_length > ( sizeof( uint64_t ) * CHAR_BIT ) ) )
+        return ULONG_MAX;
     if( unlikely( requested_length > ( fsm_length * FSM_WIDTH ) ) )
     #ifdef SLAB_DEBUG
     {
@@ -506,6 +522,9 @@ static __inline__ uint64_t __find_fsm_spot(
     else
         current_offset = header->i_rear_fsm_word * sizeof( fsm_t );
 
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Using (%s), beginning offset is %lu\n", best_fit ? "Best Fit" : "Indexed", current_offset );
+    #endif // SLAB_DEUBG
     start = _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
         current_offset
@@ -521,6 +540,7 @@ static __inline__ uint64_t __find_fsm_spot(
     }
     #endif // SLAB_DEBUG
     i    = ( fsm_t ) *start;
+    
     mask = ~( mask << requested_length );
 
     while( ( mask & ~i ) != mask )
@@ -570,6 +590,18 @@ static __inline__ uint64_t _get_fsm_length( shalloc_header * header )
     return fsm_length;
 }
 
+void slab_set_count_hint( context_t ctx, size_t count_hint )
+{
+    shalloc_header * header = NULL;
+
+    if( !check_context( ctx ) )
+        return;
+
+    header = &(mapped_control->headers[ctx]);
+    header->count_hint = count_hint;
+    return;
+}
+
 static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool zero_fill )
 {
     shm_handle handle         = SEGMENT_HANDLE_INVALID;
@@ -577,11 +609,14 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     void *     alloc          = NULL;
     void *     fsm            = NULL;
     void *     c_allocstart   = NULL;
-    void *     c_allocend     = NULL;
     void *     c_fsmstart     = NULL;
     void *     c_fsmend       = NULL;
     void *     temp           = NULL;
     uint64_t   i              = 0;
+    uint64_t   available      = 0;
+    uint64_t   unit_size      = 0;
+    uint64_t   count_hint     = 0;
+    uint64_t   initial_size   = 0;
 
     if( ctx == INVALID_CONTEXT || header == NULL )
         return false;
@@ -594,36 +629,60 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
             return true;
     }
 
-    mapped_address = new_segment(
-        SLAB_DEFAULT_ALLOCATION * header->object_size
-    );
+    // Unit size - stores sizeof( fsm_t ) * CHAR_BIT allocations
+    unit_size = ( sizeof( fsm_t ) * CHAR_BIT * header->object_size ) + sizeof( fsm_t );
+
+    count_hint = header->count_hint;
+
+    if( count_hint == 0 )
+        count_hint = SLAB_DEFAULT_ALLOCATION;
+
+    initial_size = ( count_hint / ( sizeof( fsm_t ) * CHAR_BIT ) );
+
+    if( initial_size == 0 )
+    {
+        fprintf( stderr, "Bad count hint, defaulting to single allocation unit\n" );
+        initial_size = 1;
+    }
+
+    initial_size = initial_size * unit_size + sizeof( canary_t ) * 4;
+
+    mapped_address = new_segment( initial_size );
 
     if( mapped_address == NULL )
         return false;
 
     handle = get_handle_from_ptr( mapped_address );
-
     header->segment         = handle;
-    header->max_allocations = ( get_segment_size( handle ) - ( 4 * sizeof( canary_t ) ) )
-                            / ( header->object_size + sizeof( __ref ) );
+
+    // Available space - accounting for headers and canaries
+    available = ( get_segment_size( handle ) - ( 3 * sizeof( canary_t ) ) );
+    header->max_allocations = ( available / unit_size ) * CHAR_BIT * sizeof( fsm_t );
+
     fprintf( stdout, "Max allocations is %lu objects of size %lu\n", header->max_allocations, header->object_size );
     header->n_allocs        = 0;
     header->c_allocstart    = ( canary_t ) random();
-    header->c_allocend      = ( canary_t ) random();
     header->c_fsmstart      = ( canary_t ) random();
     header->c_fsmend        = ( canary_t ) random();
 
     // Layout setup - we'll calculate locally for readability, then convert to __ref
     c_allocstart = mapped_address;
     alloc        = ( void * ) _PTR_ADD_OFFSET( c_allocstart, sizeof( canary_t ) );
-    c_allocend   = ( void * ) _PTR_ADD_OFFSET( alloc, ( header->object_size * header->max_allocations ) );
-    c_fsmstart   = ( void * ) _PTR_ADD_OFFSET( c_allocend, sizeof( canary_t ) );
+    c_fsmstart   = ( void * ) _PTR_ADD_OFFSET( alloc, ( header->object_size * header->max_allocations ) );
     fsm          = ( void * ) _PTR_ADD_OFFSET( c_fsmstart, sizeof( canary_t ) );
     c_fsmend     = ( void * ) _PTR_ADD_OFFSET( fsm, ( sizeof( fsm_t ) * _get_fsm_length( header ) ) );
 
+    fprintf(
+        stdout,
+        "Layout:\n  Allocstart canary: %p\n  Alloc: %p\n  FSMstart Canary: %p\n  FSM: %p\n  FSMend Canary %p\n",
+        c_allocstart,
+        alloc,
+        c_fsmstart,
+        fsm,
+        c_fsmend
+    );
     // Write out canaries
     *( ( canary_t * ) c_allocstart ) = header->c_allocstart;
-    *( ( canary_t * ) c_allocend )   = header->c_allocend;
     *( ( canary_t * ) c_fsmstart )   = header->c_fsmstart;
     *( ( canary_t * ) c_fsmend )     = header->c_fsmend;
 
@@ -637,7 +696,6 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     header->allocs           = get_ref( alloc );
     header->fsm              = get_ref( fsm );
     header->loc_c_allocstart = get_ref( c_allocstart );
-    header->loc_c_allocend   = get_ref( c_allocend );
     header->loc_c_fsmstart   = get_ref( c_fsmstart );
     header->loc_c_fsmend     = get_ref( c_fsmend );
     // Indexes to the word and bit positions in the FSM. We ignore endian-ness
@@ -666,6 +724,18 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     return _check_canaries( header );
 }
 
+bool force_canary_check( context_t ctx )
+{
+    shalloc_header * header = NULL;
+
+    if( !check_context( ctx ) )
+        return false;
+
+    header = &(mapped_control->headers[ctx]);
+
+    return _check_canaries( header );
+}
+
 static __inline__ bool _fail_canary( void )
 {
 #ifdef _FORCE_SIGSEGV_ON_CANARY_FAILURE
@@ -690,18 +760,19 @@ static __inline__ bool _check_canaries( shalloc_header * header )
     if( unlikely( c_ptr == NULL ) )
         return false;
     if( unlikely( header->c_allocstart != *c_ptr ) )
-        return _fail_canary();
-
-    // Check end of slab
     #ifdef SLAB_DEBUG
-    fprintf( stdout, "Checking allocend canary\n" );
+    {
+        fprintf(
+            stderr,
+            "Failed allocstart canary check: Got %x, expected %x\n",
+            ( uint32_t ) *c_ptr,
+            ( uint32_t ) header->c_allocstart
+        );
     #endif // SLAB_DEBUG
-    c_ptr = get_ptr( header->loc_c_allocend );
-
-    if( unlikely( c_ptr == NULL ) )
-        return false;
-    if( unlikely( header->c_allocend != *c_ptr ) )
         return _fail_canary();
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     // Check start of FSM
     #ifdef SLAB_DEBUG
@@ -712,7 +783,20 @@ static __inline__ bool _check_canaries( shalloc_header * header )
     if( unlikely( c_ptr == NULL ) )
         return false;
     if( unlikely( header->c_fsmstart != *c_ptr ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "Failed fsmstart canary check: Got %x, expected %x at %p\n",
+            ( uint32_t ) *c_ptr,
+            ( uint32_t ) header->c_fsmstart,
+            c_ptr
+        );
+    #endif // SLAB_DEBUG
         return _fail_canary();
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     // Check end of FSM
     #ifdef SLAB_DEBUG
@@ -723,7 +807,19 @@ static __inline__ bool _check_canaries( shalloc_header * header )
     if( unlikely( c_ptr == NULL ) )
         return false;
     if( unlikely( header->c_fsmend != *c_ptr ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "Failed fsmend canary check: Got %x, expected %x\n",
+            ( uint32_t ) *c_ptr,
+            ( uint32_t ) header->c_fsmend
+        );
+    #endif // SLAB_DEBUG
         return _fail_canary();
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     return true;
 }
