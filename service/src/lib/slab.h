@@ -15,7 +15,7 @@
 
 /*
  * This library maps on top of the shm.c's segments to form a basic
- * slab allocator. 
+ * slab allocator.
  *
  * Segments will be laid out as:
  * +--------------------------------------------------------+ lower virtual addresses
@@ -95,11 +95,19 @@ typedef uint64_t context_t;
 typedef uint32_t canary_t;
 typedef uint32_t fsm_t;
  #define FSM_WIDTH 32
+ #define FSM_SHIFT_WIDTH 8
+ #define FSM_LAST_WORD_MASK 0x80
+typedef uint8_t fsm_cmp_t;
 #else
 typedef uint64_t canary_t;
 typedef uint64_t fsm_t;
  #define FSM_WIDTH 64
+ #define FSM_SHIFT_WIDTH 16
+ #define FSM_LAST_WORD_MASK 0x8000
+typedef uint16_t fsm_cmp_t;
 #endif // canary
+
+#define FSM_RATIO ( FSM_WIDTH / FSM_SHIFT_WIDTH )
 
 //typedef uint8_t fsm_t;
 //#define FSM_WIDTH 8
@@ -124,19 +132,20 @@ typedef struct shalloc_header {
     bool           locked;
     uint64_t       i_front_fsm_bit;
     uint64_t       i_rear_fsm_word;
-    canary_t       c_allocstart;
-    canary_t       c_fsmstart;
-    canary_t       c_fsmend;
     __ref          loc_c_allocstart;
+    canary_t       c_allocstart;
     __ref          loc_c_fsmstart;
+    canary_t       c_fsmstart;
     __ref          loc_c_fsmend;
-} shalloc_header;
+    canary_t       c_fsmend;
+    uint16_t       allocset[_SHALLOC_MAX_ALLOCS_PER_SLAB]; // Stores allocation sizes by index
+} __attribute__((packed)) shalloc_header;
 
 typedef struct shalloc_control {
     uint32_t       magic;
     shalloc_header headers[_SHALLOC_MAX_SLABS];
     header_iter    next_header; //next free header
-    bool           locked; 
+    bool           locked;
 } shalloc_control;
 
 extern bool slab_init( void );

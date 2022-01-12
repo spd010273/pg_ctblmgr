@@ -47,9 +47,9 @@ int main( void )
         return 1;
     }
 
+    fprintf( stdout, "Got ptr %p\n", ptr );
     for( i = 0; i < TEST_SIZE; i++ )
     {
-        ptr[i] = TEST_SIZE - i;
         fprintf(
             stdout,
             "%p [%lu] (%p): %lu (%x)\n",
@@ -59,8 +59,10 @@ int main( void )
             TEST_SIZE - i,
             ( uint32_t ) ( TEST_SIZE - i )
         );
+        ptr[i] = TEST_SIZE - i;
     }
 
+    fprintf( stdout, "Write check complete - running canary test\n" );
     // Canary check should pass as we've stayed within allocated bounds
     if( !force_canary_check( slab ) )
     {
@@ -68,7 +70,8 @@ int main( void )
         return 1;
     }
 
-    ptr[i+1]=42;
+    fprintf( stdout, "Making out-of-bounds write to %p (%lu)\n", &(ptr[i]), i );
+    ptr[i]=42;
 
     if( force_canary_check( slab ) )
     {

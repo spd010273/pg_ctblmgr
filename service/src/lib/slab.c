@@ -32,7 +32,7 @@ static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t );/
 static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
-static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t, bool );// __attribute__((always_inline));
+static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t );// __attribute__((always_inline));
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
@@ -305,6 +305,7 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
         }
 
         retref = _get_alloc_element_by_index( header, index );
+        fprintf( stdout, "Returning ref to alloc[%lu] of %lu ( len %lu )\n", index, header->max_allocations, header->max_allocations - index );
         header->n_allocs += num_objects;
     }
     else
@@ -451,11 +452,11 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     uint64_t bit_position = 0;
     uint64_t fsm_index    = 0;
 
-    bit_position = __find_fsm_spot( header, width, false );
+    bit_position = __find_fsm_spot( header, width );
 
     fprintf( stdout, "Got bit position %lu for initial FSM search (req: %lu)\n", bit_position, width );
-    if( unlikely( bit_position == ULONG_MAX ) )
-        bit_position = __find_fsm_spot( header, width, true );
+    //if( unlikely( bit_position == ULONG_MAX ) )
+    //    bit_position = __find_fsm_spot( header, width, true );
 
     if( unlikely( bit_position == ULONG_MAX ) )
     {
@@ -463,116 +464,115 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
         return 0;
     }
 
-    // Mark field as used
+    // Mark field as used TODO this can be done in bulk i'm just lazy
     for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
     {
         _set_fsm_element_by_index( header, fsm_index );
     }
-
+    // XXX: We need to track how large the allocation is for purposes of freeing later
     return bit_position;
 }
 
-/*
- * Note : This is currently broken for request lengths > 64 as that exceeds the bounds of the mask
- * We could solve this problem by using SIMD?
- * Perhaps treat the FSM as a matrix and perform our search on that?
- * Edit - this can most likely be done with SIMD / AVX / AVX2 intrinsics but a fallback is needed for
- * archs that do not support AVX
- */
-
-
-
-
-
 static __inline__ uint64_t __find_fsm_spot(
     shalloc_header * header,
-    uint64_t         requested_length,
-    bool             best_fit
+    uint64_t         requested_length
 )
 {
-    register fsm_t mask           = ( fsm_t ) ULONG_MAX;
-    register fsm_t i              = 0;
-    uint64_t       position       = 0;
-    uint8_t        shifted        = 0;
-    uint8_t *      current_byte   = NULL;
-    uint64_t       current_offset = 0;
-    uint8_t *      start          = NULL;
-    uint64_t       fsm_length     = _get_fsm_length( header );
-    uint64_t       bytes_shifted  = 0;
-    bool           need_lookahead = false;
-    uint32_t       lookahead_num  = 0; // number of bits we'll need to mask ahead of our first match
-    bool           finished       = false;
+    uint32_t           fsm_i            = 0;
+    uint32_t           fsm_length       = 0;
+    register uint64_t  bits_comp        = requested_length;
+    uint64_t           position         = 0;
+    register uint64_t  iter             = 0;
+    fsm_cmp_t          last_word_val    = 0;
+    register uint8_t   fsm_word_i       = 0;
+    fsm_t              fsm_word         = 0;
+    register fsm_cmp_t temp             = 0;
+    register fsm_cmp_t mask             = ( fsm_cmp_t ) ULONG_MAX;
+    fsm_cmp_t          mask_last        = ( fsm_cmp_t ) ULONG_MAX;
+    register bool      compare_active   = false;
+    register bool      last_word        = false;
 
-    fprintf( stdout, "Checking FSM( %p, %lu, %s )\n", header, requested_length, best_fit == true ? "T" : "F" );
-    fprintf( stdout, "fsm_length: %lu words. %lu bits\n", fsm_length, fsm_length * FSM_WIDTH );
-    if( unlikely( requested_length > ( sizeof( uint64_t ) * CHAR_BIT ) ) )
-        return ULONG_MAX;
-    if( unlikely( requested_length > ( fsm_length * FSM_WIDTH ) ) )
-    #ifdef SLAB_DEBUG
+    fsm_length = _get_fsm_length( header );
+    mask_last  = ~( mask_last << ( requested_length % CHAR_BIT ) );
+
+    if( requested_length <= FSM_SHIFT_WIDTH )
     {
-        fprintf( stderr, "Requested length exceeds FSM width\n" );
-    #endif // SLAB_DEBUG
-        return ULONG_MAX;
-    #ifdef SLAB_DEBUG
+        last_word      = true;
+        compare_active = true;
+        mask           = mask_last;
     }
-    #endif // SLAB_DEBUG
 
-    if( unlikely( best_fit ) )
-        current_offset = ( fsm_length * FSM_WIDTH ) - FSM_WIDTH;
-    else
-        current_offset = header->i_rear_fsm_word * sizeof( fsm_t );
+    for( fsm_i = 0; fsm_i < fsm_length; fsm_i++ )
+    { // Iterate over words of sizeof( fsm_t ) bytes
+        fsm_word = *( ( fsm_t * ) _PTR_ADD_OFFSET(
+            get_ptr( header->fsm ),
+            ( ( fsm_length - 1 - fsm_i ) * sizeof( fsm_t ) )
+        )); // Deref in outer loop
 
-    #ifdef SLAB_DEBUG
-    fprintf( stdout, "Using (%s), beginning offset is %lu\n", best_fit ? "Best Fit" : "Indexed", current_offset );
-    #endif // SLAB_DEUBG
-    start = _PTR_ADD_OFFSET(
-        get_ptr( header->fsm ),
-        current_offset
-    );
+        for( fsm_word_i = 0; fsm_word_i < FSM_RATIO; fsm_word_i++ )
+        { // Iterate over words within the given fsm_t word, size FSM_SHIFT_WIDTH bits
+            temp = ( fsm_cmp_t ) ( fsm_word >> ( ( fsm_word_i ) * FSM_SHIFT_WIDTH ) );
 
-    if( unlikely( start == NULL ) )
-    #ifdef SLAB_DEBUG
-    {
-        fprintf( stderr, "NULL start position for FSM search\n" );
-    #endif // SLAB_DEBUg
-        return ULONG_MAX;
-    #ifdef SLAB_DEBUG
-    }
-    #endif // SLAB_DEBUG
-    i    = ( fsm_t ) *start;
-    
-    mask = ~( mask << requested_length );
-
-    while( ( mask & ~i ) != mask )
-    {
-        position++;
-        shifted++;
-        i = i >> 1;
-
-        if( unlikely( shifted >= 8 && current_offset > 0 ) )
-        {
-            current_offset--;
-            bytes_shifted++;
-            shifted      = 0;
-            current_byte = _PTR_ADD_OFFSET( start, current_offset );
-            if( unlikely( current_byte == NULL ) )
+            if( ( ~(temp) & mask ) == mask )
             {
-                fprintf( stderr, "NULL current_byte\n" );
-                return ULONG_MAX;
-            }
-            i |= ( ( ( fsm_t ) *current_byte ) << ( FSM_WIDTH - 8 ) );
-        }
+                if( last_word )
+                { // Prep for return & attempt to compactify past word boundaries
+                    // Early exit when shifting wont help
+                    if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
+                        return header->max_allocations - requested_length + position;
 
-        if( unlikely( current_offset == 0 && i == 0 ) )
-        {
-            fprintf( stderr, "Overrun FSM search bounds\n" );
-            return ULONG_MAX;
+                    mask = ( fsm_cmp_t ) FSM_LAST_WORD_MASK;
+                    temp = last_word_val;
+
+                    while( ( ~temp & mask ) != 0 )
+                    {
+                        if( temp == 0 )
+                            break;
+                        temp = temp << 1;
+                        position--;
+                    }
+
+                    return header->max_allocations - requested_length + position;
+                }
+
+                bits_comp -= FSM_SHIFT_WIDTH;
+                last_word  = ( bits_comp < FSM_SHIFT_WIDTH );
+
+                if( !compare_active )
+                    compare_active = true;
+
+                if( last_word )
+                    mask = mask_last;
+            }
+            else
+            {   // No match
+                if( compare_active )
+                { // reset counters and markers
+                    bits_comp = requested_length;
+                    position  = iter;
+                }
+
+                compare_active = false;
+
+                if( last_word )
+                {
+                    last_word = false;
+                    if( requested_length > FSM_SHIFT_WIDTH )
+                        mask = ( uint16_t ) ULONG_MAX;
+                }
+            }
+
+            iter += FSM_SHIFT_WIDTH;
+
+            if( !compare_active )
+            {
+                position     += FSM_SHIFT_WIDTH;
+                last_word_val = temp;
+            }
         }
     }
 
-    header->i_rear_fsm_word -= bytes_shifted / sizeof( fsm_t ); // update index
-    fprintf( stdout, "Base pos: %lu, return: %lu\n", position, position + requested_length - 1 );
-    return position + requested_length - 1;
+    return ULONG_MAX;
 }
 
 // Gets the number of fsm_t's we'll need to store the bitmap of allocations
@@ -633,7 +633,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     unit_size = ( sizeof( fsm_t ) * CHAR_BIT * header->object_size ) + sizeof( fsm_t );
 
     count_hint = header->count_hint;
-
+    fprintf( stdout, "Count hint: %lu\n", ( uint64_t ) header->count_hint );
     if( count_hint == 0 )
         count_hint = SLAB_DEFAULT_ALLOCATION;
 
@@ -701,7 +701,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     // Indexes to the word and bit positions in the FSM. We ignore endian-ness
     // and treat it as an array with 0'th position being leftmost and nth being
     // rightmost
-    header->i_rear_fsm_word  = _get_fsm_length( header );
+    header->i_rear_fsm_word  = _get_fsm_length( header ) - 1;
     header->i_front_fsm_bit  = 0;
 
     if(
