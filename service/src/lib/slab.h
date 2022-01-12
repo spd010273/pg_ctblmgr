@@ -65,6 +65,7 @@
 
 #define _SHALLOC_MAX_SLABS 16
 #define _SHALLOC_MAX_IDENT 64
+#define _SHALLOC_EXTRA_SANE 1 // Enable extra sanity checks
 
 #define _SHALLOC_MAX_ALLOCS_PER_SLAB 2048
 #define _SHALLOC_CONTROL_MAGIC 0xF0042069
@@ -155,5 +156,10 @@ extern __ref scalloc( context_t, size_t, uint64_t );
 extern __ref smalloc( context_t, size_t );
 extern __ref srealloc( context_t, __ref, size_t );
 extern void sfree( context_t, __ref );
+extern void * move_to_local( __ref );
+extern __ref move_to_shared( void *, size_t );
+
+// Debugging / testing functions
 extern bool force_canary_check( context_t );
+extern shalloc_header * get_header_by_context( context_t );
 #endif // _SLAB_H

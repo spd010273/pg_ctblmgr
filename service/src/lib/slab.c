@@ -26,13 +26,14 @@ static __inline__ bool check_context( context_t ) __attribute__((always_inline))
 static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always_inline));
 static __inline__ __ref _get_alloc_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
 
-static __inline__ __ref _shmalloc( context_t ctx, size_t size );
+static __inline__ __ref _shmalloc( context_t, size_t, bool );
 static __inline__ uint64_t _get_fsm_length( shalloc_header * );// __attribute__((always_inline));
 static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ shalloc_header * _get_header_by_context( context_t );// __attribute__((always_inline));
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
@@ -183,29 +184,26 @@ context_t new_slab( const char * tag, size_t object_size )
 __ref scalloc( context_t ctx, size_t size, uint64_t count )
 {
     shalloc_header * header = NULL;
-    __ref            retref = {0};
 
-    if( !check_context( ctx ) )
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    header = &(mapped_control->headers[ctx]);
-
-    return retref;
+    return _shmalloc( ctx, size, true );
 }
 
 __ref smalloc( context_t ctx, size_t size )
 {
     shalloc_header * header = NULL;
-    __ref            retref = {0};
 
-    retref = get_null_ref();
+    header = _get_header_by_context( ctx );
 
-    if( !check_context( ctx ) )
+    if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    retref = _shmalloc( ctx, size );
 
-    return retref;
+    return _shmalloc( ctx, size, false );
 }
 
 __ref srealloc( context_t ctx, __ref oldref, size_t size )
@@ -213,32 +211,122 @@ __ref srealloc( context_t ctx, __ref oldref, size_t size )
     shalloc_header * header = NULL;
     __ref            retref = {0};
 
-    if( !check_context( ctx ) )
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    header = &(mapped_control->headers[ctx]);
-
+    retref = get_null_ref();
     return retref;
 }
 
 void sfree( context_t ctx, __ref pointer )
 {
     shalloc_header * header = NULL;
+    offset_t         offset = 0;
+    uint64_t         index  = 0;
+    uint64_t         size   = 0;
+    uint64_t         i      = 0;
 
-    if( !check_context( ctx ) )
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "sfree: Context check fauled\n" );
+    #endif // SLAB_DEBUG
         return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
-    header = &(mapped_control->headers[ctx]);
+    if( unlikely( ref_is_null( pointer ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "sfree: Cannot free. NULL __ref given.\n" );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
+    offset = ref_get_offset( pointer );
+
+    if( unlikely( ( offset % header->object_size != 0 ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "Unaligned free of offset %lu with object size %lu\n",
+            ( uint64_t ) offset,
+            ( uint64_t ) header->object_size
+        );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    index = ( offset / header->object_size ) - 1;
+    fprintf( stdout, "Got index %lu\n", index );
+
+    if( !_get_fsm_element_by_index( header, index ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "sfree: Provided reference is not allocated\n"
+        );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    size = header->allocset[index];
+
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Freeing element of size %lu\n", size );
+    #endif // SLAB_DEBUG
+
+    if( unlikely( header->allocset[index] == 0 ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "sfree: Cannot free 0-sized element\n" );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "sfree: Unable to obtain lock on header\n" );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    for( i = index; i < index + size; i++ )
+    {
+        _set_fsm_element_by_index( header, i );
+    }
+
+    header->allocset[index] = 0;
+    header->n_allocs       -= size;
+    __C_MUTEX( &(header->locked) );
     return;
 }
 
-static __inline__ __ref _shmalloc( context_t ctx, size_t size )
+static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
 {
     shalloc_header * header      = NULL;
     __ref            retref      = {0};
     uint64_t         num_objects = 0;
     uint64_t         index       = 0;
+    void *           ptr         = NULL;
 
     // this is unsafe, but the callers check our context prior
     // to this dereference happening
@@ -305,7 +393,13 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
         }
 
         retref = _get_alloc_element_by_index( header, index );
-        fprintf( stdout, "Returning ref to alloc[%lu] of %lu ( len %lu )\n", index, header->max_allocations, header->max_allocations - index );
+        fprintf(
+            stdout,
+            "Returning ref to alloc[%lu] of %lu ( len %lu )\n",
+            ( uint64_t ) index,
+            ( uint64_t ) header->max_allocations,
+            ( uint64_t ) header->max_allocations - index
+        );
         header->n_allocs += num_objects;
     }
     else
@@ -340,6 +434,28 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size )
         }
     }
 
+    if( zero_fill == true )
+    {
+        ptr = get_ptr( retref );
+        if( ptr == NULL )
+        #ifdef SLAB_DEBUG
+        {
+            fprintf(
+                stderr,
+                "_shmalloc: Dereference of recently created __ref is NULL\n"
+            );
+        #endif // SLAB_DEBUG
+            return get_null_ref();
+        #ifdef SLAB_DEBUG
+        }
+        #endif // SLAB_DEBUG
+        memset(
+            ptr,
+            ( unsigned char ) _ZERO_FILL_BYTE,
+            ( header->object_size * num_objects )
+        );
+    }
+     
     __C_MUTEX( &(header->locked) );
 
     return retref;
@@ -465,11 +581,15 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     }
 
     // Mark field as used TODO this can be done in bulk i'm just lazy
+    fprintf( stdout, "ISSUING ALLOCATION FOR INDEX %lu\n", bit_position );
     for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
     {
         _set_fsm_element_by_index( header, fsm_index );
     }
     // XXX: We need to track how large the allocation is for purposes of freeing later
+
+    header->allocset[bit_position] = width;
+
     return bit_position;
 }
 
@@ -659,7 +779,12 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     available = ( get_segment_size( handle ) - ( 3 * sizeof( canary_t ) ) );
     header->max_allocations = ( available / unit_size ) * CHAR_BIT * sizeof( fsm_t );
 
-    fprintf( stdout, "Max allocations is %lu objects of size %lu\n", header->max_allocations, header->object_size );
+    fprintf(
+        stdout,
+        "Max allocations is %lu objects of size %lu\n",
+        ( uint64_t ) header->max_allocations,
+        ( uint64_t ) header->object_size
+    );
     header->n_allocs        = 0;
     header->c_allocstart    = ( canary_t ) random();
     header->c_fsmstart      = ( canary_t ) random();
@@ -734,6 +859,19 @@ bool force_canary_check( context_t ctx )
     header = &(mapped_control->headers[ctx]);
 
     return _check_canaries( header );
+}
+
+shalloc_header * get_header_by_context( context_t ctx )
+{
+    return _get_header_by_context( ctx );
+}
+
+static __inline__ shalloc_header * _get_header_by_context( context_t ctx )
+{
+    if( unlikely( !check_context( ctx ) ) )
+        return NULL;
+
+    return &(mapped_control->headers[ctx]);
 }
 
 static __inline__ bool _fail_canary( void )
@@ -986,4 +1124,16 @@ static __inline__ bool check_context( context_t ctx )
     #endif // SLAB_DEBUG
 
     return true;
+}
+
+__ref move_to_shared( void * pointer, size_t size )
+{
+    // Stub
+    return get_null_ref();
+}
+
+void * move_to_local( __ref ref )
+{
+    // Stub
+    return NULL;
 }

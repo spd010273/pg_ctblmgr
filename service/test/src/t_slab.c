@@ -15,6 +15,7 @@ int main( void )
     __ref      ref  = get_null_ref();
     uint64_t * ptr  = NULL;
     uint64_t   i    = 0;
+    shalloc_header * header = NULL;
 
     if( !slab_init() )
     {
@@ -50,6 +51,7 @@ int main( void )
     fprintf( stdout, "Got ptr %p\n", ptr );
     for( i = 0; i < TEST_SIZE; i++ )
     {
+/*
         fprintf(
             stdout,
             "%p [%lu] (%p): %lu (%x)\n",
@@ -59,6 +61,7 @@ int main( void )
             TEST_SIZE - i,
             ( uint32_t ) ( TEST_SIZE - i )
         );
+*/
         ptr[i] = TEST_SIZE - i;
     }
 
@@ -70,6 +73,8 @@ int main( void )
         return 1;
     }
 
+    // Check setting flag - don't actually want to crash the test ;)
+#ifndef _FORCE_SIGSEGV_ON_CANARY_FAILURE
     fprintf( stdout, "Making out-of-bounds write to %p (%lu)\n", &(ptr[i]), i );
     ptr[i]=42;
 
@@ -78,6 +83,16 @@ int main( void )
         fprintf( stderr, "Canary check passed after unbounded write\n" );
         return 1;
     }
+#else
+    fprintf(
+        stdout,
+        "WARNING: Compiled with _FORCE_SIGSEGV_ON_CANARY_FAILURE."
+        " Cannot test out-of-bounds write\n"
+    );
+#endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
 
+    fprintf( stdout, "Freeing allocation\n" );
+    sfree( slab, ref );
+    header = get_header_by_context( slab );
     return 0;
 }
