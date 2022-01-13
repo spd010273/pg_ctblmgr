@@ -118,15 +118,25 @@ static __inline__ offset_t _ref_get_offset( __ref ref )
 
 static __inline__ shm_handle _ref_get_segment( __ref ref )
 {
-    #ifdef __SHM_NO_STRUCT
-    /*
-     * Shift out the right-side padding and offset, masking the segment
-     * and trimming with a final cast
-     */
-    return ( shm_handle ) ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) & SHM_HANDLE_MASK;
-    #else
+    #ifdef SHM_EXTRA_SANE
+    register shm_handle seg = SEGMENT_HANDLE_INVALID;
+    #endif // SHM_EXTRA_SANE
+
+    #if ( defined( __SHM_NO_STRUCT ) && defined( SHM_EXTRA_SANE ) )
+    seg = ( shm_handle ) ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) & SHM_HANDLE_MASK );
+    if( unlikely( seg >= SHM_MAX_SEGMENTS ) )
+        return SEGMENT_HANDLE_INVALID;
+    return ( __segment_lut[seg].handle );
+    #elif (  defined( __SHM_NO_STRUCT ) && !defined( SHM_EXTRA_SANE ) )
+    return ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) & SHM_HANDLE_MASK;
+    #elif ( !defined( __SHM_NO_STRUCT ) && defined( SHM_EXTRA_SANE ) )
+    seg = ( shm_handle ) ( ref._segment );
+    if( unlikely( seg >= SHM_MAX_SEGMENTS ) )
+        return SEGMENT_HANDLE_INVALID;
+    return __segment_lut[seg].handle;
+    #elif ( !defined( __SHM_NO_STRUCT ) && !defined( SHM_EXTRA_SANE ) )
     return ( shm_handle ) ( ref._segment );
-    #endif // __SHM_NO_STRUCT
+    #endif // SHM_EXTRA_SANE && __SHM_NO_STRUCT
 }
 
 static __inline__ __ref _ref_set_offset( __ref ref, offset_t offset )
@@ -698,7 +708,6 @@ void * new_segment( size_t size )
         header->magic       = SEGMENT_HEADER_MAGIC;
         header->owner       = p_pid;
         header->locked      = false;
-        header->entry_count = 0;
         header->ref_count   = 1;
         header->control     = control_handle;
 #ifdef SHM_DEBUG
@@ -2248,14 +2257,12 @@ static void __dump_seg_header( seg_header * header )
           "MAGIC: %x\n  " \
           "OWNER: %d\n  " \
           "LOCKED: %s\n  " \
-          "ENTRY_COUNT: %u\n  " \
           "REF_COUNT: %u\n  " \
           "CONTROL: %lu\n  " \
           "DATA: %p",
         header->magic,
         header->owner,
         header->locked ? "TRUE" : "FALSE",
-        header->entry_count,
         header->ref_count,
         ( uint64_t ) header->control,
         header->data

@@ -60,12 +60,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include "barrier.h"
 #include "shm.h"
 
 #define _SHALLOC_MAX_SLABS 16
 #define _SHALLOC_MAX_IDENT 64
 #define _SHALLOC_EXTRA_SANE 1 // Enable extra sanity checks
+#define _SHALLOC_REALLOC_MULTIPLE 2 // IFF a slab realloc occurs-  how aggressively do we overallocate?
 
 #define _SHALLOC_MAX_ALLOCS_PER_SLAB 2048
 #define _SHALLOC_CONTROL_MAGIC 0xF0042069
@@ -139,7 +141,7 @@ typedef struct shalloc_header {
     canary_t       c_fsmstart;
     __ref          loc_c_fsmend;
     canary_t       c_fsmend;
-    uint16_t       allocset[_SHALLOC_MAX_ALLOCS_PER_SLAB]; // Stores allocation sizes by index
+    uint16_t       allocset[_SHALLOC_MAX_ALLOCS_PER_SLAB]; // Stores allocation sizes by index - TODO: Maybe make this variable length in its own segment??
 } __attribute__((packed)) shalloc_header;
 
 typedef struct shalloc_control {
@@ -156,8 +158,8 @@ extern __ref scalloc( context_t, size_t, uint64_t );
 extern __ref smalloc( context_t, size_t );
 extern __ref srealloc( context_t, __ref, size_t );
 extern void sfree( context_t, __ref );
-extern void * move_to_local( __ref );
-extern __ref move_to_shared( void *, size_t );
+extern void * move_to_local( context_t, __ref * ); // Both make changes to the 2nd argument in-place
+extern __ref move_to_shared( context_t, void **, size_t );
 
 // Debugging / testing functions
 extern bool force_canary_check( context_t );

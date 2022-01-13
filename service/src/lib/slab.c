@@ -34,6 +34,10 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );/
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ shalloc_header * _get_header_by_context( context_t );// __attribute__((always_inline));
+static __inline__ shalloc_header * __shrealloc_internal( shalloc_header *, uint64_t );
+static __inline__ bool _ref_get_index_and_size( shalloc_header *, __ref, uint64_t *, size_t * );// __attribute__((always_inline));
+static __inline__ void * _move_to_local( shalloc_header *, __ref *, bool );// __attribute__((always_inline));
+static __inline__ __ref _move_to_shared( shalloc_header *, void **, size_t, bool );// __attribute__((always_inline));
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
@@ -220,10 +224,122 @@ __ref srealloc( context_t ctx, __ref oldref, size_t size )
     return retref;
 }
 
+
+// Not the same as the realloc we present to end users - this is used in the
+// case where we need to resize the underlying segment - new_size is in num_objects
+static __inline__ shalloc_header * __shrealloc_internal( shalloc_header * header, uint64_t new_size )
+{
+    shalloc_header * new = NULL;
+    void * temp          = NULL;
+    if( unlikely( header == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "___shrealloc_internal: Invalid header\n" );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    if( unlikely( !header->locked ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "__shrealloc_internal: Expected locked header as input\n" );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    return NULL;
+}
+
+// Returns the allocation index and size of a given __ref,
+// assuming this ref points to the start of the allocation
+static __inline__ bool _ref_get_index_and_size(
+    shalloc_header * header,
+    __ref            ref,
+    uint64_t *       index,
+    size_t *         size
+)
+{
+    offset_t offset = 0;
+    if( unlikely( ( index == NULL ) || ( size == NULL ) || ( header == NULL ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "ref_get_index_and_size: NULL parameters provided I %p S %p H %p\n",
+            index,
+            size,
+            header
+        );
+    #endif // SLAB_DEBUG
+        return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    if( unlikely( ref_is_null( ref ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "ref_get_index_and_size: __ref is NULL\n"
+        );
+    #endif // SLAB_DEBUG
+        return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+    
+    offset = ref_get_offset( ref );
+    
+    #ifdef _SHALLOC_EXTRA_SANE
+    if(
+        unlikely(
+        !_PTR_BOUND_CHECK(
+            get_ptr( ref ),
+            get_ptr( header->allocs ),
+            header->max_allocations * header->object_size
+        ))
+      )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "sfree: Ref fails cursory bounds check and doesn't lie in the"
+            " allocatable space of the shared memory segment\n"
+        );
+    #endif // SLAB_DEBUG
+        return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+    #endif // _SHALLOC_EXTRA_SANE
+
+    if( unlikely( offset % header->object_size != 0 ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "ref_get_index_and_size: __ref offset is not aligned to object_size in header\n"
+        );
+    #endif // SLAB_DEBUG
+        return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    *index = ( offset / header->object_size ) - 1;
+    *size  = ( size_t ) header->allocset[*index];
+
+    return true;
+}
+
 void sfree( context_t ctx, __ref pointer )
 {
     shalloc_header * header = NULL;
-    offset_t         offset = 0;
     uint64_t         index  = 0;
     uint64_t         size   = 0;
     uint64_t         i      = 0;
@@ -250,25 +366,15 @@ void sfree( context_t ctx, __ref pointer )
     }
     #endif // SLAB_DEBUG
 
-    offset = ref_get_offset( pointer );
-
-    if( unlikely( ( offset % header->object_size != 0 ) ) )
+    if( unlikely( !_ref_get_index_and_size( header, pointer, &index, &size ) ) )
     #ifdef SLAB_DEBUG
     {
-        fprintf(
-            stderr,
-            "Unaligned free of offset %lu with object size %lu\n",
-            ( uint64_t ) offset,
-            ( uint64_t ) header->object_size
-        );
+        fprintf( stderr, "sfree: Failed to find allocation info for __ref\n" );
     #endif // SLAB_DEBUG
         return;
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
-
-    index = ( offset / header->object_size ) - 1;
-    fprintf( stdout, "Got index %lu\n", index );
 
     if( !_get_fsm_element_by_index( header, index ) )
     #ifdef SLAB_DEBUG
@@ -362,6 +468,14 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
         }
     }
 
+    // Layout & usage of free list:
+    // [ front - single allocs ..... contiguous allocs - rear ]
+    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+    {
+        fprintf( stderr, "Failed to acquire segment lock\n" );
+        return get_null_ref();
+    }
+
     if( num_objects >= ( header->max_allocations - header->n_allocs ) )
     {
         // TODO: Reallocate entire segment
@@ -371,14 +485,10 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
         // to the end of the new, extended page. This will preserve existing
         // __refs
         fprintf( stderr, "NEED REALLOC\n" );
-    }
+        header = __shrealloc_internal( header, num_objects );
 
-    // Layout & usage of free list:
-    // [ front - single allocs ..... contiguous allocs - rear ]
-    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
-    {
-        fprintf( stderr, "Failed to acquire segment lock\n" );
-        return get_null_ref();
+        if( unlikely( header == NULL ) )
+            return get_null_ref();
     }
 
     if( num_objects > 1 )
@@ -388,8 +498,15 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
 
         if( unlikely( errno == ENOSPC ) ) // Need to reallocate
         {
+            errno = 0;
             fprintf( stderr, "NEED REALLOC 2\n" );
-            return get_null_ref();
+            header = __shrealloc_internal( header, num_objects );
+            if( unlikely( header == NULL ) )
+                return get_null_ref();
+            index = _get_fsm_slot_by_width( header, num_objects );
+            
+            if( errno == ENOSPC )
+                return get_null_ref();
         }
 
         retref = _get_alloc_element_by_index( header, index );
@@ -1126,14 +1243,159 @@ static __inline__ bool check_context( context_t ctx )
     return true;
 }
 
-__ref move_to_shared( void * pointer, size_t size )
+__ref move_to_shared( context_t ctx, void ** pointer, size_t size )
 {
-    // Stub
-    return get_null_ref();
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    return _move_to_shared( header, pointer, size, true );
 }
 
-void * move_to_local( __ref ref )
+static __inline__ __ref _move_to_shared(
+    shalloc_header * header,
+    void **          pointer,
+    size_t           size,
+    bool             do_free
+)
+{ 
+    void *           target = NULL;
+    __ref            retref = {0};
+
+    retref = get_null_ref();
+    // We're trusting the user to have set a correct object size - we can only do cursory checks
+    if( unlikely( pointer == NULL || *pointer == NULL ) )
+        return retref;
+    
+    if( unlikely( header == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "move_to_shared: Invalid context.\n" );
+    #endif // SLAB_DEBUG
+        return retref;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    if( unlikely( ( size % header->object_size ) != 0 ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "move_to_shared: requested size %zu is not a multiple of object size %lu\n",
+            size,
+            ( uint64_t ) header->object_size
+        );
+    #endif // SLAB_DEBUG
+        return retref;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    retref = _shmalloc( header->self, size, false );
+    target = get_ptr( retref );
+
+    if( unlikely( ref_is_null( retref ) || target == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "move_to_shared: Failed to allocate shared memory\n"
+        );
+    #endif // SLAB_DEBUG
+        return retref;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    memcpy(
+        target,
+        *pointer,
+        size
+    );
+
+    if( do_free )
+    {
+        free( *pointer );
+        *pointer = NULL;
+    }
+
+    return retref;
+}
+
+void * move_to_local( context_t ctx, __ref * ref )
 {
-    // Stub
-    return NULL;
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+    return _move_to_local( header, ref, true );
+}
+
+static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, bool do_free )
+{
+    void *           target = NULL;
+    void *           source = NULL;
+    size_t           size   = 0;
+    uint64_t         index  = 0;
+
+    if( unlikely( header == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "move_to_local: Invalid context.\n" );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+    
+    if( unlikely( !_ref_get_index_and_size( header, *ref, &index, &size ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "move_to_local: Failed to get allocation info for __ref\n"
+        );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+    
+    source = ( void * ) get_ptr( *ref );
+    
+    if( unlikely( source == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "move_to_local: NULL reference\n" );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    target = malloc( header->object_size * size );
+
+    if( unlikely( target == NULL ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "move_to_local: Insufficient memory available\n" );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    memcpy(
+        target,
+        source,
+        header->object_size * size
+    );
+    
+    if( do_free )
+    {
+        sfree( header->self, *ref ); 
+        *ref = get_null_ref();
+    }
+
+    return target;
 }

@@ -101,6 +101,8 @@
  *     applications, this can be 2MB, and up to 1GB iff PDPE1GB is supported.
  *     I hope to include PSE support as well
  */
+// TODO: control_handle[segment] seems not being set appropriately - can be located by changing how _ref_get_segment words in extra sane mode
+#define SHM_EXTRA_SANE 1
 #define SHM_ENABLE_RUNTIME_SANITY_CHECK 1
 #define SHM_ENABLE_STRUCT_PACKING 1
 #define SHM_MAX_SEGMENTS 255
@@ -380,7 +382,6 @@ typedef struct seg_header {
     uint32_t   magic;           // Should be SEGMENT_HEADER_MAGIC at all times
     pid_t      owner;           // Parent process owning this segment
     bool       locked;          // Shared between allocator and shm.c
-    uint32_t   entry_count;     // FOR ALLOCATOR USE
     uint32_t   ref_count;       // Number of processes with this segment mapped
     shm_handle control;         // ID of control segment
     char *     data;            // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
