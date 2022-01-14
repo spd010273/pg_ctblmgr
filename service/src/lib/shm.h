@@ -79,6 +79,10 @@
  *   SHM_ENABLE_RUNTIME_SANITY_CHECK: Verifies stack and heap growth directions
  *     at initialization. Some assumptions / conventions are used but we will
  *     not know if they are correct until runtime.
+ *   SHM_EXTRA_SANE: Mostly for finding bugs - uses alternative methods to return
+ *     segment handles or different code paths to perform checks. This ensures
+ *     state is correct at runtime at the cost of extra instructions within
+ *     inlined routines.
  *   SHM_ENABLE_STRUCT_PACKING: Allows struct packing, which is used if the
  *     architecture word size is sufficient to justify struct packing for
  *     things like offset-based references and headers. This can save a decent
@@ -328,7 +332,8 @@ typedef enum {
 //  to see if it's valid
 //  Also need a free / unmap all
 /* Interface functions / flags */
-extern void shm_init( void );
+extern void shm_init( void ); // Initialize control header
+extern void shm_init_extra( size_t ); // Initialize control header with extra space for data
 extern bool shm_is_init( void );
 extern void shm_child_init( void );
 extern void * map_segment( shm_handle );
@@ -376,15 +381,16 @@ typedef struct ctrl_header {
     handle_iter max_entries;     // SHM_MAX_SEGMENTS
     shm_handle  segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
+    uint8_t *   data;
 } ctrl_header;
 
 typedef struct seg_header {
-    uint32_t   magic;           // Should be SEGMENT_HEADER_MAGIC at all times
-    pid_t      owner;           // Parent process owning this segment
-    bool       locked;          // Shared between allocator and shm.c
-    uint32_t   ref_count;       // Number of processes with this segment mapped
-    shm_handle control;         // ID of control segment
-    char *     data;            // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
+    uint32_t   magic;     // Should be SEGMENT_HEADER_MAGIC at all times
+    pid_t      owner;     // Parent process owning this segment
+    bool       locked;    // Shared between allocator and shm.c
+    uint32_t   ref_count; // Number of processes with this segment mapped
+    shm_handle control;   // ID of control segment
+    uint8_t *  data;      // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
 } seg_header;
 
 /*
@@ -459,6 +465,8 @@ typedef struct __ref {
 extern __inline__ void * get_ptr( __ref ); // Get local pointer to mapping
 extern __inline__ __ref get_ref( void * ); // Get absolute ref
 extern ctrl_header * get_control_header( void );
+extern shm_handle get_control_segment( void );
+extern uint8_t * get_control_data_section( void );
 extern __inline__ bool ref_is_null( __ref ); // check if ref is null
 extern __inline__ __ref get_null_ref( void ); // Get a reference null
 

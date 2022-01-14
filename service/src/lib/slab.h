@@ -68,7 +68,7 @@
 #define _SHALLOC_MAX_IDENT 64
 #define _SHALLOC_EXTRA_SANE 1 // Enable extra sanity checks
 #define _SHALLOC_REALLOC_MULTIPLE 2 // IFF a slab realloc occurs-  how aggressively do we overallocate?
-
+#undef  _SHALLOC_CONTROL_IN_OWN_SEGMENT
 #define _SHALLOC_MAX_ALLOCS_PER_SLAB 2048
 #define _SHALLOC_CONTROL_MAGIC 0xF0042069
 #define _SHALLOC_HEADER_MAGIC 0xDEED144A
@@ -153,6 +153,7 @@ typedef struct shalloc_control {
 
 extern bool slab_init( void );
 extern context_t new_slab( const char *, size_t );
+extern context_t new_slab_with_hint( const char *, size_t, uint64_t );
 extern void slab_set_count_hint( context_t, size_t );
 extern __ref scalloc( context_t, size_t, uint64_t );
 extern __ref smalloc( context_t, size_t );

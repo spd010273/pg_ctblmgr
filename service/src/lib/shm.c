@@ -6,8 +6,10 @@
  *     - System V (shm.h / ipc.h)
  *     - POSIX (mman.h)
  *     - mmap
- *     The goal of this library is to present a simplified (or as close to)
- *     malloc/calloc/free interface for shared memory allocation
+ *     The goal of this library is to present a simplified interface for
+ *     creating, mapping, unmaping, and destroying page-sized memory
+ *     segments for use by a memory allocator. It also provides a mechanism
+ *     for offset-based pointer arithmatic 
  *
  * Copyright (c) 2021, MerchLogix Inc.
  *
@@ -32,6 +34,7 @@ static bool _shm_sysv( shm_op, shm_handle, size_t, void **, void **, size_t * );
 static void * sysv_private = NULL;
 #endif // SHM_USE_SYSV
 
+static void _shm_init( size_t ); // wrapped by shm_init & shm_init_extra
 static bool _shm_wrapper( shm_op, shm_handle, size_t, void **, size_t * );
 
 #if defined( SHM_USE_POSIX ) || defined( SHM_USE_MMAP )
@@ -308,6 +311,34 @@ __inline__ __ref get_ref( void * ptr )
 
 void shm_init( void )
 {
+    return _shm_init( 0 );
+}
+
+void shm_init_extra( size_t extra )
+{
+    return _shm_init( extra ); 
+}
+
+shm_handle get_control_segment( void )
+{
+    shm_handle segment = CONTROL_HANDLE_INVALID;
+    
+    if( unlikely( !shm_inited ) )
+        return segment;
+    segment = control_handle;
+    return segment;
+}
+
+uint8_t * get_control_data_section( void )
+{
+    if( unlikely( !shm_inited ) )
+        return NULL;
+
+    return _PTR_ADD_OFFSET( control_header, offsetof( ctrl_header, data ) );
+}
+
+static void _shm_init( size_t extra )
+{
     void *      mapped_address   = NULL;
     size_t      mapped_size      = 0;
     size_t      ctrl_header_size = 0;
@@ -412,11 +443,14 @@ void shm_init( void )
     _shm_log(
         LL_SHM_DEBUG,
         "Attempting to map control segment, header size %zu,"
-        " rounded-to-page-size %zu",
+        " extra space requested: %zu, rounded-to-page-size %zu",
         _get_ctrl_header_size( ( uint32_t ) SHM_MAX_SEGMENTS ),
-        ctrl_header_size
+        extra,
+        ctrl_header_size + extra
     );
     #endif // SHM_DEBUG
+
+    ctrl_header_size += extra;
 
     while( mapped_address == NULL && mapped_size == 0 )
     {

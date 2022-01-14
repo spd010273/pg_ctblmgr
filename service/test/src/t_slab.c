@@ -23,8 +23,8 @@ int main( void )
         return 1;
     }
 
-    slab_set_count_hint( slab, TEST_SIZE );
     slab = new_slab( "TEST", sizeof( uint64_t ) );
+    slab_set_count_hint( slab, TEST_SIZE );
 
     if( slab == INVALID_CONTEXT )
     {

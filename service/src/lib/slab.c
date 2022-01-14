@@ -1,14 +1,21 @@
-/*------------------------------------------------------------------------
+/*--------------------------------------------------------------------------
  *
  * slab.c
  *     Shared Memory slab allocator
+ *
+ * This library provides a mechanism for slab allocation within the segments
+ * mapped in by shm.c. It is designed to handle both large and small objects
+ * but strongly favors usages where the total number of allocations is either
+ * known upfront or otherwise constrained. This library uses the offset-based
+ * references (provided by shm.c) within its own structures and user-facing
+ * subroutines.
  *
  * Copyright (c) 2021, MerchLogix Inc.
  *
  * IDENTIFICATION
  *        service/src/lib/slab.c
  *
- *------------------------------------------------------------------------
+ *--------------------------------------------------------------------------
  */
 #include "slab.h"
 
@@ -25,6 +32,7 @@ static __inline__ bool check_shalloc_header( header_iter ) __attribute__((always
 static __inline__ bool check_context( context_t ) __attribute__((always_inline));
 static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always_inline));
 static __inline__ __ref _get_alloc_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
+static __inline__ context_t _new_slab( const char *, size_t, uint64_t );
 
 static __inline__ __ref _shmalloc( context_t, size_t, bool );
 static __inline__ uint64_t _get_fsm_length( shalloc_header * );// __attribute__((always_inline));
@@ -50,15 +58,22 @@ bool slab_init( void )
     {
         p_pid = getpid();
         // Parent initialization sequence
-        shm_init();
+        #ifndef _SHALLOC_CONTROL_IN_OWN_SEGMENT
+        shm_init_extra( sizeof( shalloc_control ) );
+        segment_address = get_control_data_section();
+        #else
         segment_address = new_segment( sizeof( shalloc_control ) );
-
+        #endif // _SHALLOC_CONTROL_IN_OWN_SEGMENT
+        
         if( segment_address == NULL )
             return false;
 
         srand( ( unsigned int ) _INVALID_CONTEXT );
-        control_segment_address = get_ref( segment_address );
-        control_segment         = ref_get_segment( control_segment_address );
+        #ifdef _SHALLOC_CONTROL_IN_OWN_SEGMENT
+        control_segment         = ref_get_segment( get_ref( segment_address ) );
+        #else
+        control_segment         = get_control_segment();
+        #endif // _SHALLOC_CONTROL_IN_OWN_SEGMENT
         _slab_init              = true;
         mapped_control          = ( shalloc_control * ) segment_address;
 
@@ -133,6 +148,16 @@ bool slab_init( void )
 // Initializes a new slab
 context_t new_slab( const char * tag, size_t object_size )
 {
+    return _new_slab( tag, object_size, 0 );
+}
+
+context_t new_slab_with_hint( const char * tag, size_t object_size, uint64_t count_hint )
+{
+    return _new_slab( tag, object_size, count_hint );
+}
+
+static __inline__ context_t _new_slab( const char * tag, size_t object_size, uint64_t count_hint )
+{
     context_t ret                       = INVALID_CONTEXT;
     char      ident[_SHALLOC_MAX_IDENT] = {0};
 
@@ -174,6 +199,7 @@ context_t new_slab( const char * tag, size_t object_size )
         mapped_control->headers[ret].max_allocations  = 0;
         mapped_control->headers[ret].i_rear_fsm_word  = 0;
         mapped_control->headers[ret].i_front_fsm_bit  = 0;
+        mapped_control->headers[ret].count_hint       = count_hint;
 
         strncpy(
             mapped_control->headers[ret].object_id,
@@ -831,6 +857,9 @@ void slab_set_count_hint( context_t ctx, size_t count_hint )
 {
     shalloc_header * header = NULL;
 
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Validating context in slab count hint\n" );
+    #endif // SLAB_DEBUG
     if( !check_context( ctx ) )
         return;
 
@@ -969,7 +998,9 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
 bool force_canary_check( context_t ctx )
 {
     shalloc_header * header = NULL;
-
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Validating context in canary check\n" );
+    #endif // SLAB_DEBUG
     if( !check_context( ctx ) )
         return false;
 
@@ -985,6 +1016,9 @@ shalloc_header * get_header_by_context( context_t ctx )
 
 static __inline__ shalloc_header * _get_header_by_context( context_t ctx )
 {
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "Validating context in header retreival by context\n" );
+    #endif // SLAB_DEBUG
     if( unlikely( !check_context( ctx ) ) )
         return NULL;
 
