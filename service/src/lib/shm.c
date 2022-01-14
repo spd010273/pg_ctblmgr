@@ -1,15 +1,24 @@
 /*------------------------------------------------------------------------
  *
  * shm.c
- *     Shared Memory function primitives
- *     This includes an allocator and uses the underlying APIs:
- *     - System V (shm.h / ipc.h)
- *     - POSIX (mman.h)
- *     - mmap
- *     The goal of this library is to present a simplified interface for
- *     creating, mapping, unmaping, and destroying page-sized memory
- *     segments for use by a memory allocator. It also provides a mechanism
- *     for offset-based pointer arithmatic 
+ *
+ * Shared Memory function primitives
+ * This includes an allocator and uses the underlying APIs:
+ *   - System V (shm.h / ipc.h)
+ *   - POSIX (mman.h)
+ *   - mmap
+ * The goal of this library is to present a simplified interface for
+ * creating, mapping, unmaping, and destroying page-sized memory
+ * segments for use by a memory allocator. It also provides a mechanism
+ * for offset-based pointer arithmatic. The goal of this library is to
+ * abstract away the lower-level SystemV, POSIX or mmap interfaces from
+ * the caller as well as provide reference counting, mapping, and
+ * simplified pointer mechanisms to the user.
+ *
+ * The library's header file contains some tunables that impact
+ * the memory footprint of the accounting information for segments, as
+ * well as the capability to either lazy-load memory segments upon the
+ * first dereference of a __ref, or to load all segments up-front.
  *
  * Copyright (c) 2021, MerchLogix Inc.
  *
@@ -44,7 +53,7 @@ static bool _close_segment_descriptor( int, char *, bool );
 static size_t _get_system_page_size( void );
 static size_t _round_to_multiple_of_page_size( size_t );
 static size_t _get_ctrl_header_size( uint32_t );
-static __inline__ shm_handle _get_handle_from_ptr( void * ) __attribute__((always_inline));
+static __inline__ shm_handle _get_handle_from_ptr( void * ) __attribute__((always_inline, flatten));
 static void _free_segment( shm_handle );
 static void _append_to_cleanup_list( shm_handle );
 static void _cleanup_old_segments( void );
@@ -77,10 +86,10 @@ static uint16_t      cleanup_list_len    = 0;
 // Given a segment ID, lets us get the mapping info
 static shm_segment   __segment_lut[SHM_MAX_SEGMENTS] = {{0}};
 
-static __inline__ offset_t _ref_get_offset( __ref ) __attribute__((always_inline));
-static __inline__ shm_handle _ref_get_segment( __ref ) __attribute__((always_inline));
-static __inline__ __ref _ref_set_offset( __ref, offset_t ) __attribute__((always_inline));
-static __inline__ __ref _ref_set_segment( __ref, shm_handle ) __attribute__((always_inline));
+static __inline__ offset_t _ref_get_offset( __ref ) __attribute__((always_inline, flatten));
+static __inline__ shm_handle _ref_get_segment( __ref ) __attribute__((always_inline, flatten));
+static __inline__ __ref _ref_set_offset( __ref, offset_t ) __attribute__((always_inline, flatten));
+static __inline__ __ref _ref_set_segment( __ref, shm_handle ) __attribute__((always_inline, flatten));
 
 // External-facing getters for test harness
 offset_t ref_get_offset( __ref ref )

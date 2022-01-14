@@ -74,7 +74,7 @@
 
 #include "barrier.h"
 
-/*
+/* ----------------------------- TUNABLES -------------------------------
  * Important setup parameters.
  *   SHM_ENABLE_RUNTIME_SANITY_CHECK: Verifies stack and heap growth directions
  *     at initialization. Some assumptions / conventions are used but we will

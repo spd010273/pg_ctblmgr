@@ -112,15 +112,26 @@ typedef uint16_t fsm_cmp_t;
 
 #define FSM_RATIO ( FSM_WIDTH / FSM_SHIFT_WIDTH )
 
-//typedef uint8_t fsm_t;
-//#define FSM_WIDTH 8
+#if defined( _SHALLOC_MAX_ALLOCS_PER_SLAB ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB <= UCHAR_MAX )
+typedef uint8_t allocset_t;
+#elif defined( _SHALLOC_MAX_ALLOCS_PER_SLAB ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB > UCHAR_MAX ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB <= USHRT_MAX )
+typedef uint16_t allocset_t;
+#elif defined( _SHALLOC_MAX_ALLOCS_PER_SLAB ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB > USHRT_MAX ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB <= UINT_MAX )
+typedef uint32_t allocset_t;
+#else
+ #ifndef _SHALLOC_MAX_ALLOCS_PER_SLAB
+ #define _SHALLOC_MAX_ALLOCS_PER_SLAB ULONG_MAX
+ #endif // _SHALLOC_MAX_ALLOCS_PER_SLAB
+typedef uint64_t allocset_t;
+#endif // allocset_t setup
+
 // context_t is used to identify which slab is used for a given compilation unit.
 // IE the unit will initialize the slab with some string identifier, and use the
 // static context returned when doing allocs/frees. It creates a little boilerplate
 // for the caller but saves the callee some time when resolving stuff
 
 // Note - these are both stored together in the control segment for the slab allocator
-// XXX: Need to move this struct to the control_segment for shm.c to avoid wasting a page
+// which has been relocated ti the uint8_t * data section of shm's control segment
 typedef struct shalloc_header {
     uint32_t       magic;
     shm_handle     segment; // NOTE: this is the data segment, not the segment this header is stored in
@@ -155,10 +166,13 @@ extern bool slab_init( void );
 extern context_t new_slab( const char *, size_t );
 extern context_t new_slab_with_hint( const char *, size_t, uint64_t );
 extern void slab_set_count_hint( context_t, size_t );
+
 extern __ref scalloc( context_t, size_t, uint64_t );
 extern __ref smalloc( context_t, size_t );
 extern __ref srealloc( context_t, __ref, size_t );
 extern void sfree( context_t, __ref );
+
+/* Utility functions for moving data between a local allocation and shm / slab managed shared memory allocation */
 extern void * move_to_local( context_t, __ref * ); // Both make changes to the 2nd argument in-place
 extern __ref move_to_shared( context_t, void **, size_t );
 

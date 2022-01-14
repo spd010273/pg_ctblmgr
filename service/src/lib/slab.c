@@ -3,6 +3,12 @@
  * slab.c
  *     Shared Memory slab allocator
  *
+ * The overall goal of this library, together with shm.c, is to present a
+ * simplified malloc/calloc/realloc/free-esque interface to the user for
+ * manipulating shared memory, while attempting to abstract the maintenance
+ * and book-keeping functionality away from the user using minimal boilerplate
+ * code.
+ *
  * This library provides a mechanism for slab allocation within the segments
  * mapped in by shm.c. It is designed to handle both large and small objects
  * but strongly favors usages where the total number of allocations is either
@@ -25,12 +31,12 @@ static shalloc_control * mapped_control          = NULL;
 static bool              _slab_init              = false;
 static pid_t             p_pid                   = 0;
 
-static __inline__ bool _fail_canary( void ) __attribute__((always_inline));
+static __inline__ bool _fail_canary( void ) __attribute__((always_inline, flatten));
 static __inline__ bool _init_slab( context_t, shalloc_header *, bool );
-static __inline__ context_t get_ctx_by_id( const char * ) __attribute__((always_inline));
-static __inline__ bool check_shalloc_header( header_iter ) __attribute__((always_inline));
-static __inline__ bool check_context( context_t ) __attribute__((always_inline));
-static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always_inline));
+static __inline__ context_t get_ctx_by_id( const char * ) __attribute__((always_inline, flatten));
+static __inline__ bool check_shalloc_header( header_iter ) __attribute__((always_inline, flatten));
+static __inline__ bool check_context( context_t ) __attribute__((always_inline, flatten));
+static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always_inline, flatten));
 static __inline__ __ref _get_alloc_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
 static __inline__ context_t _new_slab( const char *, size_t, uint64_t );
 
@@ -49,6 +55,10 @@ static __inline__ __ref _move_to_shared( shalloc_header *, void **, size_t, bool
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
+/*
+ *
+ *
+ */
 bool slab_init( void )
 {
     void *      segment_address = NULL;
@@ -64,7 +74,7 @@ bool slab_init( void )
         #else
         segment_address = new_segment( sizeof( shalloc_control ) );
         #endif // _SHALLOC_CONTROL_IN_OWN_SEGMENT
-        
+
         if( segment_address == NULL )
             return false;
 
@@ -318,9 +328,9 @@ static __inline__ bool _ref_get_index_and_size(
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
-    
+
     offset = ref_get_offset( ref );
-    
+
     #ifdef _SHALLOC_EXTRA_SANE
     if(
         unlikely(
@@ -530,7 +540,7 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
             if( unlikely( header == NULL ) )
                 return get_null_ref();
             index = _get_fsm_slot_by_width( header, num_objects );
-            
+
             if( errno == ENOSPC )
                 return get_null_ref();
         }
@@ -598,7 +608,7 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
             ( header->object_size * num_objects )
         );
     }
-     
+
     __C_MUTEX( &(header->locked) );
 
     return retref;
@@ -1292,7 +1302,7 @@ static __inline__ __ref _move_to_shared(
     size_t           size,
     bool             do_free
 )
-{ 
+{
     void *           target = NULL;
     __ref            retref = {0};
 
@@ -1300,7 +1310,7 @@ static __inline__ __ref _move_to_shared(
     // We're trusting the user to have set a correct object size - we can only do cursory checks
     if( unlikely( pointer == NULL || *pointer == NULL ) )
         return retref;
-    
+
     if( unlikely( header == NULL ) )
     #ifdef SLAB_DEBUG
     {
@@ -1381,7 +1391,7 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
-    
+
     if( unlikely( !_ref_get_index_and_size( header, *ref, &index, &size ) ) )
     #ifdef SLAB_DEBUG
     {
@@ -1394,9 +1404,9 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
-    
+
     source = ( void * ) get_ptr( *ref );
-    
+
     if( unlikely( source == NULL ) )
     #ifdef SLAB_DEBUG
     {
@@ -1424,10 +1434,10 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
         source,
         header->object_size * size
     );
-    
+
     if( do_free )
     {
-        sfree( header->self, *ref ); 
+        sfree( header->self, *ref );
         *ref = get_null_ref();
     }
 
