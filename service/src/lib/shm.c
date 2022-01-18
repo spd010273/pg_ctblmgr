@@ -91,6 +91,10 @@ static __inline__ shm_handle _ref_get_segment( __ref ) __attribute__((always_inl
 static __inline__ __ref _ref_set_offset( __ref, offset_t ) __attribute__((always_inline, flatten));
 static __inline__ __ref _ref_set_segment( __ref, shm_handle ) __attribute__((always_inline, flatten));
 
+static __inline__ bool _is_locked( shm_handle, shm_lock ) __attribute__((always_inline, flatten));
+static __inline__ bool _get_lock( shm_handle, shm_lock ) __attribute__((always_inline, flatten));
+static __inline__ bool _release_lock( shm_handle, shm_lock ) __attribute__((always_inline, flatten));
+
 // External-facing getters for test harness
 offset_t ref_get_offset( __ref ref )
 {
@@ -231,7 +235,60 @@ __inline__ void * get_ptr( __ref ref )
     #endif // SHM_AUTO_MAP
 
     mapped_size = __segment_lut[segment].mapped_size;
-    ret         = _PTR_ADD_OFFSET(
+    
+    if( unlikely( ( ( seg_header * ) mapped_address )->size != mapped_size ) )
+    {
+        // Need a remap
+        if(
+            unlikely( 
+                !_shm_wrapper(
+                    SHM_DETACH,
+                    segment,
+                    0,
+                    NULL,
+                    NULL
+                )
+             )
+          )
+        #ifdef SLAB_DEBUG
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "get_ptr: Failed to remap (unmap) resized segment %lu\n",
+                ( uint64_t ) segment
+            );
+        #endif // SLAB_DEBUG
+            return NULL;
+        #ifdef SLAB_DEBUG
+        }
+        #endif // SLAB_DEBUG
+
+        if(
+            unlikely(
+                !_shm_wrapper(
+                    SHM_ATTACH,
+                    segment,
+                    0,
+                    ( void ** ) &mapped_address,
+                    ( size_t * ) &mapped_size
+                )
+            )
+          )
+        #ifdef SHM_DEBUG
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "get_ptr: Failed to remap (remap) resized segment %lu",
+                ( uint64_t ) segment
+            );
+        #endif // SHM_DEBUG
+            return NULL;
+        #ifdef SHM_DEBUG
+        }
+        #endif // SHM_DEBUG
+    }
+
+    ret = _PTR_ADD_OFFSET(
         GET_USER_PTR( mapped_address ),
         ( size_t ) _ref_get_offset( ref )
     );
@@ -734,7 +791,7 @@ void * new_segment( size_t size )
     }
 
     // Begin critical section
-    if( !__TNS_MUTEX( &(control_header->locked) ) )
+    if( !_get_lock( SEGMENT_HANDLE_INVALID, SHM_EXCLUSIVE ) )
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -748,19 +805,32 @@ void * new_segment( size_t size )
          && ( control_header->entry_count + 1 > control_header->entry_count )
       )
     {
-        __C_MUTEX( &(control_header->locked) );
         _shm_log(
             LL_SHM_ERROR,
             "Out of shared memory (max allocations %d made)",
             SHM_MAX_SEGMENTS
         );
+        if( !_release_lock( SEGMENT_HANDLE_INVALID, SHM_EXCLUSIVE ) )
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to release exclusive lock"
+            );
+        }
         return NULL;
     }
 
     new_handle = control_header->entry_count;
     control_header->segments[control_header->entry_count] = new_handle;
     control_header->entry_count++;
-    __C_MUTEX( &(control_header->locked) );
+    if( !_release_lock( SEGMENT_HANDLE_INVALID, SHM_EXCLUSIVE ) )
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Failed to release exclusive lock"
+        );
+        return NULL;
+    }
 
     // End critical section
 
@@ -788,6 +858,7 @@ void * new_segment( size_t size )
         header->locked      = false;
         header->ref_count   = 1;
         header->control     = control_handle;
+        header->size        = mapped_size;
 #ifdef SHM_DEBUG
         _shm_log(
             LL_SHM_DEBUG,
@@ -927,13 +998,13 @@ void unmap_segment( void * ptr )
     {
         _shm_log(
             LL_SHM_ERROR,
-            "unmap failed: header invalid"
+            "Unmap failed: header invalid"
         );
         return;
     }
 
     // Critical section - decrement ref count
-    if( !__TNS_MUTEX( &(header->locked) ) )
+    if( !_get_lock( handle, SHM_HWLOCK ) )
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -944,7 +1015,14 @@ void unmap_segment( void * ptr )
 
     if( unlikely( header->ref_count < 2 ) )
     {
-        __C_MUTEX( &(header->locked ) );
+        if( !_release_lock( handle, SHM_HWLOCK ) )
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to release HWLOCK on %lu",
+                ( uint64_t ) handle
+            );
+        }
         _shm_log(
             LL_SHM_DEBUG,
             "Segment %lu auto-freed due to low reference count (%lu)",
@@ -959,7 +1037,14 @@ void unmap_segment( void * ptr )
         header->ref_count--;
     }
 
-    __C_MUTEX( &(header->locked) );
+    if( !_release_lock( handle, SHM_HWLOCK ) )
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Failed to release HWLOCK on %lu",
+            ( uint64_t ) handle
+        );
+    }
     // End critical section - decrement ref count
     // Now we can unmap
     if(
@@ -994,7 +1079,7 @@ static void _free_segment( shm_handle handle )
 {
     // Internal - we're relying on things like the handle already being vetted
     // Critical section - free segment
-    if( !__TNS_MUTEX( &(control_header->locked) ) )
+    if( !_get_lock( SEGMENT_HANDLE_INVALID, SHM_EXCLUSIVE ) )
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -1008,7 +1093,14 @@ static void _free_segment( shm_handle handle )
     // The issue is we'll need a mechanism to locate __refs and update their
     // reference on a segment move
 
-    __C_MUTEX( &(control_header->locked) );
+    if( !_release_lock( SEGMENT_HANDLE_INVALID, SHM_EXCLUSIVE ) )
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "free segment failed: Failed to release exclusive lock"
+        );
+        return;
+    }
     // End critical section - free segment
 
     if(
@@ -1071,7 +1163,7 @@ void unmap_all( void )
     shm_handle  seg            = ( shm_handle ) SEGMENT_HANDLE_INVALID;
     void *      mapped_address = NULL;
     handle_iter i              = 0;
-    
+
     if( control_handle == CONTROL_HANDLE_INVALID )
     {
         _shm_log( LL_SHM_ERROR, "Control handle is invalid in unmap_all" );
@@ -1172,6 +1264,232 @@ void zero_segment( shm_handle segment )
     return;
 }
 
+bool is_locked( shm_handle segment, shm_lock locktype )
+{
+    return _is_locked( segment, locktype );
+}
+
+static __inline__ bool _is_locked( shm_handle segment, shm_lock locktype )
+{
+    seg_header * header = NULL;
+    handle_iter  i      = 0;
+
+    if( unlikely( segment >= SHM_MAX_SEGMENTS ) )
+        return true;
+    if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
+        return true;
+    if( unlikely( control_header == NULL ) )
+        return true;
+
+    header = ( seg_header * ) __segment_lut[segment].mapped_address;
+
+    if( unlikely( header == NULL ) )
+        return true;
+    if( unlikely( header->magic != SEGMENT_HEADER_MAGIC ) )
+        return true;
+
+    if( locktype == SHM_EXCLUSIVE )
+    {
+        if( control_header->locked )
+            return true;
+
+        for( i = 0; i < control_header->entry_count; i++ )
+        {
+            if( control_header->hwlocks[i] )
+                return true;
+
+            if( unlikely( __segment_lut[i].mapped_address == NULL ) )
+                continue;
+
+            if( ( ( seg_header * ) __segment_lut[i].mapped_address )->locked )
+                return true;
+        }
+
+        return false;
+    }
+    else if( locktype == SHM_HWLOCK )
+    {
+        if( control_header->locked )
+            return true;
+
+        if( control_header->hwlocks[segment] )
+            return true;
+
+        if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
+            return true;
+
+        if( ( ( seg_header * ) __segment_lut[segment].mapped_address )->locked )
+            return true;
+
+        return false;
+    }
+    else if( locktype == SHM_LWLOCK )
+    {
+        if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
+            return true;
+
+        if( ( ( seg_header * ) __segment_lut[segment].mapped_address )->locked )
+            return true;
+
+        return false;
+    }
+
+    return true;
+}
+
+bool get_lock( shm_handle segment, shm_lock locktype )
+{
+    return _get_lock( segment, locktype );
+}
+
+static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
+{
+    seg_header * header         = NULL;
+    handle_iter  i              = 0;
+    bool **      locks_acquired = NULL;
+    uint64_t     num_locks      = 0;
+    uint64_t     lock_i         = 0;
+
+    // provide a consistent interface for locking so that deadlocks are harder to trigger
+    if( unlikely( ((segment >= SHM_MAX_SEGMENTS) && (locktype != SHM_EXCLUSIVE)) ) )
+        return false;
+    if( unlikely( ((locktype != SHM_EXCLUSIVE) && (__segment_lut[segment].mapped_address == NULL)) ) )
+        return false;
+    if( unlikely( control_header == NULL ) )
+        return false;
+
+    if( locktype != SHM_EXCLUSIVE )
+    {
+        header = ( seg_header * ) __segment_lut[segment].mapped_address;
+
+        if( unlikely( header == NULL ) )
+            return false;
+        if( unlikely( header->magic != SEGMENT_HEADER_MAGIC ) )
+            return false;
+    }
+
+    num_locks      = SHM_MAX_SEGMENTS * 2 + 1;
+    locks_acquired = malloc( sizeof( bool * ) * num_locks );
+
+    if( locks_acquired == NULL )
+        return false;
+    // Phase I - enumerate locks we need to get
+    if( locktype == SHM_EXCLUSIVE )
+    {
+        locks_acquired[lock_i] = ( bool * ) &( control_header->locked );
+
+        for( i = 0; i < control_header->entry_count; i++ )
+        {
+            if( unlikely( __segment_lut[i].mapped_address == NULL ) )
+                continue;
+            locks_acquired[lock_i] = ( bool * ) &(control_header->hwlocks[i]);
+            lock_i++;
+            locks_acquired[lock_i] = ( bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked);
+            lock_i++;
+        }
+    }
+    else if( locktype == SHM_HWLOCK )
+    {
+        if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
+        {
+            free( locks_acquired );
+            return false;
+        }
+
+        locks_acquired[lock_i] = ( bool * ) &(control_header->hwlocks[i]);
+        lock_i++;
+        locks_acquired[lock_i] = ( bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address)->locked);
+        lock_i++;
+    }
+    else if( locktype == SHM_LWLOCK )
+    {
+        if( unlikely( __segment_lut[i].mapped_address == NULL ) )
+        {
+            free( locks_acquired );
+            return false;
+        }
+
+        locks_acquired[lock_i] = ( bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address)->locked);
+        lock_i++;
+    }
+
+    // Phase II - acquire locks
+    num_locks = lock_i;
+
+    for( lock_i = 0; lock_i < num_locks; lock_i++ )
+    {
+        if( !__TNS_MUTEX( locks_acquired[lock_i] ) )
+        {
+            for( i = lock_i; i > 0; i-- )
+            {
+                __C_MUTEX( locks_acquired[i] );
+            }
+
+            _shm_log( LL_SHM_ERROR, "Failed to acquire lock at %p", locks_acquired[lock_i] );
+            free( locks_acquired );
+            return false;
+        }
+    }
+
+    free( locks_acquired );
+    return true;
+}
+
+bool release_lock( shm_handle segment, shm_lock locktype )
+{
+    return _release_lock( segment, locktype );
+}
+
+static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
+{
+    // This IS NOT SAFE to be called from _get_lock()
+    seg_header * header         = NULL;
+    handle_iter  i              = 0;
+
+    // provide a consistent interface for locking so that deadlocks are harder to trigger
+    if( unlikely( ((locktype != SHM_EXCLUSIVE) && (segment >= SHM_MAX_SEGMENTS)) ) )
+        return false;
+    if( unlikely( ((locktype != SHM_EXCLUSIVE) && (__segment_lut[segment].mapped_address == NULL)) ) )
+        return false;
+    if( unlikely( control_header == NULL ) )
+        return false;
+
+    if( locktype != SHM_EXCLUSIVE )
+    {
+        header = ( seg_header * ) __segment_lut[segment].mapped_address;
+
+        if( unlikely( header == NULL ) )
+            return false;
+        if( unlikely( header->magic != SEGMENT_HEADER_MAGIC ) )
+            return false;
+    }
+
+    if( locktype == SHM_EXCLUSIVE )
+    {
+        for( i = control_header->entry_count; i > 0; i-- )
+        {
+            if( ( seg_header * ) __segment_lut[i].mapped_address == NULL )
+                continue;
+
+            __C_MUTEX( &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked ) );
+            __C_MUTEX( &(control_header->hwlocks[i]) );
+        }
+
+        __C_MUTEX( &(control_header->locked) );
+    }
+    else if( locktype == SHM_HWLOCK )
+    {
+        __C_MUTEX( &(( ( seg_header * ) __segment_lut[segment].mapped_address )->locked ) );
+        __C_MUTEX( &(control_header->hwlocks[segment]) );
+    }
+    else if( locktype == SHM_LWLOCK )
+    {
+        __C_MUTEX( &(( ( seg_header * ) __segment_lut[segment].mapped_address )->locked ) );
+    }
+
+    return true;
+}
+
 // Replace the segment with a new segment of the given size,
 // copying the old data into the new segment
 bool shm_resize_segment( shm_handle segment, size_t new_size )
@@ -1179,7 +1497,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
     size_t       old_size       = 0;
     void *       temp           = NULL;
     void *       mapped_address = NULL;
-    size_t       mapped_size    = 0; 
+    size_t       mapped_size    = 0;
     shm_handle   new_segment    = SEGMENT_HANDLE_INVALID;
 
     _shm_log(
@@ -1189,6 +1507,9 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         new_size
     );
 
+    // FYI - this entire routine could be made faster - indeed this is a naive implementation
+    // ideally, the systemv implementation would extend the segment using something similar to the
+    // mmap/posix routines that write out the pages
     if( unlikely( ( segment >= SHM_MAX_SEGMENTS ) || ( segment == SEGMENT_HANDLE_INVALID ) ) )
     {
         _shm_log(
@@ -1216,7 +1537,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         return false;
     }
 
-    old_size = get_segment_size( segment ); 
+    old_size = get_segment_size( segment );
 
     if( old_size >= new_size ) // Keep existing segment. note- we can reduce overhead by taking no action?
     {
@@ -1226,20 +1547,21 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         );
         return true;
     }
-   
-    if( unlikely( !__TNS_MUTEX( &(control_header->locked) ) ) )
+
+    if( unlikely( !_get_lock( segment, SHM_HWLOCK ) ) )
     {
         _shm_log(
             LL_SHM_ERROR,
-            "Failed to obtain header lock"
+            "Failed to obtain HWLOCK on segment %lu",
+            ( uint64_t ) segment
         );
         return false;
     }
     // Need to expand the existing segment. This is not easily supported in
     // SystemV implementations, so we'll take the easy way out and allocate a new segment
     new_size = new_size + offsetof( seg_header, data );
-    temp     = malloc( new_size + offsetof( seg_header, data ) ); 
-   
+    temp     = malloc( new_size + offsetof( seg_header, data ) );
+
     _shm_log(
         LL_SHM_DEBUG,
         "Entrying critical section - resizeing segment %lu from %zu to %zu bytes",
@@ -1249,8 +1571,17 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
     );
 
     if( temp == NULL )
+    {
         return false;
-
+        if( !_release_lock( segment, SHM_HWLOCK ) )
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to release HWLOCK on %lu",
+                ( uint64_t ) segment
+            );
+        }
+    }
     // Critical section -- need to lock! //
     if(
         unlikely(
@@ -1264,9 +1595,17 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
     {
         _shm_log( LL_SHM_ERROR, "Failed to copy data to temporary stash" );
         free( temp );
+        if( !_release_lock( segment, SHM_HWLOCK ) )
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to release HWLOCK on %lu",
+                ( uint64_t ) segment
+            );
+        }
         return false;
     }
-    
+
     if(
         unlikely(
             !_shm_wrapper(
@@ -1284,6 +1623,14 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
             "Failed to destroy segment %lu", ( uint64_t ) segment
         );
         free( temp );
+        if( !_release_lock( segment, SHM_HWLOCK ) )
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to release HWLOCK on %lu",
+                ( uint64_t ) segment
+            );
+        }
         return false;
     }
 
@@ -1306,10 +1653,16 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         __segment_lut[segment].mapped_address = mapped_address;
         __segment_lut[segment].mapped_size    = mapped_size;
         __segment_lut[segment].handle         = segment;
-        __C_MUTEX( &(control_header->locked) );
-        
+        if( !_release_lock( segment, SHM_HWLOCK ) )
+        {
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to release HWLOCK on %lu",
+                ( uint64_t ) segment
+            );
+        }
 
-       if(
+        if(
             unlikely(
                 memcpy(
                     __segment_lut[segment].mapped_address,
@@ -1318,17 +1671,37 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
                 ) == NULL
             )
          )
-       {
-           _shm_log(
-               LL_SHM_DEBUG,
-               "Failed to copy stash back into resized shared memory segment"
-           );
-           free( temp );
-           return false;
-       }
+        {
+            _shm_log(
+                LL_SHM_DEBUG,
+                "Failed to copy stash back into resized shared memory segment"
+            );
+            free( temp );
+            if( !_release_lock( segment, SHM_HWLOCK ) )
+            {
+                _shm_log(
+                    LL_SHM_ERROR,
+                    "Failed to release HWLOCK on %lu",
+                    ( uint64_t ) segment
+                );
+            }
+            return false;
+        }
+
     }
 
     free( temp );
+    if( !_release_lock( segment, SHM_HWLOCK ) )
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Failed to release HWLOCK on %lu",
+            ( uint64_t ) segment
+        );
+    }
+
+    // XXX we need to indicate to other processes that this segment has been resized - we could do it
+    // in the auto map in get_ptr()
     return true;
 }
 
@@ -2514,12 +2887,14 @@ static void __dump_seg_header( seg_header * header )
           "MAGIC: %x\n  " \
           "OWNER: %d\n  " \
           "LOCKED: %s\n  " \
+          "SIZE: %zu\n  " \
           "REF_COUNT: %u\n  " \
           "CONTROL: %lu\n  " \
           "DATA: %p",
         header->magic,
         header->owner,
         header->locked ? "TRUE" : "FALSE",
+        header->size,
         header->ref_count,
         ( uint64_t ) header->control,
         header->data

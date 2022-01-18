@@ -105,9 +105,6 @@ int main( void )
         exit( 1 );
     }
     
-    fprintf( stdout, "Waiting for child cleanup...\n" );
-    sleep( 5 );
-
     fprintf( stdout, "Resizing segment\n" );
     if(
         shm_resize_segment( 

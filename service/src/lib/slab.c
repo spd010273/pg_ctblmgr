@@ -292,17 +292,41 @@ static __inline__ shalloc_header * __shrealloc_internal( shalloc_header * header
     ref = get_ref( ( void * ) header );
 
     if( unlikely( ref_is_null( ref ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "_shrealloc_internal: NULL ref when referencing header\n" );
+    #endif // SLAB_DEBUG
         return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     if( !shm_resize_segment( header->segment, new_size ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "_shrealloc_internal: Failed to resize segment\n" );
+    #endif // SLAB_DEBUG
         return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     new = ( shalloc_header * ) get_ptr( ref );
 
     if( unlikely( !check_shalloc_header( ( header_iter ) new->segment ) ) )
+    #ifdef SLAB_DEBUG
     {
+        fprintf( stderr, "_shrealloc_internal: Failed to validate segment header post-resize\n" );
+    #endif // SLAB_DEBUG
         return NULL;
+    #ifdef SLAB_DEBUG
     }
+    #endif // SLAB_DEBUG
+
+    // If we've got to this point we need to punt the FSM and associated canaries
+    // to the new end of the page, recalculate max_allocations and return to the user.
+    // __refs are preserved as they still point to the same memory segment, but the offset and segment #
+    // will be the same
     // XXX Need to relocate FSM to the end of our newly (re)allocated segment
     return new;
 }

@@ -375,24 +375,25 @@ typedef struct shm_segment {
 
 // Global stuff
 typedef struct ctrl_header {
-    uint32_t    magic;           // Should be CONTROL_HEADER_MAGIC at all times
-    pid_t       owner;           // Parent process owning this segment
-    bool        locked;          // Indicates a PID is modifying accounting info
-    handle_iter entry_count;     // # Allocated segments
-    handle_iter max_entries;     // SHM_MAX_SEGMENTS
-    shm_handle  segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
+    uint32_t      magic;           // Should be CONTROL_HEADER_MAGIC at all times
+    pid_t         owner;           // Parent process owning this segment
+    volatile bool locked;          // Indicates a PID is modifying accounting info
+    handle_iter   entry_count;     // # Allocated segments
+    handle_iter   max_entries;     // SHM_MAX_SEGMENTS
+    shm_handle    segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
-    bool        locks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here
-    uint8_t *   data;
+    volatile bool hwlocks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here
+    uint8_t *     data;
 } ctrl_header;
 
 typedef struct seg_header {
-    uint32_t   magic;     // Should be SEGMENT_HEADER_MAGIC at all times
-    pid_t      owner;     // Parent process owning this segment
-    bool       locked;    // Shared between allocator and shm.c
-    uint32_t   ref_count; // Number of processes with this segment mapped
-    shm_handle control;   // ID of control segment
-    uint8_t *  data;      // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
+    uint32_t      magic;     // Should be SEGMENT_HEADER_MAGIC at all times
+    pid_t         owner;     // Parent process owning this segment
+    volatile bool locked;    // Shared between allocator and shm.c
+    size_t        size;
+    uint32_t      ref_count; // Number of processes with this segment mapped
+    shm_handle    control;   // ID of control segment
+    uint8_t *     data;      // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
 } seg_header;
 
 /*
@@ -464,6 +465,17 @@ typedef struct __ref {
 } __ref;
 #endif // _SHM_PACK_STRUCT
 
+// This lock pertains to the bit being set - with the following order of precedence
+// control_header->locked         = SHM_EXCLUSIVE - hardest to obtain, indicates the header is being manipulated & conflicts with all other locks
+// control_header->locks[segment] = SHM_HWLOCK - Indicates that the segment is in a resize / maintenance
+// seg_header->locked             = SHM_LWLOCK - User lock
+//
+typedef enum {
+    SHM_EXCLUSIVE,
+    SHM_HWLOCK,
+    SHM_LWLOCK,
+} shm_lock;
+
 extern __inline__ void * get_ptr( __ref ); // Get local pointer to mapping
 extern __inline__ __ref get_ref( void * ); // Get absolute ref
 extern ctrl_header * get_control_header( void );
@@ -476,6 +488,9 @@ extern offset_t ref_get_offset( __ref );
 extern shm_handle ref_get_segment( __ref );
 extern __ref ref_set_segment( __ref, shm_handle );
 extern __ref ref_set_offset( __ref, offset_t );
+extern bool is_locked( shm_handle, shm_lock );
+extern bool get_lock( shm_handle, shm_lock );
+extern bool release_lock( shm_handle, shm_lock );
 // Logging helpers
 
 typedef enum {

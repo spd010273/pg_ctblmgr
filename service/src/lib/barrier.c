@@ -4,7 +4,7 @@
 // is not available
 
 #if defined(__BUF_NO_ATOMICS__) || defined(__KERNEL_HAS_BARRIERS__)
-static __inline__ bool _test_and_set( volatile bool * ) __attribute__((__always_inline__));
+static __inline__ bool _test_and_set( volatile bool * ) __attribute__((always_inline, flatten));
 
 bool _test_and_set_mutex( volatile bool * mutex )
 {
