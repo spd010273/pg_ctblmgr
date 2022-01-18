@@ -344,6 +344,7 @@ extern void free_segment( void * );
 extern void unmap_all( void );
 extern void map_all( void );
 extern void zero_segment( shm_handle );
+extern bool shm_resize_segment( shm_handle, size_t );
 extern size_t get_segment_size( shm_handle ); // Returns the size available to the user
                                               // IE: mapped_size - sizeof( seg_header )
 /* * * Local mapping of shared objects * * */
@@ -368,7 +369,7 @@ typedef struct shm_segment {
 typedef struct shm_segment {
     shm_handle handle;          // Mapped segment ID
     void *     mapped_address;  // Address it was mapped to in the process' memory map this is the address of the header
-    size_t     mapped_size;     // Size mapped in bytes
+    size_t     mapped_size;     // Size mapped in bytes incl headers
 } shm_segment;
 #endif // _SHM_PACK_STRUCT
 
@@ -381,6 +382,7 @@ typedef struct ctrl_header {
     handle_iter max_entries;     // SHM_MAX_SEGMENTS
     shm_handle  segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
+    bool        locks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here
     uint8_t *   data;
 } ctrl_header;
 

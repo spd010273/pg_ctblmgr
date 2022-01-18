@@ -93,6 +93,7 @@ int main( void )
     }
 
     wait( NULL );
+    
     if( *test != 0x43215678 )
     {
         fprintf(
@@ -103,8 +104,32 @@ int main( void )
         );
         exit( 1 );
     }
+    
+    fprintf( stdout, "Waiting for child cleanup...\n" );
+    sleep( 5 );
 
+    fprintf( stdout, "Resizing segment\n" );
+    if(
+        shm_resize_segment( 
+            ref_get_segment( data ),
+            TEST_SIZE * 4
+        )
+      )
+    {
+        fprintf( stdout, "Resize success\n" );
+    }
+    else
+    {
+        fprintf( stderr, "FAILED: Resize failed\n" );
+        exit( 1 );
+    }
+    
+    mapped_addr = get_ptr( data );
+    fprintf( stdout, "random fill: %p\n", mapped_addr );
+    random_fill( mapped_addr, TEST_SIZE * 4 );
+    
     fprintf( stdout, " Done.\n" );
+
     unmap_all();
 
     fprintf( stdout, "All tests passed.\n" );

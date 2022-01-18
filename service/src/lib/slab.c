@@ -267,6 +267,8 @@ static __inline__ shalloc_header * __shrealloc_internal( shalloc_header * header
 {
     shalloc_header * new = NULL;
     void * temp          = NULL;
+    __ref  ref           = {0};
+
     if( unlikely( header == NULL ) )
     #ifdef SLAB_DEBUG
     {
@@ -287,7 +289,22 @@ static __inline__ shalloc_header * __shrealloc_internal( shalloc_header * header
     }
     #endif // SLAB_DEBUG
 
-    return NULL;
+    ref = get_ref( ( void * ) header );
+
+    if( unlikely( ref_is_null( ref ) ) )
+        return NULL;
+
+    if( !shm_resize_segment( header->segment, new_size ) )
+        return NULL;
+
+    new = ( shalloc_header * ) get_ptr( ref );
+
+    if( unlikely( !check_shalloc_header( ( header_iter ) new->segment ) ) )
+    {
+        return NULL;
+    }
+    // XXX Need to relocate FSM to the end of our newly (re)allocated segment
+    return new;
 }
 
 // Returns the allocation index and size of a given __ref,
