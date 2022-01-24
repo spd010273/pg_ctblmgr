@@ -74,7 +74,7 @@
 #define _SHALLOC_HEADER_MAGIC 0xDEED144A
 #define _INVALID_CONTEXT 0xB16F00FE
 #define _ZERO_FILL_BYTE 0xEA // Sports. It's in the game.
-#define _FORCE_SIGSEGV_ON_CANARY_FAILURE 1
+//#define _FORCE_SIGSEGV_ON_CANARY_FAILURE 1
 
 #if defined( _SHALLOC_MAX_SLABS ) && ( _SHALLOC_MAX_SLABS <= UCHAR_MAX )
 typedef uint8_t header_iter;
@@ -167,6 +167,11 @@ extern context_t new_slab( const char *, size_t );
 extern context_t new_slab_with_hint( const char *, size_t, uint64_t );
 extern void slab_set_count_hint( context_t, size_t );
 
+// Extra malloc/realloc calls where # of objects requested are used
+//extern __ref smalloc_object_count( context_t, uint64_t );
+//extern __ref shrealloc_object_count( context_t, __ref, uint64_t );
+
+// Traditional malloc/calloc/realloc/free calls where bytes are specified
 extern __ref scalloc( context_t, size_t, uint64_t );
 extern __ref smalloc( context_t, size_t );
 extern __ref srealloc( context_t, __ref, size_t );
@@ -179,4 +184,5 @@ extern __ref move_to_shared( context_t, void **, size_t );
 // Debugging / testing functions
 extern bool force_canary_check( context_t );
 extern shalloc_header * get_header_by_context( context_t );
+extern void print_fsm( shalloc_header * header );
 #endif // _SLAB_H

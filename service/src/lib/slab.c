@@ -48,10 +48,22 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );/
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ shalloc_header * _get_header_by_context( context_t );// __attribute__((always_inline));
-static __inline__ shalloc_header * __shrealloc_internal( shalloc_header *, uint64_t );
+static __inline__ bool __shrealloc_internal( shalloc_header *, uint64_t );
 static __inline__ bool _ref_get_index_and_size( shalloc_header *, __ref, uint64_t *, size_t * );// __attribute__((always_inline));
 static __inline__ void * _move_to_local( shalloc_header *, __ref *, bool );// __attribute__((always_inline));
 static __inline__ __ref _move_to_shared( shalloc_header *, void **, size_t, bool );// __attribute__((always_inline));
+
+#ifdef SLAB_DEBUG
+static void print_byte( uint8_t );
+static void print_bin( uint64_t );
+static void _print_fsm( shalloc_header * );
+static const char * bits[16] = {
+    [ 0] = "0000", [ 1] = "0001", [ 2] = "0010", [ 3] = "0011",
+    [ 4] = "0100", [ 5] = "0101", [ 6] = "0110", [ 7] = "0111",
+    [ 8] = "1000", [ 9] = "1001", [10] = "1010", [11] = "1011",
+    [12] = "1100", [13] = "1101", [14] = "1110", [15] = "1111",
+};
+#endif // SLAB_DEBUG
 
 // Called by either the parent process, pre fork to setup the allocation
 // or by the child process(es) post-fork to attach to said control segment
@@ -137,18 +149,18 @@ bool slab_init( void )
         for( i = 0; i < _SHALLOC_MAX_SLABS; i++ )
         {
             if( !check_shalloc_header( i ) )
-        #ifdef SLAB_DEBUG
+            #ifdef SLAB_DEBUG
             {
                 fprintf(
                     stderr,
                     "Shalloc header %lu failed sanity checks\n",
                     ( uint64_t ) i
                 );
-        #endif // SLAB_DEBUG
+            #endif // SLAB_DEBUG
                 return false;
-        #ifdef SLAB_DEBUG
+            #ifdef SLAB_DEBUG
             }
-        #endif // SLAB_DEBUG
+            #endif // SLAB_DEBUG
         }
     }
 
@@ -260,21 +272,37 @@ __ref srealloc( context_t ctx, __ref oldref, size_t size )
     return retref;
 }
 
-
-// Not the same as the realloc we present to end users - this is used in the
-// case where we need to resize the underlying segment - new_size is in num_objects
-static __inline__ shalloc_header * __shrealloc_internal( shalloc_header * header, uint64_t new_size )
+/*
+ * __shrealloc_internal( shalloc_header *, uint64_t )
+ *     shalloc_header *: Reference to the header for the segment in which we want to resize
+ *     uint64_t: The number of objects desired for the new segment
+ *
+ * Note that the segment the header lives in and the segment the data
+ * (allocs, fsm, canaries), since header->segment stores the segment the data
+ * lives in, we use that to perform the resize. This is passed onto the underlying
+ * shm functions
+ */
+static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t new_size )
 {
-    shalloc_header * new = NULL;
-    void * temp          = NULL;
-    __ref  ref           = {0};
+    size_t   unit_size      = 0;
+    size_t   available      = 0;
+    void *   c_fsmstart     = NULL;
+    void *   c_fsmend       = NULL;
+    void *   fsm            = NULL;
+    size_t   old_fsm_length = 0;
+    size_t   size_needed    = 0;
+    uint64_t position       = 0;
+    size_t   alloc_offset   = 0;
+    __ref    old_fsm_and_c  = {0};
+    void * old_fsm = NULL;
 
+    old_fsm_and_c = get_null_ref();
     if( unlikely( header == NULL ) )
     #ifdef SLAB_DEBUG
     {
         fprintf( stderr, "___shrealloc_internal: Invalid header\n" );
     #endif // SLAB_DEBUG
-        return NULL;
+        return false;
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
@@ -284,51 +312,101 @@ static __inline__ shalloc_header * __shrealloc_internal( shalloc_header * header
     {
         fprintf( stderr, "__shrealloc_internal: Expected locked header as input\n" );
     #endif // SLAB_DEBUG
-        return NULL;
+        return false;
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
 
-    ref = get_ref( ( void * ) header );
+    // XXX The bug we need to fix now is proper resizing of the new segment
+    fprintf( stdout, "Probing FSM for potential consecutive offset...\n" );
+    _print_fsm( header );
+    position = __find_fsm_spot( header, CHAR_BIT );
 
-    if( unlikely( ref_is_null( ref ) ) )
-    #ifdef SLAB_DEBUG
+    if( position != 0 )
     {
-        fprintf( stderr, "_shrealloc_internal: NULL ref when referencing header\n" );
-    #endif // SLAB_DEBUG
-        return NULL;
-    #ifdef SLAB_DEBUG
+        alloc_offset = header->object_size * header->max_allocations;
+        fprintf( stdout, "We'll need to offset our requested size by %zu bytes to hold the reqeust\n", alloc_offset );
     }
-    #endif // SLAB_DEBUG
 
-    if( !shm_resize_segment( header->segment, new_size ) )
+    unit_size   = ( FSM_WIDTH * header->object_size ) + sizeof( fsm_t ); // bytes needed to store FSM_WIDTH allocations
+    size_needed = ( new_size / FSM_WIDTH ); // How many units do we need to store the request
+    if( new_size % FSM_WIDTH != 0 )
+        size_needed++;
+    fprintf( stdout, "Need %lu units to satisfy the request (%lu is unit size)\n", ( uint64_t ) size_needed, FSM_WIDTH );
+    size_needed = ( size_needed * unit_size + sizeof( canary_t ) * 3 ) + alloc_offset;
+    old_fsm = get_ptr( header->loc_c_fsmstart );
+
+    if( !shm_resize_segment( header->segment, size_needed ) )
     #ifdef SLAB_DEBUG
     {
         fprintf( stderr, "_shrealloc_internal: Failed to resize segment\n" );
     #endif // SLAB_DEBUG
-        return NULL;
+        return false;
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
 
-    new = ( shalloc_header * ) get_ptr( ref );
-
-    if( unlikely( !check_shalloc_header( ( header_iter ) new->segment ) ) )
+    if( unlikely( !check_shalloc_header( ( header_iter ) header->segment ) ) )
     #ifdef SLAB_DEBUG
     {
         fprintf( stderr, "_shrealloc_internal: Failed to validate segment header post-resize\n" );
     #endif // SLAB_DEBUG
-        return NULL;
+        return false;
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
 
     // If we've got to this point we need to punt the FSM and associated canaries
-    // to the new end of the page, recalculate max_allocations and return to the user.
+    // to the new end of the segment, recalculate max_allocations and return to the user.
     // __refs are preserved as they still point to the same memory segment, but the offset and segment #
-    // will be the same
-    // XXX Need to relocate FSM to the end of our newly (re)allocated segment
-    return new;
+    // will be the same. Still need to efficient-ize the call.
+
+    // Unit size - stores sizeof( fsm_t ) * CHAR_BIT allocations
+    old_fsm_length = _get_fsm_length( header );
+    // Available space - accounting for headers and canaries
+    available = ( get_segment_size( header->segment ) - ( 3 * sizeof( canary_t ) ) );
+    fprintf(
+        stdout,
+        "_shrealloc_internal:\n"
+        "  Old max_allocations is %lu\n"
+        "  New max_allocation is %lu\n"
+        "  seg size: %lu\n"
+        "  OLD FSM: %p\n"
+        "  NEW FSM: %p\n",
+        ( uint64_t ) header->max_allocations,
+        ( available / unit_size ) * FSM_WIDTH,
+        get_segment_size( header->segment ),
+        old_fsm,
+        get_ptr( header->loc_c_fsmstart )
+    );
+
+    header->max_allocations = ( available / unit_size ) * FSM_WIDTH;
+    fprintf( stdout, "Reported FSM length is %lu\n", _get_fsm_length( header ) );
+    fprintf( stdout, "Max allocations set to %lu\n", ( uint64_t ) header->max_allocations );
+    c_fsmstart = ( void * ) _PTR_ADD_OFFSET(
+        get_ptr( header->allocs ),
+        ( header->object_size * header->max_allocations )
+    );
+    fsm = ( void * ) _PTR_ADD_OFFSET( c_fsmstart, sizeof( canary_t ) );
+    c_fsmend = ( void * ) _PTR_ADD_OFFSET(
+        fsm,
+        ( sizeof( fsm_t ) * _get_fsm_length( header ) )
+    );
+
+    memcpy(
+        ( void * ) c_fsmstart,
+        ( void * ) get_ptr( header->loc_c_fsmstart ),
+        old_fsm_length * sizeof( fsm_t ) + sizeof( canary_t )
+    );
+
+    header->loc_c_fsmend   = get_ref( c_fsmend );
+    header->loc_c_fsmstart = get_ref( c_fsmstart );
+    header->fsm            = get_ref( fsm );
+
+    *( ( canary_t * ) c_fsmend ) = header->c_fsmend;
+
+    fprintf( stdout, "Finished resize of shm segment\n" );
+    return _check_canaries( header );
 }
 
 // Returns the allocation index and size of a given __ref,
@@ -516,6 +594,14 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
     header      = &(mapped_control->headers[ctx]);
     num_objects = size / header->object_size;
 
+    fprintf(
+        stdout,
+        "Handling _shmalloc( %lu, %zu, %s )\n",
+        ( uint64_t ) ctx,
+        size,
+        zero_fill ? "T" : "F"
+    );
+
     if( size % header->object_size != 0 )
     {
         fprintf(
@@ -545,14 +631,14 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
         }
     }
 
-    // Layout & usage of free list:
-    // [ front - single allocs ..... contiguous allocs - rear ]
     if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
     {
         fprintf( stderr, "Failed to acquire segment lock\n" );
         return get_null_ref();
     }
 
+    // Layout & usage of free list:
+    // [ front - single allocs ..... contiguous allocs - rear ]
     if( num_objects >= ( header->max_allocations - header->n_allocs ) )
     {
         // TODO: Reallocate entire segment
@@ -562,10 +648,15 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
         // to the end of the new, extended page. This will preserve existing
         // __refs
         fprintf( stderr, "NEED REALLOC\n" );
-        header = __shrealloc_internal( header, num_objects );
-
-        if( unlikely( header == NULL ) )
+        if( unlikely( !__shrealloc_internal( header, num_objects ) ) )
+        #ifdef SLAB_DEBUG
+        {
+            fprintf( stderr, "Failed to reallocated\n" );
+        #endif // SLAB_DEBUG
             return get_null_ref();
+        #ifdef SLAB_DEBUG
+        }
+        #endif // SLAB_DEBUG
     }
 
     if( num_objects > 1 )
@@ -577,9 +668,9 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
         {
             errno = 0;
             fprintf( stderr, "NEED REALLOC 2\n" );
-            header = __shrealloc_internal( header, num_objects );
-            if( unlikely( header == NULL ) )
+            if( unlikely( !__shrealloc_internal( header, num_objects ) ) )
                 return get_null_ref();
+
             index = _get_fsm_slot_by_width( header, num_objects );
 
             if( errno == ENOSPC )
@@ -683,11 +774,19 @@ static __inline__ void _set_fsm_element_by_index(
     if( unlikely( header == NULL ) )
         return;
 
-    fsm_index  = ind / FSM_WIDTH;
-    fsm_offset = ind % FSM_WIDTH;
+    /*
+     * FSM is laid out like:
+     * fsm word             ... bits ...
+     * [n]  n*64 - 1         ...                       n*64 - 64
+     * ...
+     * [1]  ...                           68   67   66   65   64
+     * [0]  ...                            4    3    2    1    0
+     */
+    fsm_index  = ( ind / FSM_WIDTH );
+    fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
-        fsm_index
+        fsm_index * sizeof( fsm_t )
     );
 
     if( fsm_word == NULL )
@@ -703,19 +802,26 @@ static __inline__ void _clear_fsm_element_by_index(
     uint64_t         ind
 )
 {
-    uint64_t fsm_index  = 0;
+    uint32_t fsm_index  = 0;
     uint8_t  fsm_offset = 0;
     fsm_t *  fsm_word   = NULL;
 
     if( unlikely( header == NULL ) )
         return;
 
-    fsm_index  = ind / FSM_WIDTH;
-    fsm_offset = ind % FSM_WIDTH;
-
-    fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+    /*
+     * FSM is laid out like:
+     * fsm word             ... bits ...
+     * [n]  n*64 - 1         ...                       n*64 - 64
+     * ...
+     * [1]  ...                           68   67   66   65   64
+     * [0]  ...                            4    3    2    1    0
+     */
+    fsm_index  = ( ind / FSM_WIDTH );
+    fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
+    fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
-        fsm_index
+        fsm_index * sizeof( fsm_t )
     );
 
     if( fsm_word == NULL )
@@ -728,7 +834,7 @@ static __inline__ void _clear_fsm_element_by_index(
 
 static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint64_t ind )
 {
-    uint64_t fsm_index  = 0;
+    uint32_t fsm_index  = 0;
     uint8_t  fsm_offset = 0;
     fsm_t *  fsm_word   = NULL;
 
@@ -738,18 +844,20 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint6
         return false;
     }
 
-    fsm_index  = ind / FSM_WIDTH;
-    fsm_offset = ind % FSM_WIDTH;
+    /*
+     * FSM is laid out like:
+     * fsm word             ... bits ...
+     * [n]  n*64 - 1         ...                       n*64 - 64
+     * ...
+     * [1]  ...                           68   67   66   65   64
+     * [0]  ...                            4    3    2    1    0
+     */
+    fsm_index  = ( ind / FSM_WIDTH );
+    fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
         get_ptr( header->fsm ),
-        fsm_index
+        fsm_index * sizeof( fsm_t )
     );
-
-    if( fsm_word == NULL )
-    {
-        errno = EINVAL;
-        return true;
-    }
 
     if( ( ( *fsm_word >> fsm_offset ) & ( fsm_t ) 1 ) > 0 )
         return true;
@@ -757,6 +865,7 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint6
     return false;
 }
 
+// XXX: __find_fsm_slot() seems to be having issues locating the next opening after an allocation has been made.
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint64_t width )
 {
     uint64_t bit_position = 0;
@@ -776,17 +885,36 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
 
     // Mark field as used TODO this can be done in bulk i'm just lazy
     fprintf( stdout, "ISSUING ALLOCATION FOR INDEX %lu\n", bit_position );
+    fprintf( stdout, "FSM prior:\n" );
+
+    // This need to start at the highest fsm_word_i and start marking from there
     for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
     {
+        // this can be bulkified so we dont have to call this routine for every single bit
         _set_fsm_element_by_index( header, fsm_index );
     }
     // XXX: We need to track how large the allocation is for purposes of freeing later
 
     header->allocset[bit_position] = width;
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "_get_fsm_slot_by_width( %p, %lu ) FSM SNAPSHOT\n", header, width );
+    _print_fsm( header );
+    #endif // SLAB_DEBUG
 
     return bit_position;
 }
 
+/*
+ * __find_fsm_spot( shalloc_header *, uint64_t )
+ *   - shalloc_header * header - the headers whose FSM we are searching
+ *   - uint64_t requested_length - the width of the allocation needed in <objects>, not bytes
+ * Performs a fast masked search of a bitfield searching for a free area
+ * In order to handle referential integrity iff the page gets resized, the
+ * search begins at the 'rear' (nth index) of the FSM, and moves towards the
+ * 0th index for large allocations. Small (single) allocations are done by a
+ * separate subroutine, which searches from the 'front' (0th index) of the FSM.
+ *
+ */
 static __inline__ uint64_t __find_fsm_spot(
     shalloc_header * header,
     uint64_t         requested_length
@@ -803,11 +931,14 @@ static __inline__ uint64_t __find_fsm_spot(
     register fsm_cmp_t temp             = 0;
     register fsm_cmp_t mask             = ( fsm_cmp_t ) ULONG_MAX;
     fsm_cmp_t          mask_last        = ( fsm_cmp_t ) ULONG_MAX;
+    fsm_t              skip_mask        = ( fsm_t ) ULONG_MAX;
     register bool      compare_active   = false;
     register bool      last_word        = false;
 
+    fprintf( stdout, "__find_fsm_Spot( %p, %lu )\n", header, requested_length );
+    _print_fsm( header );
     fsm_length = _get_fsm_length( header );
-    mask_last  = ~( mask_last << ( requested_length % CHAR_BIT ) );
+    mask_last  = ~( mask_last << ( requested_length % FSM_SHIFT_WIDTH ) );
 
     if( requested_length <= FSM_SHIFT_WIDTH )
     {
@@ -823,6 +954,12 @@ static __inline__ uint64_t __find_fsm_spot(
             ( ( fsm_length - 1 - fsm_i ) * sizeof( fsm_t ) )
         )); // Deref in outer loop
 
+        if( ( fsm_word & skip_mask ) == skip_mask )
+        {
+            position += sizeof( fsm_t ) * CHAR_BIT;
+            continue;
+        }
+
         for( fsm_word_i = 0; fsm_word_i < FSM_RATIO; fsm_word_i++ )
         { // Iterate over words within the given fsm_t word, size FSM_SHIFT_WIDTH bits
             temp = ( fsm_cmp_t ) ( fsm_word >> ( ( fsm_word_i ) * FSM_SHIFT_WIDTH ) );
@@ -833,7 +970,7 @@ static __inline__ uint64_t __find_fsm_spot(
                 { // Prep for return & attempt to compactify past word boundaries
                     // Early exit when shifting wont help
                     if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
-                        return header->max_allocations - requested_length + position;
+                        return header->max_allocations - ( position + requested_length );
 
                     mask = ( fsm_cmp_t ) FSM_LAST_WORD_MASK;
                     temp = last_word_val;
@@ -846,7 +983,7 @@ static __inline__ uint64_t __find_fsm_spot(
                         position--;
                     }
 
-                    return header->max_allocations - requested_length + position;
+                    return header->max_allocations - ( position + requested_length );
                 }
 
                 bits_comp -= FSM_SHIFT_WIDTH;
@@ -962,7 +1099,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
         initial_size = 1;
     }
 
-    initial_size = initial_size * unit_size + sizeof( canary_t ) * 4;
+    initial_size = initial_size * unit_size + sizeof( canary_t ) * 3;
 
     mapped_address = new_segment( initial_size );
 
@@ -1484,3 +1621,58 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
 
     return target;
 }
+
+void print_fsm( shalloc_header * header )
+{
+    #ifdef SLAB_DEBUG
+    _print_fsm( header );
+    #endif // SLAB_DEBUG
+    return;
+}
+
+#ifdef SLAB_DEBUG
+static void _print_fsm( shalloc_header * header )
+{
+    uint64_t i = 0;
+    fsm_t * fsm_word = NULL;
+    uint64_t len = 0;
+
+    if( header == NULL )
+        return;
+
+    len = _get_fsm_length( header );
+    fprintf( stdout, "----- FSM %p -----\n", get_ptr( header->fsm ) );
+
+    for( i = 0; i < len; i++ )
+    {
+        fsm_word = (fsm_t *) _PTR_ADD_OFFSET(
+            get_ptr( header->fsm ),
+            ( ( len - 1 - i ) * sizeof( fsm_t ) )
+        );
+
+        fprintf( stdout, "FSM[%lu] (%p): ", ( len - 1 - i ), fsm_word );
+        print_bin( ( uint64_t ) *fsm_word );
+    }
+
+}
+
+static void print_byte( uint8_t data )
+{
+    fprintf( stdout, "%s%s", bits[data >> 4], bits[ data & 0x0F ] );
+    return;
+}
+
+static void print_bin( uint64_t data )
+{
+    print_byte( ( uint8_t ) ( ( data >> 56 ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data >> 48 ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data >> 40 ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data >> 32 ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data >> 24 ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data >> 16 ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data >> 8  ) & 0xFF ) );
+    print_byte( ( uint8_t ) ( ( data       ) & 0xFF ) );
+    fprintf( stdout, "\n" );
+    return;
+}
+#endif // SLAB_DEBUG

@@ -239,6 +239,7 @@ __inline__ void * get_ptr( __ref ref )
     if( unlikely( ( ( seg_header * ) mapped_address )->size != mapped_size ) )
     {
         // Need a remap
+        _shm_log( LL_SHM_DEBUG, "Segment header size and mapped size do not match. This segment has been resized and will auto-remap" );
         if(
             unlikely( 
                 !_shm_wrapper(
@@ -1448,20 +1449,35 @@ static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
 
     // provide a consistent interface for locking so that deadlocks are harder to trigger
     if( unlikely( ((locktype != SHM_EXCLUSIVE) && (segment >= SHM_MAX_SEGMENTS)) ) )
+    {
+        _shm_log( LL_SHM_ERROR, "Lock type is not exclusive and segment %lu is out of bounds", ( uint64_t ) segment );
         return false;
+    }
     if( unlikely( ((locktype != SHM_EXCLUSIVE) && (__segment_lut[segment].mapped_address == NULL)) ) )
+    {
+        _shm_log( LL_SHM_ERROR, "Lock type is not exclusive and segment %lu is not mapped", ( uint64_t ) segment );
         return false;
+    }
     if( unlikely( control_header == NULL ) )
+    {
+        _shm_log( LL_SHM_ERROR, "Control header is not mapped" );
         return false;
+    }
 
     if( locktype != SHM_EXCLUSIVE )
     {
         header = ( seg_header * ) __segment_lut[segment].mapped_address;
 
         if( unlikely( header == NULL ) )
+        {
+            _shm_log( LL_SHM_ERROR, "Failed to locate header for segment %lu in LUT", ( uint64_t ) segment );
             return false;
+        }
         if( unlikely( header->magic != SEGMENT_HEADER_MAGIC ) )
+        {
+            _shm_log( LL_SHM_ERROR, "Bad magic, got %x, expected %x", header->magic, SEGMENT_HEADER_MAGIC );
             return false;
+        }
     }
 
     if( locktype == SHM_EXCLUSIVE )
@@ -1498,7 +1514,6 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
     void *       temp           = NULL;
     void *       mapped_address = NULL;
     size_t       mapped_size    = 0;
-    shm_handle   new_segment    = SEGMENT_HANDLE_INVALID;
 
     _shm_log(
         LL_SHM_DEBUG,
@@ -1572,7 +1587,6 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     if( temp == NULL )
     {
-        return false;
         if( !_release_lock( segment, SHM_HWLOCK ) )
         {
             _shm_log(
@@ -1581,6 +1595,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
                 ( uint64_t ) segment
             );
         }
+        return false;
     }
     // Critical section -- need to lock! //
     if(
@@ -1606,6 +1621,13 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         return false;
     }
 
+    fprintf(
+        stdout,
+        ">>Copied %zu bytes from %p to %p (temp)\n",
+        __segment_lut[segment].mapped_size,
+        __segment_lut[segment].mapped_address,
+        temp
+    );
     if(
         unlikely(
             !_shm_wrapper(
@@ -1653,14 +1675,6 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         __segment_lut[segment].mapped_address = mapped_address;
         __segment_lut[segment].mapped_size    = mapped_size;
         __segment_lut[segment].handle         = segment;
-        if( !_release_lock( segment, SHM_HWLOCK ) )
-        {
-            _shm_log(
-                LL_SHM_ERROR,
-                "Failed to release HWLOCK on %lu",
-                ( uint64_t ) segment
-            );
-        }
 
         if(
             unlikely(
@@ -1676,7 +1690,9 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
                 LL_SHM_DEBUG,
                 "Failed to copy stash back into resized shared memory segment"
             );
+
             free( temp );
+
             if( !_release_lock( segment, SHM_HWLOCK ) )
             {
                 _shm_log(
@@ -1685,10 +1701,19 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
                     ( uint64_t ) segment
                 );
             }
+
             return false;
         }
-
+        fprintf(
+            stdout,
+            ">>Copied %zu bytes from %p (temp) to %p\n",
+            old_size + offsetof( seg_header, data ),
+            temp,
+            __segment_lut[segment].mapped_address
+        );
     }
+
+    ( ( seg_header * ) mapped_address )->size = mapped_size;
 
     free( temp );
     if( !_release_lock( segment, SHM_HWLOCK ) )

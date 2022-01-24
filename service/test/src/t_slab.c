@@ -74,7 +74,7 @@ int main( void )
     }
 
     // Check setting flag - don't actually want to crash the test ;)
-#ifndef _FORCE_SIGSEGV_ON_CANARY_FAILURE
+#ifdef _FORCE_SIGSEGV_ON_CANARY_FAILURE
     fprintf( stdout, "Making out-of-bounds write to %p (%lu)\n", &(ptr[i]), i );
     ptr[i]=42;
 
@@ -91,8 +91,22 @@ int main( void )
     );
 #endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
 
+    
+    fprintf( stdout, "Extending allocation...\n" );
+    ref = smalloc( slab, sizeof( uint64_t ) * TEST_SIZE * 4 );
+
+    if( ref_is_null( ref ) )
+    {
+        fprintf( stderr, "Failed to extend allocation\n" );
+        exit( 1 );
+    }
+   
     fprintf( stdout, "Freeing allocation\n" );
+    
+    
     sfree( slab, ref );
     header = get_header_by_context( slab );
+
+
     return 0;
 }

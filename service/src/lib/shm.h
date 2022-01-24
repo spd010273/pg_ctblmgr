@@ -488,9 +488,11 @@ extern offset_t ref_get_offset( __ref );
 extern shm_handle ref_get_segment( __ref );
 extern __ref ref_set_segment( __ref, shm_handle );
 extern __ref ref_set_offset( __ref, offset_t );
+
 extern bool is_locked( shm_handle, shm_lock );
 extern bool get_lock( shm_handle, shm_lock );
 extern bool release_lock( shm_handle, shm_lock );
+
 // Logging helpers
 
 typedef enum {
