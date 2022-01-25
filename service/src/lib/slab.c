@@ -45,6 +45,7 @@ static __inline__ shalloc_header * _get_header_by_context( context_t );// __attr
 static __inline__ context_t _new_slab( const char *, size_t, uint64_t );
 static __inline__ __ref _shmalloc( context_t, size_t, bool );
 static __inline__ bool __shrealloc_internal( shalloc_header *, uint64_t );
+static __inline__ __ref _shrealloc( context_t, __ref, uint64_t );
 
 // FSM helpers
 static __inline__ uint64_t _get_fsm_length( shalloc_header * );// __attribute__((always_inline));
@@ -700,6 +701,11 @@ void sfree( context_t ctx, __ref pointer )
     return;
 }
 
+static __inline__ __ref _shrealloc( context_t ctx, __ref oldref, uint64_t count )
+{
+
+}
+
 static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
 {
     shalloc_header * header      = NULL;
@@ -1060,6 +1066,11 @@ static __inline__ uint64_t __find_fsm_spot(
     fsm_length = _get_fsm_length( header );
     mask_last  = ~( mask_last << ( requested_length % FSM_SHIFT_WIDTH ) );
 
+    // Note that the position / iter expressed in these statements is inverted (directionally) prior
+    // to return to caller, instead of the 0th element being the LSB of the 0th word, it's the MSB of the nth word.
+//    #ifdef SLAB_DEBUG
+//    fprintf( stdout, "__find_fsm_spot( %p, %lu ) startup\n", header, requested_length );
+//    #endif // SLAB_DEBUG
     if( requested_length <= FSM_SHIFT_WIDTH )
     {
         last_word      = true;
@@ -1076,19 +1087,44 @@ static __inline__ uint64_t __find_fsm_spot(
 
         if( ( fsm_word & skip_mask ) == skip_mask )
         { // Mask out the fsm word, if it's filled we can jump ahead by the full width
-            iter += FSM_WIDTH;
+            iter     += FSM_WIDTH;
+            position += FSM_WIDTH;
+//            #ifdef SLAB_DEBUG
+//            fprintf( stdout, "Fast skipped to iter %lu\n", ( uint64_t ) iter );
+//            #endif // SLAB_DEBUG
             continue;
         }
 
         for( fsm_word_i = 0; fsm_word_i < FSM_RATIO; fsm_word_i++ )
         { // Iterate over words within the given fsm_t word, size FSM_SHIFT_WIDTH bits
             temp = ( fsm_cmp_t ) ( fsm_word >> ( ( fsm_word_i ) * FSM_SHIFT_WIDTH ) );
-
+//            #ifdef SLAB_DEBUG
+//            fprintf(
+//                stdout,
+//                "fsm_i: %lu, fsm_word_i: %lu, position %lu, iter %lu, bits_comp: %lu, last_word %s, compare_active %s\n",
+//                ( uint64_t ) fsm_i,
+//                ( uint64_t ) fsm_word_i,
+//                ( uint64_t ) position,
+//                ( uint64_t ) iter,
+//                ( uint64_t ) bits_comp,
+//                last_word ? "T" : "F",
+//                compare_active ? "T" : "F"
+//            );
+//            fprintf( stdout, "Current FSM Word:\n" );
+//            print_bin( ( uint64_t ) fsm_word );
+//            fprintf( stdout, "Temp:\n" );
+//            print_bin( ( uint64_t ) temp );
+//            fprintf( stdout, "Mask:\n" );
+//            print_bin( ( uint64_t ) mask );
+//            #endif // SLAB_DEBUG
             if( ( ~(temp) & mask ) == mask )
             {
                 if( last_word )
                 { // Prep for return & attempt to compactify past word boundaries
                     // Early exit when shifting wont help
+//                    #ifdef SLAB_DEBUG
+//                    fprintf( stdout, "Early exit triggered for position %lu\n", ( uint64_t ) position );
+//                    #endif // SLAB_DEBUG
                     if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
                         return header->max_allocations - ( position + requested_length );
 
@@ -1107,7 +1143,7 @@ static __inline__ uint64_t __find_fsm_spot(
                 }
 
                 bits_comp -= FSM_SHIFT_WIDTH;
-                last_word  = ( bits_comp < FSM_SHIFT_WIDTH );
+                last_word  = ( bits_comp <= FSM_SHIFT_WIDTH );
 
                 if( !compare_active )
                     compare_active = true;
@@ -1117,6 +1153,9 @@ static __inline__ uint64_t __find_fsm_spot(
             }
             else
             {   // No match
+//                #ifdef SLAB_DEBUG
+//                fprintf( stdout, "No match - state reset.\n" );
+//                #endif // SLAB_DEBUG
                 if( compare_active )
                 { // reset counters and markers
                     bits_comp = requested_length;

@@ -1,7 +1,7 @@
 pg_ctblmgr
 ----------
 
-Logical Replication Based, Asynchronous Eager Materialized Views
+Logical Replication Based, Asynchronous Incremental  Materialized Views
 
 # Summary
 

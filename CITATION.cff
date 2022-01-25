@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+authors:
+- family-names: "Autry"
+  given-names: "Chris"
+  orcid: "https://orcid.org/0000-0002-3521-7299"
+title: "pg_ctblmgr: Asynchronous Incremental Materialized Views for PostgreSQL"
+version: 0.1
+url: "https://bitbucket.org/neadwerx/pg_ctblmgr/"
