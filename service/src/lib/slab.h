@@ -134,7 +134,8 @@ typedef uint64_t allocset_t;
 // which has been relocated ti the uint8_t * data section of shm's control segment
 typedef struct shalloc_header {
     uint32_t       magic;
-    shm_handle     segment; // NOTE: this is the data segment, not the segment this header is stored in
+    shm_handle     segment; 
+    // Initialization / boilerplate// NOTE: this is the data segment, not the segment this header is stored in
     size_t         object_size;
     size_t         count_hint;
     __ref          allocs; // This is an array of __refs that has n_allocs positions, with element 0 at this __ref's location
@@ -162,14 +163,17 @@ typedef struct shalloc_control {
     bool           locked;
 } shalloc_control;
 
+// Initialization / boilerplate
 extern bool slab_init( void );
 extern context_t new_slab( const char *, size_t );
 extern context_t new_slab_with_hint( const char *, size_t, uint64_t );
 extern void slab_set_count_hint( context_t, size_t );
+extern void destroy_slab( context_t );
 
 // Extra malloc/realloc calls where # of objects requested are used
-//extern __ref smalloc_object_count( context_t, uint64_t );
-//extern __ref shrealloc_object_count( context_t, __ref, uint64_t );
+extern __ref scalloc_object_count( context_t, uint64_t );
+extern __ref smalloc_object_count( context_t, uint64_t );
+extern __ref srealloc_object_count( context_t, __ref, uint64_t );
 
 // Traditional malloc/calloc/realloc/free calls where bytes are specified
 extern __ref scalloc( context_t, size_t, uint64_t );

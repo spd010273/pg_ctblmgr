@@ -13,6 +13,10 @@ int main( void )
 {
     context_t  slab = 0;
     __ref      ref  = get_null_ref();
+    __ref      ref2 = get_null_ref();
+    __ref      ref3 = get_null_ref();
+    __ref      ref4 = get_null_ref();
+    __ref      ref5 = get_null_ref();
     uint64_t * ptr  = NULL;
     uint64_t   i    = 0;
     shalloc_header * header = NULL;
@@ -93,20 +97,29 @@ int main( void )
 
     
     fprintf( stdout, "Extending allocation...\n" );
-    ref = smalloc( slab, sizeof( uint64_t ) * TEST_SIZE * 4 );
+    ref2 = smalloc( slab, sizeof( uint64_t ) * TEST_SIZE * 4 );
 
-    if( ref_is_null( ref ) )
+    if( ref_is_null( ref2 ) )
     {
         fprintf( stderr, "Failed to extend allocation\n" );
         exit( 1 );
     }
    
-    fprintf( stdout, "Freeing allocation\n" );
-    
-    
-    sfree( slab, ref );
+    ref3 = smalloc( slab, sizeof( uint64_t ) );    
+    ref4 = smalloc( slab, sizeof( uint64_t ) );
+    ref5 = smalloc( slab, sizeof( uint64_t ) );
     header = get_header_by_context( slab );
 
-
+    print_fsm( header );    
+    fprintf( stdout, "Freeing allocation\n" );
+    
+     
+    sfree( slab, ref );
+    print_fsm( header );
+    sfree( slab, ref2 );
+    sfree( slab, ref3 );
+    sfree( slab, ref4 );
+    sfree( slab, ref5 );
+    print_fsm( header );
     return 0;
 }
