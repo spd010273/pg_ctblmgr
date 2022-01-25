@@ -189,7 +189,7 @@ static __inline__ __ref _ref_set_segment( __ref ref, shm_handle segment )
 
 /*
  * void * get_ptr_fast( __ref )
- * 
+ *
  * Same as get_ptr. There is no automap or autoextend functionality here, we
  * attempt to return a local pointer given a __ref as fast as possible.
  * Obviously, we forego validation and safety checks, so use this carefully
@@ -264,13 +264,13 @@ __inline__ void * get_ptr( __ref ref )
     #endif // SHM_AUTO_MAP
 
     mapped_size = __segment_lut[segment].mapped_size;
-    
+
     if( unlikely( ( ( seg_header * ) mapped_address )->size != mapped_size ) )
     {
         // Need a remap
         _shm_log( LL_SHM_DEBUG, "Segment header size and mapped size do not match. This segment has been resized and will auto-remap" );
         if(
-            unlikely( 
+            unlikely(
                 !_shm_wrapper(
                     SHM_DETACH,
                     segment,
@@ -617,6 +617,7 @@ static void _shm_init( size_t extra )
     for( i = 0; i < control_header->max_entries; i++ )
     {
         control_header->segments[i]     = (shm_handle) SEGMENT_HANDLE_INVALID;
+        control_header->hwlocks[i]      = false;
         __segment_lut[i].mapped_address = NULL;
         __segment_lut[i].mapped_size    = 0;
         __segment_lut[i].handle         = (shm_handle) SEGMENT_HANDLE_INVALID;
@@ -1304,6 +1305,13 @@ static __inline__ bool _is_locked( shm_handle segment, shm_lock locktype )
     seg_header * header = NULL;
     handle_iter  i      = 0;
 
+    _shm_log(
+        LL_SHM_DEBUG,
+        "is_locked( %lu, %s )",
+        ( uint64_t ) segment,
+        locktype == SHM_EXCLUSIVE ? "Exclusive" :
+            locktype == SHM_LWLOCK ? "LWLOCK" : "HWLOCK"
+    );
     if( unlikely( segment >= SHM_MAX_SEGMENTS ) )
         return true;
     if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
@@ -1339,9 +1347,6 @@ static __inline__ bool _is_locked( shm_handle segment, shm_lock locktype )
     }
     else if( locktype == SHM_HWLOCK )
     {
-        if( control_header->locked )
-            return true;
-
         if( control_header->hwlocks[segment] )
             return true;
 
@@ -1376,7 +1381,7 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
 {
     seg_header * header         = NULL;
     handle_iter  i              = 0;
-    bool **      locks_acquired = NULL;
+    volatile bool ** locks_acquired = NULL;
     uint64_t     num_locks      = 0;
     uint64_t     lock_i         = 0;
 
@@ -1399,22 +1404,22 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
     }
 
     num_locks      = SHM_MAX_SEGMENTS * 2 + 1;
-    locks_acquired = malloc( sizeof( bool * ) * num_locks );
+    locks_acquired = malloc( sizeof( volatile bool * ) * num_locks );
 
     if( locks_acquired == NULL )
         return false;
     // Phase I - enumerate locks we need to get
     if( locktype == SHM_EXCLUSIVE )
     {
-        locks_acquired[lock_i] = ( bool * ) &( control_header->locked );
+        locks_acquired[lock_i] = ( volatile bool * ) &( control_header->locked );
 
         for( i = 0; i < control_header->entry_count; i++ )
         {
             if( unlikely( __segment_lut[i].mapped_address == NULL ) )
                 continue;
-            locks_acquired[lock_i] = ( bool * ) &(control_header->hwlocks[i]);
+            locks_acquired[lock_i] = ( volatile bool * ) &(control_header->hwlocks[i]);
             lock_i++;
-            locks_acquired[lock_i] = ( bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked);
+            locks_acquired[lock_i] = ( volatile bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked);
             lock_i++;
         }
     }
@@ -1426,20 +1431,21 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
             return false;
         }
 
-        locks_acquired[lock_i] = ( bool * ) &(control_header->hwlocks[i]);
+        locks_acquired[lock_i] = ( volatile bool * ) &(control_header->hwlocks[segment]);
         lock_i++;
-        locks_acquired[lock_i] = ( bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address)->locked);
+
+        locks_acquired[lock_i] = ( volatile bool * ) &(( ( seg_header * ) __segment_lut[segment].mapped_address)->locked);
         lock_i++;
     }
     else if( locktype == SHM_LWLOCK )
     {
-        if( unlikely( __segment_lut[i].mapped_address == NULL ) )
+        if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
         {
             free( locks_acquired );
             return false;
         }
 
-        locks_acquired[lock_i] = ( bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address)->locked);
+        locks_acquired[lock_i] = ( volatile bool * ) &(( ( seg_header * ) __segment_lut[segment].mapped_address)->locked);
         lock_i++;
     }
 
@@ -1450,7 +1456,7 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
     {
         if( !__TNS_MUTEX( locks_acquired[lock_i] ) )
         {
-            for( i = lock_i; i > 0; i-- )
+            for( i = lock_i - 1; i != SHM_HANDLE_ITER_MAX; --i )
             {
                 __C_MUTEX( locks_acquired[i] );
             }
@@ -1475,7 +1481,7 @@ static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
     // This IS NOT SAFE to be called from _get_lock()
     seg_header * header         = NULL;
     handle_iter  i              = 0;
-
+    
     // provide a consistent interface for locking so that deadlocks are harder to trigger
     if( unlikely( ((locktype != SHM_EXCLUSIVE) && (segment >= SHM_MAX_SEGMENTS)) ) )
     {
@@ -1511,7 +1517,7 @@ static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
 
     if( locktype == SHM_EXCLUSIVE )
     {
-        for( i = control_header->entry_count; i > 0; i-- )
+        for( i = control_header->entry_count - 1; i != SHM_HANDLE_ITER_MAX; --i )
         {
             if( ( seg_header * ) __segment_lut[i].mapped_address == NULL )
                 continue;

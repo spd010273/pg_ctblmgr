@@ -19,8 +19,6 @@
  *
  * Segments will be laid out as:
  * +--------------------------------------------------------+ lower virtual addresses
- * |                   SHM segment header                   |
- * +--------------------------------------------------------+
  * |                        Canary                          |
  * +--------------------------------------------------------+
  * |                                                        |
@@ -32,6 +30,8 @@
  * |                        Canary                          |
  * +--------------------------------------------------------+
  * |                    Free Space Map                      |
+ * +--------------------------------------------------------|
+ * |                        Canary                          |
  * +--------------------------------------------------------+ higher virtual address
  *
  * Here, the Free Space Map (FSM)'s bit positions coincide with
@@ -69,7 +69,6 @@
 #define _SHALLOC_EXTRA_SANE 1 // Enable extra sanity checks
 #define _SHALLOC_REALLOC_MULTIPLE 2 // IFF a slab realloc occurs-  how aggressively do we overallocate?
 #undef  _SHALLOC_CONTROL_IN_OWN_SEGMENT
-#define _SHALLOC_MAX_ALLOCS_PER_SLAB 2048
 #define _SHALLOC_CONTROL_MAGIC 0xF0042069
 #define _SHALLOC_HEADER_MAGIC 0xDEED144A
 #define _INVALID_CONTEXT 0xB16F00FE
@@ -112,29 +111,41 @@ typedef uint16_t fsm_cmp_t;
 
 #define FSM_RATIO ( FSM_WIDTH / FSM_SHIFT_WIDTH )
 
-#if defined( _SHALLOC_MAX_ALLOCS_PER_SLAB ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB <= UCHAR_MAX )
-typedef uint8_t allocset_t;
-#elif defined( _SHALLOC_MAX_ALLOCS_PER_SLAB ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB > UCHAR_MAX ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB <= USHRT_MAX )
-typedef uint16_t allocset_t;
-#elif defined( _SHALLOC_MAX_ALLOCS_PER_SLAB ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB > USHRT_MAX ) && ( _SHALLOC_MAX_ALLOCS_PER_SLAB <= UINT_MAX )
-typedef uint32_t allocset_t;
-#else
- #ifndef _SHALLOC_MAX_ALLOCS_PER_SLAB
- #define _SHALLOC_MAX_ALLOCS_PER_SLAB ULONG_MAX
- #endif // _SHALLOC_MAX_ALLOCS_PER_SLAB
-typedef uint64_t allocset_t;
-#endif // allocset_t setup
-
 // context_t is used to identify which slab is used for a given compilation unit.
 // IE the unit will initialize the slab with some string identifier, and use the
 // static context returned when doing allocs/frees. It creates a little boilerplate
 // for the caller but saves the callee some time when resolving stuff
 
-// Note - these are both stored together in the control segment for the slab allocator
-// which has been relocated ti the uint8_t * data section of shm's control segment
+/*
+ *  slab layout:
+ *  +---------------+     +---------------+     +---------------+
+ *  |               |-->  |ALLOCS[]       |     |ALLOCSET[]     |
+ *  |               |     |               |     |               |
+ *  |               |     |     data      |     |               |
+ *  |    control    |     |               |     |               |
+ *  |    segment    |     |               |     |               |
+ *  |   (headers)   |     |               |     |               |
+ *  |               |     +---------------+     |               |
+ *  |               |     |      FSM      |     |               |
+ *  +---------------+     +---------------+     +---------------+
+ *              |                                   ^
+ *              +-----------------------------------+
+ *
+ *  The shalloc_control and shalloc_headers are stored together in the data
+ *  section of the shm.c control header. Each initialized slab (shalloc header)
+ *  constitutes the data section, referenced by allocs[] and FSM refs. These reside
+ *  on the same shm.c segment. allocsets live in their own shm.c segment.
+ *
+ *  When segment resizes are needed, these happen in-place. shm.c's internal
+ *  headers are updated with the correct size, and when a process goes to execute
+ *  get_ptr(), it can detect a mismatch between its own __segment_lut[]'s mapped_size
+ *  and the header's defined size, indicating that the calling process needs to perform
+ *  a remap prior to dereferencing the pointer
+ *
+ */
 typedef struct shalloc_header {
     uint32_t       magic;
-    shm_handle     segment; 
+    shm_handle     segment;
     // Initialization / boilerplate// NOTE: this is the data segment, not the segment this header is stored in
     size_t         object_size;
     size_t         count_hint;
@@ -153,7 +164,10 @@ typedef struct shalloc_header {
     canary_t       c_fsmstart;
     __ref          loc_c_fsmend;
     canary_t       c_fsmend;
-    uint16_t       allocset[_SHALLOC_MAX_ALLOCS_PER_SLAB]; // Stores allocation sizes by index - TODO: Maybe make this variable length in its own segment??
+    // TODO - create hashtable to further compactify allocset
+    __ref          allocset; // Different segment than the data segment
+    uint32_t       max_allocset;
+    shm_handle     allocset_handle;
 } __attribute__((packed)) shalloc_header;
 
 typedef struct shalloc_control {

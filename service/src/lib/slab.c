@@ -40,6 +40,8 @@ static __inline__ bool check_context( context_t ) __attribute__((always_inline, 
 static __inline__ bool _check_canaries( shalloc_header * ) __attribute__((always_inline, flatten));
 static __inline__ __ref _get_alloc_element_by_index( shalloc_header *, uint64_t ) __attribute__((always_inline));
 static __inline__ shalloc_header * _get_header_by_context( context_t );// __attribute__((always_inline));
+static __inline__ uint32_t _get_allocset_element_by_index( shalloc_header *, uint32_t );
+static __inline__ bool _set_allocset_element_by_index( shalloc_header *, uint32_t, uint32_t );
 
 // Allocation helpers
 static __inline__ context_t _new_slab( const char *, size_t, uint64_t );
@@ -437,6 +439,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
     size_t   old_fsm_length = 0;
     size_t   size_needed    = 0;
     size_t   alloc_offset   = 0;
+    void *   old_fsm        = NULL;
 
     if( unlikely( header == NULL ) )
     #ifdef SLAB_DEBUG
@@ -478,6 +481,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
     //  We'll be doing the latter.
     alloc_offset = get_segment_size( header->segment );
     size_needed  = ( size_needed * unit_size ) + alloc_offset;
+    old_fsm      = get_ptr_fast( header->loc_c_fsmstart );
 
     if( !shm_resize_segment( header->segment, size_needed ) )
     #ifdef SLAB_DEBUG
@@ -514,7 +518,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
         get_ptr_fast( header->allocs ),
         ( header->object_size * header->max_allocations )
     );
-    fsm = ( void * ) _PTR_ADD_OFFSET( c_fsmstart, sizeof( canary_t ) );
+    fsm      = ( void * ) _PTR_ADD_OFFSET( c_fsmstart, sizeof( canary_t ) );
     c_fsmend = ( void * ) _PTR_ADD_OFFSET(
         fsm,
         ( sizeof( fsm_t ) * _get_fsm_length( header ) )
@@ -531,6 +535,35 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
     header->fsm            = get_ref( fsm );
 
     *( ( canary_t * ) c_fsmend ) = header->c_fsmend;
+
+    // Blank out the old FSM and canaries to avoid divulging allocation
+    // information to the caller
+    memset(
+        old_fsm,
+        0,
+        old_fsm_length + 1
+    );
+    
+    if( header->max_allocset <= header->max_allocations )
+    {
+        // Extend allocset
+        size_needed = header->max_allocations * sizeof( uint32_t );
+        if( !shm_resize_segment( header->allocset_handle, size_needed ) )
+        #ifdef SLAB_DEBUG
+        {
+            fprintf( stderr, "_shrealloc_internal: Failed to resize allocset segment\n" );
+        #endif // SLAB_DEBUG
+            return false;
+        #ifdef SLAB_DEBUG
+        }
+        #endif // SLAB_DEBUG
+    
+        header->max_allocset = get_segment_size( header->allocset_handle ) / sizeof( uint32_t );
+
+        #ifdef SLAB_DEBUG
+        fprintf( stdout, "Resized allocset segment to hold %lu individual allocations\n", ( uint64_t ) header->max_allocset );
+        #endif // SLAB_DEBUG
+    }
 
     return _check_canaries( header );
 }
@@ -613,7 +646,10 @@ static __inline__ bool _ref_get_index_and_size(
     #endif // SLAB_DEBUG
 
     *index = ( offset / header->object_size ) - 1;
-    *size  = ( size_t ) header->allocset[*index];
+    *size  = ( size_t ) _get_allocset_element_by_index( header, ( uint32_t ) *index );
+
+    if( *size == UINT_MAX )
+        return false;
 
     return true;
 }
@@ -670,13 +706,23 @@ void sfree( context_t ctx, __ref pointer )
     }
     #endif // SLAB_DEBUG
 
-    size = header->allocset[index];
+    size = _get_allocset_element_by_index( header, index );
+    
+    if( unlikely( size == UINT_MAX ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stdout, "allocset[%lu] invalid\n", ( uint64_t ) index );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     #ifdef SLAB_DEBUG
     fprintf( stdout, "Freeing element of size %lu\n", size );
     #endif // SLAB_DEBUG
 
-    if( unlikely( header->allocset[index] == 0 ) )
+    if( unlikely( size == 0 ) )
     #ifdef SLAB_DEBUG
     {
         fprintf( stderr, "sfree: Cannot free 0-sized element\n" );
@@ -701,7 +747,16 @@ void sfree( context_t ctx, __ref pointer )
         _clear_fsm_element_by_index( header, i );
     }
 
-    header->allocset[index] = 0;
+    if( !_set_allocset_element_by_index( header, index, 0 ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "Failed to clear allocset element %lu\n", ( uint64_t ) index );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+    
     header->n_allocs       -= size;
     __C_MUTEX( &(header->locked) );
     return;
@@ -857,7 +912,15 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
         }
 
         // Mark allocation size
-        header->allocset[index] = 1;
+        if( !_set_allocset_element_by_index( header, index, 1 ) )
+        #ifdef SLAB_DEBUG
+        {
+            fprintf( stderr, "Failed to set allocset element %lu\n", ( uint64_t ) index );
+        #endif // SLAB_DEBUG
+            return get_null_ref();
+        #ifdef SLAB_DEBUG
+        }
+        #endif // SLAB_DEBUG
     }
 
     if( zero_fill == true )
@@ -1036,7 +1099,13 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     }
     // XXX: We need to track how large the allocation is for purposes of freeing later
 
-    header->allocset[bit_position] = width;
+    if( !_set_allocset_element_by_index( header, bit_position, width ) )
+    {
+        fprintf( stderr, "_get_fsm_slot_by_width: failed to set allocset\n" );
+        errno = EINVAL;
+        return 0;
+    }
+    
     #ifdef SLAB_DEBUG
     fprintf( stdout, "_get_fsm_slot_by_width( %p, %lu ) FSM SNAPSHOT\n", header, width );
     _print_fsm( header );
@@ -1243,6 +1312,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     uint64_t   unit_size      = 0;
     uint64_t   count_hint     = 0;
     uint64_t   initial_size   = 0;
+    void *     allocset       = NULL;
 
     if( ctx == INVALID_CONTEXT || header == NULL )
         return false;
@@ -1284,7 +1354,12 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     // Available space - accounting for headers and canaries
     available = ( get_segment_size( handle ) - ( 3 * sizeof( canary_t ) ) );
     header->max_allocations = ( available / unit_size ) * CHAR_BIT * sizeof( fsm_t );
-
+    
+    allocset = new_segment( header->max_allocations * sizeof( uint32_t ) );
+    header->allocset_handle = get_handle_from_ptr( allocset );
+    header->allocset = get_ref( allocset );
+    header->max_allocset = get_segment_size( header->allocset_handle ) / sizeof( uint32_t );
+    fprintf( stdout, "Allocset given handle %lu\n, max_allocset %lu\n", ( uint64_t ) header->allocset_handle, ( uint64_t ) header->max_allocset );
     fprintf(
         stdout,
         "Max allocations is %lu objects of size %lu\n",
@@ -1383,6 +1458,57 @@ static __inline__ shalloc_header * _get_header_by_context( context_t ctx )
         return NULL;
 
     return &(mapped_control->headers[ctx]);
+}
+
+static __inline__ uint32_t _get_allocset_element_by_index(
+    shalloc_header * header,
+    uint32_t         index
+)
+{
+    uint32_t * ptr = NULL;
+
+    if( unlikely( header == NULL ) )
+        return UINT_MAX;
+    
+    if( unlikely( index > header->max_allocset ) )
+        return UINT_MAX;
+
+    ptr = ( uint32_t * ) _PTR_ADD_OFFSET(
+        get_ptr_fast( header->allocset ),
+        sizeof( uint32_t ) * index
+    );
+
+    if( unlikely( ptr == NULL ) )
+        return UINT_MAX;
+    
+    return *ptr;
+}
+
+static __inline__ bool _set_allocset_element_by_index(
+    shalloc_header * header,
+    uint32_t         index,
+    uint32_t         value
+)
+{
+    uint32_t * ptr = NULL;
+
+    if( unlikely( header == NULL ) )
+        return false;
+
+    if( unlikely( index > header->max_allocset ) )
+        return false;
+
+    ptr = ( uint32_t * ) _PTR_ADD_OFFSET(
+        get_ptr_fast( header->allocset ),
+        sizeof( uint32_t ) * index
+    );
+
+    if( unlikely( ptr == NULL ) )
+        return false;
+
+    *ptr = value;
+
+    return true;
 }
 
 static __inline__ bool _fail_canary( void )
@@ -1871,10 +1997,11 @@ static void print_bin( uint64_t data )
 
 static void _dump_header( shalloc_header * header )
 {
-    void *   ptr = NULL;
-    uint64_t i   = 0;
-    uint64_t j   = 0;
-    uint64_t k   = 0;
+    void *   ptr        = NULL;
+    uint64_t i          = 0;
+    uint64_t j          = 0;
+    uint64_t k          = 0;
+    uint32_t alloc_size = 0;
 
     if( header == NULL )
         return;
@@ -1900,7 +2027,10 @@ static void _dump_header( shalloc_header * header )
         "  loc_c_fsmstart: %p\n"
         "  c_fsmstart: %x %x\n"
         "  loc_c_fsmend: %p\n"
-        "  c_fsmend: %x %x\n",
+        "  c_fsmend: %x %x\n"
+        "  allocset: %p\n"
+        "  max_allocset %u\n"
+        "  allocset_handle %lu\n",
         ( uint32_t ) header->magic,
         ( uint64_t ) header->segment,
         ( size_t ) header->object_size,
@@ -1922,7 +2052,11 @@ static void _dump_header( shalloc_header * header )
         ( uint32_t ) header->c_fsmstart,
         ( void * ) get_ptr( header->loc_c_fsmend ),
         ( uint32_t ) ( ( ( uint64_t ) header->c_fsmend ) >> 32 ),
-        ( uint32_t ) header->c_fsmend
+        ( uint32_t ) header->c_fsmend,
+        ( void * ) get_ptr( header->allocset ),
+        ( uint32_t ) header->max_allocset,
+        ( uint64_t ) header->allocset_handle
+
     );
     fprintf( stdout, "---- HEADER DATA DETAIL:\n-- FSM:\n" );
     _print_fsm( header );
@@ -1934,12 +2068,20 @@ static void _dump_header( shalloc_header * header )
             ( i * header->object_size )
         );
 
-        if( header->allocset[i] == 0 )
+        alloc_size = _get_allocset_element_by_index( header, i );
+
+        if( alloc_size == UINT_MAX )
+        {
+            fprintf( stderr, "allocset index %lu invalid\n", i );
             continue;
+        }
         
+        if( alloc_size == 0 )
+            continue;
+
         fprintf( stdout, "ALLOC[%lu] (%p):\n", ( uint64_t ) i, ptr );
 
-        for( j = 0; j < header->allocset[i]; j++ )
+        for( j = 0; j < alloc_size; j++ )
         {
             ptr = _PTR_ADD_OFFSET( ptr, header->object_size );
             for( k = 0; k < header->object_size; k++ )
@@ -1951,17 +2093,18 @@ static void _dump_header( shalloc_header * header )
                     hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) & 0x0F]
                 );
             }
-            
+
             fprintf( stdout, "\n" );
         }
     }
 
     fprintf( stdout, "-- ALLOCSET[]\n" );
-    for( i = 0; i < _SHALLOC_MAX_ALLOCS_PER_SLAB; i++ )
+    for( i = 0; i < header->max_allocset; i++ )
     {
-        if( header->allocset[i] == 0 )
+        ptr = _PTR_ADD_OFFSET( get_ptr( header->allocset ), i * sizeof( uint32_t ) );
+        if( *((uint32_t * ) ptr) == 0 )
             continue;
-        fprintf( stdout, "ALLOCSET[%lu]: %lu\n", ( uint64_t ) i, ( uint64_t ) header->allocset[i] );
+        fprintf( stdout, "ALLOCSET[%lu]: %lu\n", ( uint64_t ) i, ( uint64_t ) *(( uint32_t * ) ptr) );
     }
     fprintf( stdout, "==============================\n" );
     return;

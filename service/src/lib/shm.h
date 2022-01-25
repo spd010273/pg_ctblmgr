@@ -260,6 +260,7 @@
 #if defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > 0 ) && ( SHM_MAX_SEGMENTS <= UCHAR_MAX )
 typedef uint8_t shm_handle;
 typedef uint8_t handle_iter;
+ #define SHM_HANDLE_ITER_MAX UCHAR_MAX
  #define SHM_HANDLE_SIZE 8
  #define SHM_HANDLE_MASK 0xFF
  #ifdef SHM_ENABLE_STRUCT_PACKING
@@ -268,6 +269,7 @@ typedef uint8_t handle_iter;
 #elif defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > UCHAR_MAX ) && ( SHM_MAX_SEGMENTS <= USHRT_MAX )
 typedef uint16_t shm_handle;
 typedef uint16_t handle_iter;
+ #define SHM_HANDLE_ITER_MAX USHRT_MAX
  #define SHM_HANDLE_SIZE 16
  #define SHM_HANDLE_MASK 0xFFFF
  #ifdef SHM_ENABLE_STRUCT_PACKING
@@ -276,6 +278,7 @@ typedef uint16_t handle_iter;
 #elif defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > USHRT_MAX ) && ( SHM_MAX_SEGMENTS <= UINT_MAX )
 typedef uint32_t shm_handle;
 typedef uint32_t handle_iter;
+ #define SHM_HANDLE_ITER_MAX UINT_MAX
  #define SHM_HANDLE_SIZE 32
  #define SHM_HANDLE_MASK 0xFFFFFFFF
  #if defined( __sys64 ) && defined( SHM_ENABLE_STRUCT_PACKING )
@@ -284,6 +287,7 @@ typedef uint32_t handle_iter;
 #else
 typedef uint64_t shm_handle;
 typedef uint64_t handle_iter;
+ #define SHM_HANDLE_ITER_MAX ULONG_MAX
  #define SHM_HANDLE_SIZE 64
  #define SHM_HANDLE_MASK 0xFFFFFFFFFFFFFFFF
  #ifndef SHM_MAX_SEGMENTS
@@ -363,7 +367,7 @@ extern size_t get_segment_size( shm_handle ); // Returns the size available to t
 typedef struct shm_segment {
     shm_handle handle;
     void *     mapped_address;
-    size_t     mapped_size; // This is not the user requested size, but the actual size of the segment. Typically a 
+    size_t     mapped_size; // This is not the user requested size, but the actual size of the segment. Typically a
 } __attribute__((packed)) shm_segment;
 #else
 typedef struct shm_segment {
