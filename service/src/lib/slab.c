@@ -62,8 +62,8 @@ static __inline__ __ref _move_to_shared( shalloc_header *, void **, size_t, bool
 
 #ifdef SLAB_DEBUG
 // Debugging
-static void dump_header( shalloc_header * );
-static void dump_context( context_t ); // calls dump_header()
+static void _dump_header( shalloc_header * );
+static void _dump_context( context_t ); // calls dump_header()
 static void print_byte( uint8_t );
 static void print_bin( uint64_t );
 static void _print_fsm( shalloc_header * );
@@ -72,6 +72,12 @@ static const char * bits[16] = {
     [ 4] = "0100", [ 5] = "0101", [ 6] = "0110", [ 7] = "0111",
     [ 8] = "1000", [ 9] = "1001", [10] = "1010", [11] = "1011",
     [12] = "1100", [13] = "1101", [14] = "1110", [15] = "1111",
+};
+static const char * hexes[16] = {
+    [ 0] = "0",   [ 1] = "1",   [ 2] = "2",   [ 3] = "3",
+    [ 4] = "4",   [ 5] = "5",   [ 6] = "6",   [ 7] = "7",
+    [ 8] = "8",   [ 9] = "9",   [10] = "A",   [11] = "B",
+    [12] = "C",   [13] = "D",   [14] = "E",   [15] = "F",
 };
 #endif // SLAB_DEBUG
 
@@ -505,7 +511,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
 
     header->max_allocations = ( available / unit_size ) * FSM_WIDTH;
     c_fsmstart = ( void * ) _PTR_ADD_OFFSET(
-        get_ptr( header->allocs ),
+        get_ptr_fast( header->allocs ),
         ( header->object_size * header->max_allocations )
     );
     fsm = ( void * ) _PTR_ADD_OFFSET( c_fsmstart, sizeof( canary_t ) );
@@ -516,7 +522,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
 
     memcpy(
         ( void * ) c_fsmstart,
-        ( void * ) get_ptr( header->loc_c_fsmstart ),
+        ( void * ) get_ptr_fast( header->loc_c_fsmstart ),
         old_fsm_length * sizeof( fsm_t ) + sizeof( canary_t )
     );
 
@@ -703,7 +709,14 @@ void sfree( context_t ctx, __ref pointer )
 
 static __inline__ __ref _shrealloc( context_t ctx, __ref oldref, uint64_t count )
 {
+    shalloc_header * header = NULL;
 
+    header = get_header_by_context( ctx );
+
+    if( header == NULL )
+        return get_null_ref();
+
+    return get_null_ref();
 }
 
 static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
@@ -849,7 +862,7 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
 
     if( zero_fill == true )
     {
-        ptr = get_ptr( retref );
+        ptr = get_ptr_fast( retref );
         if( ptr == NULL )
         #ifdef SLAB_DEBUG
         {
@@ -884,7 +897,7 @@ static __inline__ __ref _get_alloc_element_by_index( shalloc_header * header, ui
 
     return get_ref(
         _PTR_ADD_OFFSET(
-            get_ptr( header->allocs ),
+            get_ptr_fast( header->allocs ),
             ( header->object_size ) * ind
         )
     );
@@ -913,7 +926,7 @@ static __inline__ void _set_fsm_element_by_index(
     fsm_index  = ( ind / FSM_WIDTH );
     fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
-        get_ptr( header->fsm ),
+        get_ptr_fast( header->fsm ),
         fsm_index * sizeof( fsm_t )
     );
 
@@ -948,7 +961,7 @@ static __inline__ void _clear_fsm_element_by_index(
     fsm_index  = ( ind / FSM_WIDTH );
     fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
-        get_ptr( header->fsm ),
+        get_ptr_fast( header->fsm ),
         fsm_index * sizeof( fsm_t )
     );
 
@@ -983,7 +996,7 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint6
     fsm_index  = ( ind / FSM_WIDTH );
     fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
-        get_ptr( header->fsm ),
+        get_ptr_fast( header->fsm ),
         fsm_index * sizeof( fsm_t )
     );
 
@@ -1081,7 +1094,7 @@ static __inline__ uint64_t __find_fsm_spot(
     for( fsm_i = 0; fsm_i < fsm_length; fsm_i++ )
     { // Iterate over words of sizeof( fsm_t ) bytes
         fsm_word = *( ( fsm_t * ) _PTR_ADD_OFFSET(
-            get_ptr( header->fsm ),
+            get_ptr_fast( header->fsm ),
             ( ( fsm_length - 1 - fsm_i ) * sizeof( fsm_t ) )
         )); // Deref in outer loop
 
@@ -1333,7 +1346,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     if( zero_fill == true )
     {
         memset(
-            get_ptr( header->allocs ),
+            get_ptr_fast( header->allocs ),
             ( unsigned char ) _ZERO_FILL_BYTE,
             ( header->object_size * header->max_allocations )
         );
@@ -1391,7 +1404,7 @@ static __inline__ bool _check_canaries( shalloc_header * header )
     #ifdef SLAB_DEBUG
     fprintf( stdout, "Checking allocstart canary\n" );
     #endif // SLAB_DEBUG
-    c_ptr = get_ptr( header->loc_c_allocstart );
+    c_ptr = get_ptr_fast( header->loc_c_allocstart );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -1414,7 +1427,7 @@ static __inline__ bool _check_canaries( shalloc_header * header )
     #ifdef SLAB_DEBUG
     fprintf( stdout, "Checking fsmstart canary\n" );
     #endif // SLAB_DEBUG
-    c_ptr = get_ptr( header->loc_c_fsmstart );
+    c_ptr = get_ptr_fast( header->loc_c_fsmstart );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -1438,7 +1451,7 @@ static __inline__ bool _check_canaries( shalloc_header * header )
     #ifdef SLAB_DEBUG
     fprintf( stdout, "Checking fsmend canary\n" );
     #endif // SLAB_DEBUG
-    c_ptr = get_ptr( header->loc_c_fsmend );
+    c_ptr = get_ptr_fast( header->loc_c_fsmend );
 
     if( unlikely( c_ptr == NULL ) )
         return false;
@@ -1673,8 +1686,18 @@ static __inline__ __ref _move_to_shared(
     }
     #endif // SLAB_DEBUG
 
+    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "move_to_shared: Failed to obtain header lock\n" );
+    #endif // SLAB_DEBUG
+        return retref;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
     retref = _shmalloc( header->self, size, false );
-    target = get_ptr( retref );
+    target = get_ptr_fast( retref );
 
     if( unlikely( ref_is_null( retref ) || target == NULL ) )
     #ifdef SLAB_DEBUG
@@ -1729,6 +1752,16 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
     }
     #endif // SLAB_DEBUG
 
+    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "move_to_local: Failed to lock header\n" );
+    #endif // SLAB_DEBUG
+        return NULL;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
     if( unlikely( !_ref_get_index_and_size( header, *ref, &index, &size ) ) )
     #ifdef SLAB_DEBUG
     {
@@ -1742,7 +1775,7 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
     }
     #endif // SLAB_DEBUG
 
-    source = ( void * ) get_ptr( *ref );
+    source = ( void * ) get_ptr_fast( *ref );
 
     if( unlikely( source == NULL ) )
     #ifdef SLAB_DEBUG
@@ -1772,6 +1805,7 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
         header->object_size * size
     );
 
+    __C_MUTEX( &(header->locked) );
     if( do_free )
     {
         sfree( header->self, *ref );
@@ -1837,11 +1871,111 @@ static void print_bin( uint64_t data )
 
 static void _dump_header( shalloc_header * header )
 {
+    void *   ptr = NULL;
+    uint64_t i   = 0;
+    uint64_t j   = 0;
+    uint64_t k   = 0;
 
+    if( header == NULL )
+        return;
+
+    fprintf( stdout, "==== SHALLOC HEADER %p\n", header );
+    fprintf(
+        stdout,
+        "  magic: %x\n"
+        "  segment: %lu\n"
+        "  object_size: %zu\n"
+        "  count_hint: %zu\n"
+        "  allocs: %p\n"
+        "  n_allocs: %lu\n"
+        "  fsm: %p\n"
+        "  max_allocations: %lu\n"
+        "  object_id: %s\n"
+        "  self: %lu\n"
+        "  locked: %s\n"
+        "  i_front_fsm_bit: %lu\n"
+        "  i_rear_fsm_word: %lu\n"
+        "  loc_c_allocstart: %p\n"
+        "  c_allocstart: %x %x\n"
+        "  loc_c_fsmstart: %p\n"
+        "  c_fsmstart: %x %x\n"
+        "  loc_c_fsmend: %p\n"
+        "  c_fsmend: %x %x\n",
+        ( uint32_t ) header->magic,
+        ( uint64_t ) header->segment,
+        ( size_t ) header->object_size,
+        ( size_t ) header->count_hint,
+        ( void * ) get_ptr( header->allocs ),
+        ( uint64_t ) header->n_allocs,
+        ( void * ) get_ptr( header->fsm ),
+        ( uint64_t ) header->max_allocations,
+        ( char * ) header->object_id,
+        ( uint64_t ) header->self,
+        header->locked ? "T" : "F",
+        ( uint64_t ) header->i_front_fsm_bit,
+        ( uint64_t ) header->i_rear_fsm_word,
+        ( void * ) get_ptr( header->loc_c_allocstart ),
+        ( uint32_t ) ( ( ( uint64_t ) header->c_allocstart ) >> 32 ),
+        ( uint32_t ) header->c_allocstart,
+        ( void * ) get_ptr( header->loc_c_fsmstart ),
+        ( uint32_t ) ( ( ( uint64_t ) header->c_fsmstart ) >> 32 ),
+        ( uint32_t ) header->c_fsmstart,
+        ( void * ) get_ptr( header->loc_c_fsmend ),
+        ( uint32_t ) ( ( ( uint64_t ) header->c_fsmend ) >> 32 ),
+        ( uint32_t ) header->c_fsmend
+    );
+    fprintf( stdout, "---- HEADER DATA DETAIL:\n-- FSM:\n" );
+    _print_fsm( header );
+    fprintf( stdout, "-- ALLOCS[]:\n" );
+    for( i = 0; i < header->max_allocations; i++ )
+    {
+        ptr = _PTR_ADD_OFFSET(
+            get_ptr( header->allocs ),
+            ( i * header->object_size )
+        );
+
+        if( header->allocset[i] == 0 )
+            continue;
+        
+        fprintf( stdout, "ALLOC[%lu] (%p):\n", ( uint64_t ) i, ptr );
+
+        for( j = 0; j < header->allocset[i]; j++ )
+        {
+            ptr = _PTR_ADD_OFFSET( ptr, header->object_size );
+            for( k = 0; k < header->object_size; k++ )
+            {
+                fprintf(
+                    stdout,
+                    "%s%s",
+                    hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) >> 4],
+                    hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) & 0x0F]
+                );
+            }
+            
+            fprintf( stdout, "\n" );
+        }
+    }
+
+    fprintf( stdout, "-- ALLOCSET[]\n" );
+    for( i = 0; i < _SHALLOC_MAX_ALLOCS_PER_SLAB; i++ )
+    {
+        if( header->allocset[i] == 0 )
+            continue;
+        fprintf( stdout, "ALLOCSET[%lu]: %lu\n", ( uint64_t ) i, ( uint64_t ) header->allocset[i] );
+    }
+    fprintf( stdout, "==============================\n" );
+    return;
 }
 
 static void _dump_context( context_t ctx )
 {
+    shalloc_header * header = NULL;
+    header = _get_header_by_context( ctx );
 
+    return _dump_header( header );
+}
+void dump_context( context_t ctx )
+{
+    return _dump_context( ctx );
 }
 #endif // SLAB_DEBUG

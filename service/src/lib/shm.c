@@ -187,6 +187,35 @@ static __inline__ __ref _ref_set_segment( __ref ref, shm_handle segment )
     return ref;
 }
 
+/*
+ * void * get_ptr_fast( __ref )
+ * 
+ * Same as get_ptr. There is no automap or autoextend functionality here, we
+ * attempt to return a local pointer given a __ref as fast as possible.
+ * Obviously, we forego validation and safety checks, so use this carefully
+ * in situations where the segment is locked (not being manipulated) and
+ * we cannot return a pointer out of range
+ */
+__inline__ void * get_ptr_fast( __ref ref )
+{
+    #ifdef SHM_EXTRA_SANE
+    return get_ptr( ref );
+    #else
+    register shm_handle segment = SEGMENT_HANDLE_INVALID;
+    void *   ret                = NULL;
+
+    segment = _ref_get_segment( ref );
+
+    if( unlikely( segment >= SHM_MAX_SEGMENTS ) )
+        return NULL;
+
+    return _PTR_ADD_OFFSET(
+        GET_USER_PTR( __segment_lut[segment].mapped_address ),
+        ( size_t ) _ref_get_offset( ref )
+    );
+    #endif // SHM_EXTRA_SANE
+}
+
 __inline__ void * get_ptr( __ref ref )
 {
     void *   mapped_address     = NULL;

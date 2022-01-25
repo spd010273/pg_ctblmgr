@@ -20,7 +20,6 @@ int main( void )
     __ref      ref6 = get_null_ref();
     uint64_t * ptr  = NULL;
     uint64_t   i    = 0;
-    shalloc_header * header = NULL;
 
     if( !slab_init() )
     {
@@ -109,13 +108,10 @@ int main( void )
     ref3 = smalloc( slab, sizeof( uint64_t ) );    
     ref4 = smalloc( slab, sizeof( uint64_t ) );
     ref5 = smalloc( slab, sizeof( uint64_t ) );
-    header = get_header_by_context( slab );
-    print_fsm( header );    
 
     ref6 = smalloc( slab, sizeof( uint64_t ) * 64 );
-    print_fsm( header );
+    dump_context( slab );
     fprintf( stdout, "Freeing allocation\n" );
-    
      
     sfree( slab, ref );
     sfree( slab, ref2 );
@@ -123,6 +119,5 @@ int main( void )
     sfree( slab, ref4 );
     sfree( slab, ref5 );
     sfree( slab, ref6 );
-    print_fsm( header );
     return 0;
 }

@@ -234,7 +234,7 @@
 // This should be agnostic of all archs
 
 #define _PTR_BOUND_CHECK(p,b,s) ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) )
-
+#define _PTR_BOUND_CHECK_NULL(p,b,s) ( ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) ) ? p : NULL )
 #define ZERO_BUFFER_SIZE DEFAULT_PAGE_SIZE
 
 #ifndef MAP_NOSYNC
@@ -477,6 +477,7 @@ typedef enum {
 } shm_lock;
 
 extern __inline__ void * get_ptr( __ref ); // Get local pointer to mapping
+extern __inline__ void * get_ptr_fast( __ref ) __attribute__((flatten)); // above but only for contexts where the segment will not change
 extern __inline__ __ref get_ref( void * ); // Get absolute ref
 extern ctrl_header * get_control_header( void );
 extern shm_handle get_control_segment( void );

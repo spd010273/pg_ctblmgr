@@ -186,6 +186,7 @@ extern void * move_to_local( context_t, __ref * ); // Both make changes to the 2
 extern __ref move_to_shared( context_t, void **, size_t );
 
 // Debugging / testing functions
+extern void dump_context( context_t );
 extern bool force_canary_check( context_t );
 extern shalloc_header * get_header_by_context( context_t );
 extern void print_fsm( shalloc_header * header );
