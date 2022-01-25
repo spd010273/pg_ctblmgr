@@ -543,7 +543,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
         0,
         old_fsm_length + 1
     );
-    
+
     if( header->max_allocset <= header->max_allocations )
     {
         // Extend allocset
@@ -557,7 +557,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
         #ifdef SLAB_DEBUG
         }
         #endif // SLAB_DEBUG
-    
+
         header->max_allocset = get_segment_size( header->allocset_handle ) / sizeof( uint32_t );
 
         #ifdef SLAB_DEBUG
@@ -1469,7 +1469,7 @@ static __inline__ uint32_t _get_allocset_element_by_index(
 
     if( unlikely( header == NULL ) )
         return UINT_MAX;
-    
+
     if( unlikely( index > header->max_allocset ) )
         return UINT_MAX;
 
@@ -1480,7 +1480,7 @@ static __inline__ uint32_t _get_allocset_element_by_index(
 
     if( unlikely( ptr == NULL ) )
         return UINT_MAX;
-    
+
     return *ptr;
 }
 
@@ -2075,7 +2075,7 @@ static void _dump_header( shalloc_header * header )
             fprintf( stderr, "allocset index %lu invalid\n", i );
             continue;
         }
-        
+
         if( alloc_size == 0 )
             continue;
 
