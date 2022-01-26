@@ -52,6 +52,7 @@ static __inline__ __ref _shrealloc( context_t, __ref, uint64_t );
 // FSM helpers
 static __inline__ uint64_t _get_fsm_length( shalloc_header * );// __attribute__((always_inline));
 static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ void _set_fsm_elements_by_range( shalloc_header *, uint64_t, uint64_t );
 static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
@@ -189,12 +190,76 @@ bool slab_init( void )
 void destroy_slab( context_t ctx )
 {
     shalloc_header * header = NULL;
-
+    void * allocs = NULL;
+    void * allocset = NULL;
+    
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
         return;
-    // XXX
+
+    if( !__TNS_MUTEX( &(header->locked) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "destroy_slab: Failed to lock header\n" );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    if( !__TNS_MUTEX( &(mapped_control->locked) ) )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf( stderr, "destroy_slab: Failed to lock control header\n" );
+    #endif // SLAB_DEBUG
+        return;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+    
+    allocs   = get_ptr_fast( header->allocs );
+    allocset = get_ptr_fast( header->allocset );
+    
+    if( unlikely( (allocs == NULL) || (allocset == NULL) ) )
+    {
+        __C_MUTEX( &(mapped_control->locked) );
+        __C_MUTEX( &(header->locked) );
+        return;
+    }
+
+    // Will not wipe but decrement global ref count
+    unmap_segment( allocs );
+    unmap_segment( allocset );
+
+    // Reset back to uninitialized state
+    header->n_allocs         = 0;
+    header->max_allocations  = 0;
+    header->allocset_handle  = SEGMENT_HANDLE_INVALID;
+    header->segment          = SEGMENT_HANDLE_INVALID;
+    header->allocs           = get_null_ref();
+    header->allocset         = get_null_ref();
+    header->max_allocset     = 0;
+    header->loc_c_allocstart = get_null_ref();
+    header->loc_c_fsmstart   = get_null_ref();
+    header->loc_c_fsmend     = get_null_ref();
+    header->c_allocstart     = ( canary_t ) 0;
+    header->c_fsmstart       = ( canary_t ) 0;
+    header->c_fsmend         = ( canary_t ) 0;
+    header->magic            = ( uint32_t ) 0;
+    header->object_size      = 0;
+    header->self             = INVALID_CONTEXT;
+    header->count_hint       = 0;
+    header->i_front_fsm_bit  = ( uint64_t ) 0;
+    header->i_rear_fsm_word  = ( uint64_t ) 0;
+    memset(
+        header->object_id,
+        0,
+        _SHALLOC_MAX_IDENT
+    );
+
+    __C_MUTEX( &(mapped_control->locked) );
+    __C_MUTEX( &(header->locked) );
     return;
 }
 
@@ -544,10 +609,12 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
         old_fsm_length + 1
     );
 
+    // Check if we need to scale the allocset
     if( header->max_allocset <= header->max_allocations )
     {
         // Extend allocset
         size_needed = header->max_allocations * sizeof( uint32_t );
+
         if( !shm_resize_segment( header->allocset_handle, size_needed ) )
         #ifdef SLAB_DEBUG
         {
@@ -966,6 +1033,107 @@ static __inline__ __ref _get_alloc_element_by_index( shalloc_header * header, ui
     );
 }
 
+static __inline__ void _set_fsm_elements_by_range(
+    shalloc_header * header,
+    uint64_t         start,
+    uint64_t         end
+)
+{
+    fsm_t *  fsm_word     = NULL;
+    uint32_t fsm_start    = 0;
+    uint32_t fsm_end      = 0;
+    uint8_t  start_offset = 0;
+    uint8_t  end_offset   = 0;
+    uint32_t fsm_i        = 0;
+    void *   fsm          = NULL;
+
+    if( unlikely( header == NULL ) )
+    {
+        fprintf( stderr, "_set_fsm_elements_by_range: NULL header.\n" );
+        return;
+    }
+
+    if( unlikely( start > end ) )
+    {
+        fprintf( stderr, "_set_fsm_elements_by_range: start index exceeds end index.\n" );
+        return;
+    }
+
+    if( end > _get_fsm_length( header ) * FSM_WIDTH )
+    {
+        fprintf( stderr, "_set_fsm_elements_by_index: end index is out of bounds\n" );
+        return;
+    }
+
+    // This function has a fenceposting issue
+    fsm          = get_ptr_fast( header->fsm );
+    fsm_start    = ( ( start ) / FSM_WIDTH );
+    start_offset = ( start - 1 ) - ( ( ( start - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
+    fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
+    end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
+
+    fprintf(
+        stdout,
+        "_set_fsm_elements_by_range:\n"
+        "  start: %lu\n"
+        "  fsm_start: %lu\n"
+        "  start_offset: %lu\n"
+        "  end: %lu\n"
+        "  fsm_end: %lu\n"
+        "  end_offset: %lu\n",
+        ( uint64_t ) start,
+        ( uint64_t ) fsm_start,
+        ( uint64_t ) start_offset,
+        ( uint64_t ) end,
+        ( uint64_t ) fsm_end,
+        ( uint64_t ) end_offset
+    );
+    // Bulk set intermediate words in their entirety
+    if( fsm_start != fsm_end )
+    {
+        // This is the case where the request is fully aligned (on both sides) to the fsm word
+        if( end_offset == FSM_WIDTH - 1 && start_offset == FSM_WIDTH - 1 )
+        {
+            for( fsm_i = fsm_start; fsm_i <= fsm_end; fsm_i++ )
+            {
+                fprintf( stdout, "_set_fsm_elements_by_range: Setting fsm_word %lu\n", ( uint64_t ) fsm_i );
+                fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+                    fsm,
+                    ( fsm_i * sizeof( fsm_t ) )
+                );
+                *fsm_word = ( fsm_t ) ULONG_MAX;
+            }
+
+            return;
+        }
+
+        for( fsm_i = fsm_start; fsm_i < fsm_end; fsm_i++ )
+        {
+            fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+                fsm,
+                ( fsm_i * sizeof( fsm_t ) )
+            );
+            *fsm_word = ( fsm_t ) ULONG_MAX;
+        }
+    }
+
+    // Set the words at fsm_start and fsm_end
+    fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+        fsm,
+        ( fsm_start * sizeof( fsm_t ) )
+    );
+
+    *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) >> start_offset );
+
+    fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+        fsm,
+        ( fsm_end * sizeof( fsm_t ) )
+    );
+
+    *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << end_offset );
+    return;
+}
+
 static __inline__ void _set_fsm_element_by_index(
     shalloc_header * header,
     uint64_t         ind
@@ -1069,7 +1237,6 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint6
     return false;
 }
 
-// XXX: __find_fsm_spot() seems to be having issues locating the next opening after an allocation has been made.
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint64_t width )
 {
     uint64_t bit_position = 0;
@@ -1091,14 +1258,16 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     fprintf( stdout, "ISSUING ALLOCATION FOR INDEX %lu\n", bit_position );
     fprintf( stdout, "FSM prior:\n" );
 
-    // This need to start at the highest fsm_word_i and start marking from there
+    // XXX This function has a host of fenceposting issues and needs to be rethought
+    //_set_fsm_elements_by_range( header, bit_position, bit_position + width );
+
     for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
     {
         // this can be bulkified so we dont have to call this routine for every single bit
         _set_fsm_element_by_index( header, fsm_index );
     }
-    // XXX: We need to track how large the allocation is for purposes of freeing later
 
+    // XXX: We need to track how large the allocation is for purposes of freeing later
     if( !_set_allocset_element_by_index( header, bit_position, width ) )
     {
         fprintf( stderr, "_get_fsm_slot_by_width: failed to set allocset\n" );

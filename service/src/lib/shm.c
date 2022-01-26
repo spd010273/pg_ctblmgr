@@ -20,7 +20,7 @@
  * well as the capability to either lazy-load memory segments upon the
  * first dereference of a __ref, or to load all segments up-front.
  *
- * Copyright (c) 2021, MerchLogix Inc.
+ * Copyright (c) 2021-2022, MerchLogix Inc.
  *
  * IDENTIFICATION
  *        service/src/lib/shm.c
@@ -137,7 +137,7 @@ static __inline__ shm_handle _ref_get_segment( __ref ref )
     #ifdef SHM_EXTRA_SANE
     register shm_handle seg = SEGMENT_HANDLE_INVALID;
     #endif // SHM_EXTRA_SANE
-
+    
     #if ( defined( __SHM_NO_STRUCT ) && defined( SHM_EXTRA_SANE ) )
     seg = ( shm_handle ) ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) & SHM_HANDLE_MASK );
     if( unlikely( seg >= SHM_MAX_SEGMENTS ) )
@@ -2974,13 +2974,27 @@ ctrl_header * get_control_header( void )
 
 __inline__ bool ref_is_null( __ref ref )
 {
+    #ifdef SHM_AUTO_MAP
     return ( _ref_get_segment( ref ) == SEGMENT_HANDLE_INVALID );
+    #else
+    register shm_handle segment = _ref_get_segment( ref );
+    // Canonical NULL check
+    if( unlikely( segment == SEGMENT_HANDLE_INVALID ) )
+        return true;
+    // If we reference something not mapped
+    if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
+        return true;
+    // If we reference something out-of-bounds
+    if( unlikely( _ref_get_offset( ref ) >= __segment_lut[segment]mapped_size ) )
+        return true;
+    return false;
+    #endif // SHM_AUTO_MAP
 }
 
 __inline__ __ref get_null_ref( void )
 {
     __ref nullref = {0};
-    return ref_set_segment( nullref, SEGMENT_HANDLE_INVALID );
+    return _ref_set_segment( nullref, SEGMENT_HANDLE_INVALID );
 }
 
 #ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK

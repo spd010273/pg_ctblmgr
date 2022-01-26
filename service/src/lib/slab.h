@@ -2,22 +2,22 @@
  *
  * slab.h
  *     Shared memory slab allocator
+ * 
+ * This library, together with shm.h, provides a simplified malloc/calloc/
+ * realloc/free-like interface with shared memory. Shared memory segments, in
+ * most implementations, come in multiples of 4KiB in size. This library
+ * abstracts the management of the segments with allocation functions that
+ * let the user allocate multiples of a given object in what is referred to
+ * as a context. Shared memory contexts are used to differentiate between
+ * other translation unit's uses of the same library. This handles use cases
+ * where different translation units allocate for objects of different sizes.
  *
- * Copyright (c) 2021, MerchLogix Inc.
+ * The by-default large segment size is a perfect fit for a slab allocator.
+ * On the first allocation, the allocator will create two segments, one for
+ * data and another (sparse) segment for what is referred to as allocset.
+ * The allocset[] stores the size of each allocation. The data segment is
+ * laid out as:
  *
- * IDENTIFICATION
- *        service/src/lib/slab.h
- *
- *------------------------------------------------------------------------
- */
-#ifndef _SLAB_H
-#define _SLAB_H
-
-/*
- * This library maps on top of the shm.c's segments to form a basic
- * slab allocator.
- *
- * Segments will be laid out as:
  * +--------------------------------------------------------+ lower virtual addresses
  * |                        Canary                          |
  * +--------------------------------------------------------+
@@ -44,7 +44,17 @@
  * Segment resizes leave existing allocations referentially intact
  * while only requiring the movement of the FSM to the end of the
  * resized segment.
+ *
+ *
+ * Copyright (c) 2021, MerchLogix Inc.
+ *
+ * IDENTIFICATION
+ *        service/src/lib/slab.h
+ *
+ *------------------------------------------------------------------------
  */
+#ifndef _SLAB_H
+#define _SLAB_H
 
 #define SLAB_DEBUG 1
 
@@ -136,7 +146,7 @@ typedef uint16_t fsm_cmp_t;
  *  constitutes the data section, referenced by allocs[] and FSM refs. These reside
  *  on the same shm.c segment. allocsets live in their own shm.c segment.
  *
- *  When segment resizes are needed, these happen in-place. shm.c's internal
+ *  When segment resizes are needed, these happen in-place. Our internal
  *  headers are updated with the correct size, and when a process goes to execute
  *  get_ptr(), it can detect a mismatch between its own __segment_lut[]'s mapped_size
  *  and the header's defined size, indicating that the calling process needs to perform

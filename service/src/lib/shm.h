@@ -9,7 +9,93 @@
  *     The goal of this library is to present a simplified (or as close to)
  *     malloc/calloc/free interface for shared memory allocation
  *
- * Copyright (c) 2021, MerchLogix Inc.
+ *  There are multiple ways to share memory between processes. A naive
+ *  implementation, but inflexible, is to mmap a memory segment
+ *  and treating mmap like a call to malloc(). This segment can be read,
+ *  written, and executed from for the calling processes and any process
+ *  forked after that point (the forked process has the mapping included
+ *  in its memory map). The drawback is that any allocations, extensions,
+ *  or 'frees' after that point are only visible to the processor making
+ *  that call. Processes, if they really wanted to get this change,
+ *  would need to re-map or perform the appropriate action to mirror
+ *  these changes. That's all well and good, but pitfalls arise where
+ *  mmap may not consistently map a segment, therefore shared pointers
+ *  between processes can become invalid or point to the incorrect data.
+ *  This effectively leaves dangling pointers in every process excluding
+ *  the one calling mmap.
+ *
+ *  To make this work correctly, a few mechanisms are needed:
+ *  - Processes need to be aware of the offset in mapping (from mmap()
+ *    mapping memory to different virtual addresses in the memory map of
+ *    each process).
+ *  - Processes need to be aware of the 'globally desired' size of a
+ *    given segment, I.E. if a single process extends or shrinks a
+ *    segment, the other processes must be made aware of this change in
+ *    size.
+ *  - Account for the typical issues that arise in SMP or multithreaded
+ *    environments, such as the need for synchronization (of important
+ *    book-keeping information laid out above), and locking to prevent data
+ *    hazards or ensure the safety of atomic operations).
+ *  - Perform all the above as efficiently and transparently as possible
+ *    with minimal processing and memory overhead.
+ * 
+ * UNDERLYING LIBRARIES:
+ *  This library abstracts POSIX, mmap, and SystemV shared memory
+ *  functionalities to provide a consistent, shared, file-backed memory
+ *  store.
+ *
+ * DATA STRUCTURES:
+ *  Storage for book-keeping information is provided by the control_header
+ *  and segment_header structs. These reside at the top of each mapped
+ *  segment and constitute shm's global state. Each mapped segment (and header)
+ *  is backed by a physical file in an implementation-specific location
+ *  ( e.g. /dev/shm/ for POSIX )
+ *
+ *  Local state is stored in the shm_segment struct, along with static
+ *  variables in the top of shm.c:
+ *   seg_header __segment_lut[]
+ *  These serve to indicate if, and where, each segment is mapped in our
+ *  local processes' memory map.
+ *
+ * LOCKING:
+ *  These structures use three classes of lock which indicates the importance
+ *  ( but not the nature ) of the operation being performed.
+ *  Locking is backed by primitives proveded by barrier.h in the form of
+ *  __TNS_MUTEX and __C_MUTEX, or test and set mutex and clear mutex,
+ *  respectively. These default to basic spin locks but can use compiler-
+ *  provided atomics, or atomic assembly instructions, if supported.
+ *
+ * SYNCHRONIZATION:
+ *  Synchronization is NOT provided by this library. This can be implemented
+ *  using barrier.h as well as supporting information (such as checking that
+ *  all processes have arrived at the synchronization point), but that can
+ *  be handled in an use case specific manner.
+ *
+ * POINTERS:
+ *  Pointers are provided by the __ref typedef and helper functions get_ptr(),
+ *  get_ptr_fast() and get_ref(). These store and interpret the segment and
+ *  offset into that segment (to whuch the __ref points). Depending on
+ *  compilation settings, this can be a packed structure or encoded into a
+ *  wide integer. The choice of layout is dependent on the settings for maximum
+ *  segment size and maximum number of segments, or SHM_SEGMENT_MAX_SIZE and
+ *  SHM_MAX_SEGMENTS, respectively. This functionality can be disabled entirely
+ *  with SHM_ENABLE_STRUCT_PACKING. The __ref function should be substituted
+ *  in user data structures and wrapped with get_ptr() calls to allow the
+ *  program to resolve to a locally mapped pointer.
+ *
+ *  To provide a consistent interface (compared to other standard memory manipulation
+ *  functions), ref_is_null() and get_null_ref() are provided as a canonical NULL and
+ *  NULL checking.
+ *
+ * PROPAGATING CHANGES:
+ *  New segments and segment size changes need to be propagated. These are
+ *  done automatically by get_ptr() when:
+ *  - A __ref for an unmapped segment is resolved to a local pointer.
+ *  - get_ptr() detects an inconsistency between the local state
+ *    (__segment_lut[]) and global state (seg_header).
+ *  This functionality is enabled with SHM_AUTO_MAP
+ * 
+ * Copyright (c) 2021-2022, MerchLogix Inc.
  *
  * IDENTIFICATION
  *        service/src/lib/shm.h
@@ -100,7 +186,7 @@
  *   SHM_AUTO_MAP: Allows automatic mapping when dereferencing a __ref pointing
  *     to an as-of-not-yet-mapped segment. Otherwise dereferencing will return
  *     a NULL pointer
- *   SHM_ENABLE_HUGETLB: Attempt to use the system's hugepage settings to
+ *   SHM_ENABLE_HUGETLB: TODO Attempt to use the system's hugepage settings to
  *     fulfill requests to allocate large segments. For typical x86
  *     applications, this can be 2MB, and up to 1GB iff PDPE1GB is supported.
  *     I hope to include PSE support as well
@@ -381,19 +467,19 @@ typedef struct shm_segment {
 typedef struct ctrl_header {
     uint32_t      magic;           // Should be CONTROL_HEADER_MAGIC at all times
     pid_t         owner;           // Parent process owning this segment
-    volatile bool locked;          // Indicates a PID is modifying accounting info
+    volatile bool locked;          // Indicates a PID is modifying accounting info (this is SHM_EXCLUSIVE)
     handle_iter   entry_count;     // # Allocated segments
     handle_iter   max_entries;     // SHM_MAX_SEGMENTS
     shm_handle    segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
-    volatile bool hwlocks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here
+    volatile bool hwlocks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here. (this is SHM_HWLOCK)
     uint8_t *     data;
 } ctrl_header;
 
 typedef struct seg_header {
     uint32_t      magic;     // Should be SEGMENT_HEADER_MAGIC at all times
     pid_t         owner;     // Parent process owning this segment
-    volatile bool locked;    // Shared between allocator and shm.c
+    volatile bool locked;    // Shared between allocator and shm.c. This is SHM_LWLOCK
     size_t        size;
     uint32_t      ref_count; // Number of processes with this segment mapped
     shm_handle    control;   // ID of control segment
@@ -454,7 +540,6 @@ typedef struct __ref {
     shm_handle _segment; // ID of the segment this ref points to
     offset_t   _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
 } __attribute__((packed)) __ref;
-
  #else
   #ifdef __sys32
 typedef uint32_t __ref;
@@ -480,8 +565,11 @@ typedef enum {
     SHM_LWLOCK,
 } shm_lock;
 
+/*
+ * get_ptr( __ref )
+ */
 extern __inline__ void * get_ptr( __ref ); // Get local pointer to mapping
-extern __inline__ void * get_ptr_fast( __ref ) __attribute__((flatten)); // above but only for contexts where the segment will not change
+extern __inline__ void * get_ptr_fast( __ref ) __attribute__((flatten)); // above but only for contexts where the segment will not chang
 extern __inline__ __ref get_ref( void * ); // Get absolute ref
 extern ctrl_header * get_control_header( void );
 extern shm_handle get_control_segment( void );
@@ -498,11 +586,9 @@ extern bool is_locked( shm_handle, shm_lock );
 extern bool get_lock( shm_handle, shm_lock );
 extern bool release_lock( shm_handle, shm_lock );
 
-// Logging helpers
-
 typedef enum {
-    LL_SHM_ERROR,
-    LL_SHM_DEBUG
+    LL_SHM_ERROR, // Critical error
+    LL_SHM_DEBUG  // Only enabled iff SHM_DEBUG is defined
 } shm_ll;
 
 #endif // _SHM_H
