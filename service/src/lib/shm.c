@@ -1614,7 +1614,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     _shm_log(
         LL_SHM_DEBUG,
-        "Entrying critical section - resizeing segment %lu from %zu to %zu bytes",
+        "Entrying critical section - resizing segment %lu from %zu to %zu bytes",
         ( uint64_t ) segment,
         old_size,
         new_size

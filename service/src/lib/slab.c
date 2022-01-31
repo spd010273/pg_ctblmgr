@@ -632,6 +632,8 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
         #endif // SLAB_DEBUG
     }
 
+    fprintf( stdout, "FSM post-resize:\n" );
+    _print_fsm( header );
     return _check_canaries( header );
 }
 
@@ -774,7 +776,7 @@ void sfree( context_t ctx, __ref pointer )
     #endif // SLAB_DEBUG
 
     size = _get_allocset_element_by_index( header, index );
-    
+
     if( unlikely( size == UINT_MAX ) )
     #ifdef SLAB_DEBUG
     {
@@ -823,7 +825,7 @@ void sfree( context_t ctx, __ref pointer )
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
-    
+
     header->n_allocs       -= size;
     __C_MUTEX( &(header->locked) );
     return;
@@ -1033,6 +1035,14 @@ static __inline__ __ref _get_alloc_element_by_index( shalloc_header * header, ui
     );
 }
 
+// This function adequately (and quickly) handles setting FSM entries en masse but
+// could use a cleanup either by simplification of iterand boundaries or consolidation
+// of check logic. There are a few fencepost issues that this solves due to the
+// design decision in the layout of the FSM. The important note here is that
+// start is the inclusive index for setting
+// end is the exclusive index for setting
+// IE if fsm_size == 512 and you wanted to set the whole block, this would get
+// called with (0,512) when you obviously need to set bits 0..511
 static __inline__ void _set_fsm_elements_by_range(
     shalloc_header * header,
     uint64_t         start,
@@ -1065,13 +1075,14 @@ static __inline__ void _set_fsm_elements_by_range(
         return;
     }
 
+    // We set bits from start to end-1
     // This function has a fenceposting issue
     fsm          = get_ptr_fast( header->fsm );
-    fsm_start    = ( ( start ) / FSM_WIDTH );
-    start_offset = ( start - 1 ) - ( ( ( start - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
+    fsm_start    = ( start / FSM_WIDTH );
+    start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
     end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
-
+/*
     fprintf(
         stdout,
         "_set_fsm_elements_by_range:\n"
@@ -1088,15 +1099,15 @@ static __inline__ void _set_fsm_elements_by_range(
         ( uint64_t ) fsm_end,
         ( uint64_t ) end_offset
     );
-    // Bulk set intermediate words in their entirety
+*/
+    // shiftless, bulk setting optimization
     if( fsm_start != fsm_end )
     {
         // This is the case where the request is fully aligned (on both sides) to the fsm word
-        if( end_offset == FSM_WIDTH - 1 && start_offset == FSM_WIDTH - 1 )
+        if( end_offset == FSM_WIDTH - 1 && start_offset == 0 )
         {
             for( fsm_i = fsm_start; fsm_i <= fsm_end; fsm_i++ )
             {
-                fprintf( stdout, "_set_fsm_elements_by_range: Setting fsm_word %lu\n", ( uint64_t ) fsm_i );
                 fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
                     fsm,
                     ( fsm_i * sizeof( fsm_t ) )
@@ -1107,30 +1118,60 @@ static __inline__ void _set_fsm_elements_by_range(
             return;
         }
 
-        for( fsm_i = fsm_start; fsm_i < fsm_end; fsm_i++ )
+        // This is the case where either the start or end are not fully aligned
+        // Bulk set the intermediate words (whole words between start and end offsets)
+        if( start_offset == 0 || fsm_start < fsm_end - 1 )
         {
-            fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
-                fsm,
-                ( fsm_i * sizeof( fsm_t ) )
-            );
+            for( fsm_i = fsm_start; fsm_i < fsm_end; fsm_i++ )
+            {
+                fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+                    fsm,
+                    ( fsm_i * sizeof( fsm_t ) )
+                );
+                *fsm_word = ( fsm_t ) ULONG_MAX;
+            }
+        }
+        // Set the words at fsm_start and fsm_end
+        fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+            fsm,
+            ( fsm_start * sizeof( fsm_t ) )
+        );
+
+        *fsm_word |= ( ( fsm_t ) ULONG_MAX ) << start_offset;
+        fprintf( stdout, "start:\n" );
+        print_bin(  ( uint64_t ) *fsm_word );
+        fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+            fsm,
+            ( fsm_end * sizeof( fsm_t ) )
+        );
+
+        *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << end_offset );
+        fprintf( stdout, "end\n" );
+        print_bin(  ( uint64_t ) *fsm_word );
+    }
+    else
+    {
+        // Handle case where FSM word is the same word and we're just setting
+        // a range within that word
+        fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+            fsm,
+            ( fsm_start * sizeof( fsm_t ) )
+        );
+
+        // Special case - whole word fully aligned.
+        if( end_offset == FSM_WIDTH - 1 && start_offset == 0 )
+        {
+            // For implementation defined reasons, ( ULONG_MAX ) << 64 == ULONG_MAX, so we handle that here
+            // in amd64 world this is because the
+            //  shl rax, cl is often masked with cl & 0x3F, meaning rax may not be the expected 0 afterwards
             *fsm_word = ( fsm_t ) ULONG_MAX;
+        }
+        else
+        {
+            *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << ( end_offset - start_offset + 1 ) ) << start_offset;
         }
     }
 
-    // Set the words at fsm_start and fsm_end
-    fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
-        fsm,
-        ( fsm_start * sizeof( fsm_t ) )
-    );
-
-    *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) >> start_offset );
-
-    fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
-        fsm,
-        ( fsm_end * sizeof( fsm_t ) )
-    );
-
-    *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << end_offset );
     return;
 }
 
@@ -1240,7 +1281,6 @@ static __inline__ bool _get_fsm_element_by_index( shalloc_header * header, uint6
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint64_t width )
 {
     uint64_t bit_position = 0;
-    uint64_t fsm_index    = 0;
 
     bit_position = __find_fsm_spot( header, width );
 
@@ -1259,14 +1299,17 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     fprintf( stdout, "FSM prior:\n" );
 
     // XXX This function has a host of fenceposting issues and needs to be rethought
-    //_set_fsm_elements_by_range( header, bit_position, bit_position + width );
+    _set_fsm_elements_by_range( header, bit_position, bit_position + width );
 
+    fprintf( stdout, "Setting FSM range %lu to %lu\n", bit_position, bit_position + width );
+/*
     for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
     {
+        //fprintf( stdout, "Setting FSM bit %lu\n", ( uint64_t ) fsm_index );
         // this can be bulkified so we dont have to call this routine for every single bit
         _set_fsm_element_by_index( header, fsm_index );
     }
-
+*/
     // XXX: We need to track how large the allocation is for purposes of freeing later
     if( !_set_allocset_element_by_index( header, bit_position, width ) )
     {
@@ -1274,7 +1317,7 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
         errno = EINVAL;
         return 0;
     }
-    
+
     #ifdef SLAB_DEBUG
     fprintf( stdout, "_get_fsm_slot_by_width( %p, %lu ) FSM SNAPSHOT\n", header, width );
     _print_fsm( header );
@@ -1287,12 +1330,34 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
  * __find_fsm_spot( shalloc_header *, uint64_t )
  *   - shalloc_header * header - the headers whose FSM we are searching
  *   - uint64_t requested_length - the width of the allocation needed in <objects>, not bytes
+ *
  * Performs a fast masked search of a bitfield searching for a free area
  * In order to handle referential integrity iff the page gets resized, the
  * search begins at the 'rear' (nth index) of the FSM, and moves towards the
  * 0th index for large allocations. Small (single) allocations are done by a
  * separate subroutine, which searches from the 'front' (0th index) of the FSM.
+ * 
+ * This algorithm makes the tradeoff between search speed and packing efficiency.
+ * FSM_SHIFT_WIDTH controls this, and is expected to be 8, 16, 32, or 64
+ * Another caveat is the end of an allocation is anchored to a multiple of the
+ * FSM_SHIFT_WIDTH, meaning that in the following example, it would not be able
+ * to find an optimal solution:
  *
+ * Given: FSM_SHIFT_WIDTH = 16
+ * __find_fsm_spot( header, 67 )
+ * FSM\word:   0                1               2                3
+ * [1]: 1111111000000000 0000000000000000 0000000000000000 0000000000000000
+ * [0]: 0000000000000000 0000000000000000 0000000000000000 0000000000000111
+ *
+ * would result in an allocation being placed at
+ * [1]: 1111111000000000 1111111111111111 1111111111111111 1111111111111111
+ * [0]: 1111111111111111 1111111000000000 0000000000000000 0000000000000111
+ *
+ * For the same case setup, but with __find_fsm_spot( header, 97 ), we would not
+ * be able to find a solution with SHIFT_WIDTH = 16, but could with SHIFT_WIDTH = 8.
+ *
+ * My rationalization is that this leaves room for single allocations after bulk
+ * allocations have been made, though this can lead to terrible fragmentation
  */
 static __inline__ uint64_t __find_fsm_spot(
     shalloc_header * header,
@@ -1319,9 +1384,9 @@ static __inline__ uint64_t __find_fsm_spot(
 
     // Note that the position / iter expressed in these statements is inverted (directionally) prior
     // to return to caller, instead of the 0th element being the LSB of the 0th word, it's the MSB of the nth word.
-//    #ifdef SLAB_DEBUG
-//    fprintf( stdout, "__find_fsm_spot( %p, %lu ) startup\n", header, requested_length );
-//    #endif // SLAB_DEBUG
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "__find_fsm_spot( %p, %lu ) startup\n", header, requested_length );
+    #endif // SLAB_DEBUG
     if( requested_length <= FSM_SHIFT_WIDTH )
     {
         last_word      = true;
@@ -1340,42 +1405,43 @@ static __inline__ uint64_t __find_fsm_spot(
         { // Mask out the fsm word, if it's filled we can jump ahead by the full width
             iter     += FSM_WIDTH;
             position += FSM_WIDTH;
-//            #ifdef SLAB_DEBUG
-//            fprintf( stdout, "Fast skipped to iter %lu\n", ( uint64_t ) iter );
-//            #endif // SLAB_DEBUG
+            #ifdef SLAB_DEBUG
+            fprintf( stdout, "Fast skipped to iter %lu\n", ( uint64_t ) iter );
+            #endif // SLAB_DEBUG
             continue;
         }
 
-        for( fsm_word_i = 0; fsm_word_i < FSM_RATIO; fsm_word_i++ )
+        //for( fsm_word_i = 0; fsm_word_i < FSM_RATIO; fsm_word_i++ )
+        for( fsm_word_i = FSM_RATIO - 1; fsm_word_i != ( uint8_t ) UCHAR_MAX; --fsm_word_i )
         { // Iterate over words within the given fsm_t word, size FSM_SHIFT_WIDTH bits
             temp = ( fsm_cmp_t ) ( fsm_word >> ( ( fsm_word_i ) * FSM_SHIFT_WIDTH ) );
-//            #ifdef SLAB_DEBUG
-//            fprintf(
-//                stdout,
-//                "fsm_i: %lu, fsm_word_i: %lu, position %lu, iter %lu, bits_comp: %lu, last_word %s, compare_active %s\n",
-//                ( uint64_t ) fsm_i,
-//                ( uint64_t ) fsm_word_i,
-//                ( uint64_t ) position,
-//                ( uint64_t ) iter,
-//                ( uint64_t ) bits_comp,
-//                last_word ? "T" : "F",
-//                compare_active ? "T" : "F"
-//            );
-//            fprintf( stdout, "Current FSM Word:\n" );
-//            print_bin( ( uint64_t ) fsm_word );
-//            fprintf( stdout, "Temp:\n" );
-//            print_bin( ( uint64_t ) temp );
-//            fprintf( stdout, "Mask:\n" );
-//            print_bin( ( uint64_t ) mask );
-//            #endif // SLAB_DEBUG
+            #ifdef SLAB_DEBUG
+            fprintf(
+                stdout,
+                "fsm_i: %lu, fsm_word_i: %lu, position %lu, iter %lu, bits_comp: %lu, last_word %s, compare_active %s\n",
+                ( uint64_t ) fsm_i,
+                ( uint64_t ) fsm_word_i,
+                ( uint64_t ) position,
+                ( uint64_t ) iter,
+                ( uint64_t ) bits_comp,
+                last_word ? "T" : "F",
+                compare_active ? "T" : "F"
+            );
+            fprintf( stdout, "Current FSM Word:\n" );
+            print_bin( ( uint64_t ) fsm_word );
+            fprintf( stdout, "Temp:\n" );
+            print_bin( ( uint64_t ) temp );
+            fprintf( stdout, "Mask:\n" );
+            print_bin( ( uint64_t ) mask );
+            #endif // SLAB_DEBUG
             if( ( ~(temp) & mask ) == mask )
             {
                 if( last_word )
                 { // Prep for return & attempt to compactify past word boundaries
                     // Early exit when shifting wont help
-//                    #ifdef SLAB_DEBUG
-//                    fprintf( stdout, "Early exit triggered for position %lu\n", ( uint64_t ) position );
-//                    #endif // SLAB_DEBUG
+                    #ifdef SLAB_DEBUG
+                    fprintf( stdout, "Early exit triggered for position %lu\n", ( uint64_t ) position );
+                    #endif // SLAB_DEBUG
                     if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
                         return header->max_allocations - ( position + requested_length );
 
@@ -1404,9 +1470,9 @@ static __inline__ uint64_t __find_fsm_spot(
             }
             else
             {   // No match
-//                #ifdef SLAB_DEBUG
-//                fprintf( stdout, "No match - state reset.\n" );
-//                #endif // SLAB_DEBUG
+                #ifdef SLAB_DEBUG
+                fprintf( stdout, "No match - state reset.\n" );
+                #endif // SLAB_DEBUG
                 if( compare_active )
                 { // reset counters and markers
                     bits_comp = requested_length;
@@ -1433,6 +1499,7 @@ static __inline__ uint64_t __find_fsm_spot(
         }
     }
 
+    fprintf( stdout, "Search exhausted\n" );
     return ULONG_MAX;
 }
 

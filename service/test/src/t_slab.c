@@ -19,6 +19,9 @@ int main( void )
     __ref      ref5 = get_null_ref();
     __ref      ref6 = get_null_ref();
     __ref      ref7 = get_null_ref();
+    __ref      ref8 = get_null_ref();
+    __ref      ref9 = get_null_ref();
+
     uint64_t * ptr  = NULL;
     uint64_t   i    = 0;
 
@@ -113,7 +116,10 @@ int main( void )
     ref6 = smalloc( slab, sizeof( uint64_t ) * 64 );
     ref7 = smalloc( slab, sizeof( uint64_t ) * 7 );
     // New test case- making smalloc for low space applications
-    //ref7 = smalloc( slab, sizeof( uint64_t ) * 67 );
+    ref8 = smalloc( slab, sizeof( uint64_t ) * 67 );
+    // final fsm word should be 1111111111111111 1110000000000000 0000000000000000 0000000000000111
+    // We're going to ask for the remainder, but this /should/ cause a segment extension
+    ref9 = smalloc( slab, sizeof( uint64_t ) * 26 ); 
 //    dump_context( slab );
     fprintf( stdout, "Freeing allocation\n" );
      
@@ -124,5 +130,7 @@ int main( void )
     sfree( slab, ref5 );
     sfree( slab, ref6 );
     sfree( slab, ref7 );
+    sfree( slab, ref8 );
+    sfree( slab, ref9 );
     return 0;
 }
