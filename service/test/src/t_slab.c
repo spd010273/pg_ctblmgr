@@ -12,6 +12,7 @@ int main( void );
 int main( void )
 {
     context_t  slab = 0;
+
     __ref      ref  = get_null_ref();
     __ref      ref2 = get_null_ref();
     __ref      ref3 = get_null_ref();
@@ -40,7 +41,7 @@ int main( void )
         return 1;
     }
 
-    ref = smalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
+    ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
 
     if( ref == get_null_ref() )
     {
@@ -56,7 +57,6 @@ int main( void )
         return 1;
     }
 
-    fprintf( stdout, "Got ptr %p\n", ptr );
     for( i = 0; i < TEST_SIZE; i++ )
     {
 /*
@@ -101,36 +101,112 @@ int main( void )
 
     
     fprintf( stdout, "Extending allocation...\n" );
-    ref2 = smalloc( slab, sizeof( uint64_t ) * TEST_SIZE * 4 );
+    ref2 = rsmalloc( slab, sizeof( uint64_t ) * ( ( TEST_SIZE * 4 ) + 2 ));
 
     if( ref_is_null( ref2 ) )
     {
         fprintf( stderr, "Failed to extend allocation\n" );
         exit( 1 );
     }
-   
-    ref3 = smalloc( slab, sizeof( uint64_t ) );    
-    ref4 = smalloc( slab, sizeof( uint64_t ) );
-    ref5 = smalloc( slab, sizeof( uint64_t ) );
 
-    ref6 = smalloc( slab, sizeof( uint64_t ) * 64 );
-    ref7 = smalloc( slab, sizeof( uint64_t ) * 7 );
-    // New test case- making smalloc for low space applications
-    ref8 = smalloc( slab, sizeof( uint64_t ) * 67 );
+    fprintf( stdout, "Making second allocation...\n" );
+    ptr = ( uint64_t * ) get_ptr( ref2 );
+
+    if( ptr == NULL )
+    {
+        fprintf(
+            stderr,
+            "Failed to dereference pointer to local for second allocation\n"
+        );
+        return 1;
+    }
+
+    for( i = 0; i < ( TEST_SIZE * 4 ) + 2; i++ )
+    {
+        ptr[i] = ( TEST_SIZE - i ) + 1;
+    }
+
+    fprintf( stdout, "Performing readback test on both allocations...\n" );
+   
+    ptr = get_ptr( ref );
+    
+    for( i = 0; i < TEST_SIZE; i++ )
+    {
+        if( ptr[i] != TEST_SIZE - i )
+        {
+            fprintf(
+                stderr,
+                "Failed at index %lu of first allocation\n"
+                "  got %lu, expected %lu\n",
+                ( uint64_t ) i,
+                ptr[i],
+                TEST_SIZE - i
+            );
+            return 1;
+        }
+    }
+
+    ptr = get_ptr( ref2 );
+    for( i = 0; i < ( TEST_SIZE * 4 ) + 2; i++ )
+    {
+        if( ptr[i] != TEST_SIZE - i + 1 )
+        {
+            fprintf( stderr, "Failed at index %lu of second allocation\n", ( uint64_t ) i );
+            return 1;
+        }
+    }
+    
+    ref3 = rsmalloc( slab, sizeof( uint64_t ) );    
+    ref4 = rsmalloc( slab, sizeof( uint64_t ) );
+    ref5 = rsmalloc( slab, sizeof( uint64_t ) );
+
+    ref6 = rsmalloc( slab, sizeof( uint64_t ) * 64 );
+    ref7 = rsmalloc( slab, sizeof( uint64_t ) * 7 );
+    // New test case- making rsmalloc for low space applications
+    ref8 = rsmalloc( slab, sizeof( uint64_t ) * 67 );
     // final fsm word should be 1111111111111111 1110000000000000 0000000000000000 0000000000000111
     // We're going to ask for the remainder, but this /should/ cause a segment extension
-    ref9 = smalloc( slab, sizeof( uint64_t ) * 26 ); 
-//    dump_context( slab );
+    ref9 = rsmalloc( slab, sizeof( uint64_t ) * 26 ); 
+    //dump_context( slab );
     fprintf( stdout, "Freeing allocation\n" );
      
-    sfree( slab, ref );
-    sfree( slab, ref2 );
-    sfree( slab, ref3 );
-    sfree( slab, ref4 );
-    sfree( slab, ref5 );
-    sfree( slab, ref6 );
-    sfree( slab, ref7 );
-    sfree( slab, ref8 );
-    sfree( slab, ref9 );
+    rsfree( slab, ref );
+    fprintf( stdout, "Freed first ref\n" );
+    rsfree( slab, ref2 );
+    fprintf( stdout, "Freed second ref\n" );
+    rsfree( slab, ref3 );
+    fprintf( stdout, "Freed third ref\n" );
+    rsfree( slab, ref4 );
+    fprintf( stdout, "Freed fourth ref\n" );
+    rsfree( slab, ref5 );
+    fprintf( stdout, "Freed fifth ref\n" );
+    rsfree( slab, ref6 );
+    fprintf( stdout, "Freed sixth ref\n" );
+    rsfree( slab, ref7 );
+    fprintf( stdout, "Freed seventh ref\n" );
+    rsfree( slab, ref8 );
+    fprintf( stdout, "Freed eighth ref\n" );
+    
+    fprintf( stdout, "Testing realloc of ninth ref\n" );
+    //dump_context( slab ); 
+    ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 1024 );
+    if( ref_is_null( ref9 ) )
+    {
+         fprintf( stderr, "Failed to reallocat.\n" );
+         return 1;
+    }
+
+    ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 2048 );
+
+    if( ref_is_null( ref9 ) )
+    {
+        fprintf( stderr, "Failed to reallocate and extend segment\n" );
+        return 1;
+    }
+
+    rsfree( slab, ref9 );
+    fprintf( stdout, "Freed ninth ref\n" );
+    destroy_slab( slab );
+    //dump_context( slab );
     return 0;
 }

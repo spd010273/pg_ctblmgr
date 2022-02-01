@@ -195,23 +195,26 @@ extern void slab_set_count_hint( context_t, size_t );
 extern void destroy_slab( context_t );
 
 // Extra malloc/realloc calls where # of objects requested are used
-extern __ref scalloc_object_count( context_t, uint64_t );
-extern __ref smalloc_object_count( context_t, uint64_t );
-extern __ref srealloc_object_count( context_t, __ref, uint64_t );
+extern __ref rscalloc_object_count( context_t, uint64_t );
+extern __ref rsmalloc_object_count( context_t, uint64_t );
+extern __ref rsrealloc_object_count( context_t, __ref, uint64_t );
 
 // __ref returning malloc/calloc/realloc/free calls where bytes are specified
-extern __ref scalloc( context_t, size_t, uint64_t );
-extern __ref smalloc( context_t, size_t );
-extern __ref srealloc( context_t, __ref, size_t );
-extern void sfree( context_t, __ref );
-/*
- * TODO: Implement these and prefix the above ex rscalloc, rsmalloc, rsrealloc, rsfree
+extern __ref rscalloc( context_t, size_t, uint64_t );
+extern __ref rsmalloc( context_t, size_t );
+extern __ref rsrealloc( context_t, __ref, size_t );
+extern void rsfree( context_t, __ref );
+
+// Extra malloc / realloc calls where the number of objects are used
+extern void * scalloc_object_count( context_t, uint64_t );
+extern void * smalloc_object_count( context_t, uint64_t );
+extern void * srealloc_object_count( context_t, void *, uint64_t );
+
 // pointer returning malloc/calloc/realloc/free calls where bytes are specified
 extern void * scalloc( context_t, size_t, uint64_t );
 extern void * smalloc( context_t, size_t );
 extern void * srealloc( context_t, void *, size_t );
 extern void sfree( context_t, void * );
- */
 
 /* Utility functions for moving data between a local allocation and shm / slab managed shared memory allocation */
 extern void * move_to_local( context_t, __ref * ); // Both make changes to the 2nd argument in-place

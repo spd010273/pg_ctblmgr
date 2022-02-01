@@ -30,10 +30,10 @@ static __ref             control_segment_address = {0};
 static shalloc_control * mapped_control          = NULL;
 static bool              _slab_init              = false;
 static pid_t             p_pid                   = 0;
-
+// TODO: Switch internal allocation functions to take the resolved shalloc_header from context
 // Check and boilerplate helpers
 static __inline__ bool _fail_canary( void ) __attribute__((always_inline, flatten));
-static __inline__ bool _init_slab( context_t, shalloc_header *, bool );
+static __inline__ bool _init_slab( shalloc_header *, bool );
 static __inline__ context_t get_ctx_by_id( const char * ) __attribute__((always_inline, flatten));
 static __inline__ bool check_shalloc_header( header_iter ) __attribute__((always_inline, flatten));
 static __inline__ bool check_context( context_t ) __attribute__((always_inline, flatten));
@@ -43,17 +43,19 @@ static __inline__ shalloc_header * _get_header_by_context( context_t );// __attr
 static __inline__ uint32_t _get_allocset_element_by_index( shalloc_header *, uint32_t );
 static __inline__ bool _set_allocset_element_by_index( shalloc_header *, uint32_t, uint32_t );
 
-// Allocation helpers
+// Allocation helpers / primitives
 static __inline__ context_t _new_slab( const char *, size_t, uint64_t );
-static __inline__ __ref _shmalloc( context_t, size_t, bool );
+static __inline__ __ref _shmalloc( shalloc_header *, size_t, bool );
 static __inline__ bool __shrealloc_internal( shalloc_header *, uint64_t );
-static __inline__ __ref _shrealloc( context_t, __ref, uint64_t );
+static __inline__ __ref _shrealloc( shalloc_header *, __ref, uint64_t );
+static __inline__ void _shfree( shalloc_header *, __ref, bool );
 
 // FSM helpers
 static __inline__ uint64_t _get_fsm_length( shalloc_header * );// __attribute__((always_inline));
 static __inline__ void _set_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
-static __inline__ void _set_fsm_elements_by_range( shalloc_header *, uint64_t, uint64_t );
+static __inline__ void _set_fsm_elements_by_range( shalloc_header *, uint64_t, uint64_t ); //__attribute__((always_inline, flatten ));
 static __inline__ void _clear_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
+static __inline__ void _clear_fsm_elements_by_range( shalloc_header *, uint64_t, uint64_t );// __attribute__((always_inline, flatten));
 static __inline__ bool _get_fsm_element_by_index( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header *, uint64_t );// __attribute__((always_inline));
 static __inline__ uint64_t __find_fsm_spot( shalloc_header *, uint64_t );// __attribute__((always_inline));
@@ -111,12 +113,12 @@ bool slab_init( void )
 
         srand( ( unsigned int ) _INVALID_CONTEXT );
         #ifdef _SHALLOC_CONTROL_IN_OWN_SEGMENT
-        control_segment         = ref_get_segment( get_ref( segment_address ) );
+        control_segment = ref_get_segment( get_ref( segment_address ) );
         #else
-        control_segment         = get_control_segment();
+        control_segment = get_control_segment();
         #endif // _SHALLOC_CONTROL_IN_OWN_SEGMENT
-        _slab_init              = true;
-        mapped_control          = ( shalloc_control * ) segment_address;
+        _slab_init      = true;
+        mapped_control  = ( shalloc_control * ) segment_address;
 
         mapped_control->magic = ( uint64_t ) _SHALLOC_CONTROL_MAGIC;
 
@@ -192,7 +194,7 @@ void destroy_slab( context_t ctx )
     shalloc_header * header = NULL;
     void * allocs = NULL;
     void * allocset = NULL;
-    
+
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
@@ -217,10 +219,10 @@ void destroy_slab( context_t ctx )
     #ifdef SLAB_DEBUG
     }
     #endif // SLAB_DEBUG
-    
+
     allocs   = get_ptr_fast( header->allocs );
     allocset = get_ptr_fast( header->allocset );
-    
+
     if( unlikely( (allocs == NULL) || (allocset == NULL) ) )
     {
         __C_MUTEX( &(mapped_control->locked) );
@@ -332,7 +334,7 @@ static __inline__ context_t _new_slab( const char * tag, size_t object_size, uin
 // Main interface allocation functions
 
 /*
- * __ref scalloc( context_t, size_t, uint64_t )
+ * __ref rscalloc( context_t, size_t, uint64_t )
  *
  *  Shared memory equivilent of calloc()
  *  Makes an allocation of size * count and zeros out the allocation
@@ -343,7 +345,7 @@ static __inline__ context_t _new_slab( const char * tag, size_t object_size, uin
  *               for standardization with calloc()
  *  uint64_t count: Number of objects being requested
  */
-__ref scalloc( context_t ctx, size_t size, uint64_t count )
+__ref rscalloc( context_t ctx, size_t size, uint64_t count )
 {
     shalloc_header * header = NULL;
 
@@ -359,15 +361,15 @@ __ref scalloc( context_t ctx, size_t size, uint64_t count )
         )
       )
     {
-        fprintf( stderr, "scalloc: size is not a multiple of object_size\n" );
+        fprintf( stderr, "rscalloc: size is not a multiple of object_size\n" );
         return get_null_ref();
     }
 
-    return _shmalloc( ctx, size, true );
+    return _shmalloc( header, size, true );
 }
 
 /*
- * __ref smalloc( context_t, size_t )
+ * __ref rsmalloc( context_t, size_t )
  *
  * Shared memory equivilent of malloc()
  * Makes an allocation of size bytes (or size / header->object_size units)
@@ -377,7 +379,7 @@ __ref scalloc( context_t ctx, size_t size, uint64_t count )
  *  size_t size: Size in bytes to make for this allocation
  *
  */
-__ref smalloc( context_t ctx, size_t size )
+__ref rsmalloc( context_t ctx, size_t size )
 {
     shalloc_header * header = NULL;
 
@@ -387,11 +389,11 @@ __ref smalloc( context_t ctx, size_t size )
         return get_null_ref();
 
 
-    return _shmalloc( ctx, size, false );
+    return _shmalloc( header, size, false );
 }
 
 /*
- * __ref srealloc( context_t, __ref, size_t )
+ * __ref rsrealloc( context_t, __ref, size_t )
  *
  * Shared memory equivilent of realloc()
  * Reallocates the passed in __ref to the requested size, returning a __ref to
@@ -401,7 +403,7 @@ __ref smalloc( context_t ctx, size_t size )
  * __ref oldref: Reference in which we would like to reallocate
  * size_t size: The new size we would like for oldref
  */
-__ref srealloc( context_t ctx, __ref oldref, size_t size )
+__ref rsrealloc( context_t ctx, __ref oldref, size_t size )
 {
     shalloc_header * header = NULL;
 
@@ -410,12 +412,14 @@ __ref srealloc( context_t ctx, __ref oldref, size_t size )
     if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    fprintf( stdout, "srealloc: not implemented\n" );
-    return get_null_ref();
+    if( size % header->object_size != 0 )
+        return get_null_ref();
+
+    return _shrealloc( header, oldref, size / header->object_size );
 }
 
 /*
- * __ref scalloc_object_count( context_t, uint64_t )
+ * __ref rscalloc_object_count( context_t, uint64_t )
  *
  * Shared memory equivilent of calloc(). Instead of taking a
  * size_t (bytes) argument, this takes the number of object we
@@ -424,7 +428,7 @@ __ref srealloc( context_t ctx, __ref oldref, size_t size )
  *  context_t ctx: Slab context the allocation is made in
  *  uint64_t count: The number of objects requested.
  */
-__ref scalloc_object_count( context_t ctx, uint64_t count )
+__ref rscalloc_object_count( context_t ctx, uint64_t count )
 {
     shalloc_header * header = NULL;
 
@@ -433,11 +437,11 @@ __ref scalloc_object_count( context_t ctx, uint64_t count )
     if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    return _shmalloc( ctx, count * header->object_size, true );
+    return _shmalloc( header, count * header->object_size, true );
 }
 
 /*
- * __ref smalloc_object_count( context_t, uint64_t )
+ * __ref rsmalloc_object_count( context_t, uint64_t )
  *
  * Shared memory equivilent of malloc(). Instead of taking a
  * size_t (bytes) argument, this takes the number of objects we
@@ -447,7 +451,7 @@ __ref scalloc_object_count( context_t ctx, uint64_t count )
  * uint64_t count: The number of objects requested.
  *
  */
-__ref smalloc_object_count( context_t ctx, uint64_t count )
+__ref rsmalloc_object_count( context_t ctx, uint64_t count )
 {
     shalloc_header * header = NULL;
 
@@ -456,11 +460,11 @@ __ref smalloc_object_count( context_t ctx, uint64_t count )
     if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    return _shmalloc( ctx, count * header->object_size, false );
+    return _shmalloc( header, count * header->object_size, false );
 }
 
 /*
- * __ref srealloc_object_count( context_t, __ref, uint64_t )
+ * __ref rsrealloc_object_count( context_t, __ref, uint64_t )
  *
  * Shared memory equivilent of realloc(). Instead of taking a
  * size_t (bytes) argument, this takes the number of objects we
@@ -471,7 +475,7 @@ __ref smalloc_object_count( context_t ctx, uint64_t count )
  * uint64_t count: Number of objects the reallocated __ref should hold
  *
  */
-__ref srealloc_object_count( context_t ctx, __ref oldref, uint64_t count )
+__ref rsrealloc_object_count( context_t ctx, __ref oldref, uint64_t count )
 {
     shalloc_header * header = NULL;
 
@@ -480,8 +484,94 @@ __ref srealloc_object_count( context_t ctx, __ref oldref, uint64_t count )
     if( unlikely( header == NULL ) )
         return get_null_ref();
 
-    fprintf( stderr, "srealloc_object_count: not implemented\n" );
-    return get_null_ref();
+    return _shrealloc( header, oldref, count );
+}
+
+void * scalloc_object_count( context_t ctx, uint64_t count )
+{
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULL;
+
+    return get_ptr_fast(
+        _shmalloc( header, count * header->object_size, true )
+    );
+}
+
+void * smalloc_object_count( context_t ctx, uint64_t count )
+{
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULL;
+
+    return get_ptr_fast(
+        _shmalloc( header, count * header->object_size, false )
+    );
+}
+
+void * srealloc_object_count( context_t ctx, void * oldptr, uint64_t count )
+{
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULL;
+
+    return get_ptr_fast(
+        _shrealloc( header, get_ref( oldptr ), count )
+    );
+}
+
+void * scalloc( context_t ctx, size_t size, uint64_t count )
+{
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULL;
+
+    return get_ptr_fast(
+        _shmalloc( header, size, true )
+    );
+}
+
+void * smalloc( context_t ctx, size_t size )
+{
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULL;
+
+    return get_ptr_fast(
+        _shmalloc( header, size, false )
+    );
+}
+
+void * srealloc( context_t ctx, void * oldptr, size_t size )
+{
+    shalloc_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULL;
+
+    if( size % header->object_size != 0 )
+        return NULL;
+
+    return get_ptr_fast(
+        _shrealloc( header, get_ref( oldptr ), size / header->object_size )
+    );
 }
 
 /*
@@ -516,7 +606,7 @@ static __inline__ bool __shrealloc_internal( shalloc_header * header, uint64_t n
     }
     #endif // SLAB_DEBUG
 
-    if( unlikely( !header->locked ) )
+    if( unlikely( !(header->locked) ) )
     #ifdef SLAB_DEBUG
     {
         fprintf( stderr, "__shrealloc_internal: Expected locked header as input\n" );
@@ -723,14 +813,36 @@ static __inline__ bool _ref_get_index_and_size(
     return true;
 }
 
-void sfree( context_t ctx, __ref pointer )
+void rsfree( context_t ctx, __ref ref )
 {
     shalloc_header * header = NULL;
+
+    header = get_header_by_context( ctx );
+
+    if( header == NULL )
+        return;
+
+    return _shfree( header, ref, false );
+}
+
+void sfree( context_t ctx, void * ptr )
+{
+    shalloc_header * header = NULL;
+    __ref            ref    = {0};
+
+    ref    = get_ref( ptr );
+    header = get_header_by_context( ctx );
+
+    if( header == NULL )
+        return;
+
+    return _shfree( header, ref, false );
+}
+
+static __inline__ void _shfree( shalloc_header * header, __ref pointer, bool nolock )
+{
     uint64_t         index  = 0;
     uint64_t         size   = 0;
-    uint64_t         i      = 0;
-
-    header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
     #ifdef SLAB_DEBUG
@@ -788,7 +900,7 @@ void sfree( context_t ctx, __ref pointer )
     #endif // SLAB_DEBUG
 
     #ifdef SLAB_DEBUG
-    fprintf( stdout, "Freeing element of size %lu\n", size );
+    fprintf( stdout, "Freeing element of size %lu, index %lu\n", size, ( uint64_t ) index );
     #endif // SLAB_DEBUG
 
     if( unlikely( size == 0 ) )
@@ -801,20 +913,23 @@ void sfree( context_t ctx, __ref pointer )
     }
     #endif // SLAB_DEBUG
 
-    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
-    #ifdef SLAB_DEBUG
+    if( unlikely( !nolock ) )
     {
-        fprintf( stderr, "sfree: Unable to obtain lock on header\n" );
-    #endif // SLAB_DEBUG
-        return;
-    #ifdef SLAB_DEBUG
+        if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+        #ifdef SLAB_DEBUG
+        {
+            fprintf( stderr, "sfree: Unable to obtain lock on header\n" );
+        #endif // SLAB_DEBUG
+            return;
+        #ifdef SLAB_DEBUG
+        }
+        #endif // SLAB_DEBUG
     }
-    #endif // SLAB_DEBUG
 
-    for( i = index; i < index + size; i++ )
-    {
-        _clear_fsm_element_by_index( header, i );
-    }
+    if( size > 1 )
+        _clear_fsm_elements_by_range( header, index, index + size );
+    else
+        _clear_fsm_element_by_index( header, index );
 
     if( !_set_allocset_element_by_index( header, index, 0 ) )
     #ifdef SLAB_DEBUG
@@ -826,40 +941,136 @@ void sfree( context_t ctx, __ref pointer )
     }
     #endif // SLAB_DEBUG
 
-    header->n_allocs       -= size;
-    __C_MUTEX( &(header->locked) );
+    header->n_allocs -= size;
+    if( unlikely( !nolock ) )
+        __C_MUTEX( &(header->locked) );
+    fprintf( stdout, "FSM after free\n" );
+    _print_fsm( header );
     return;
 }
 
-static __inline__ __ref _shrealloc( context_t ctx, __ref oldref, uint64_t count )
+static __inline__ __ref _shrealloc( shalloc_header * header, __ref oldref, uint64_t count )
 {
-    shalloc_header * header = NULL;
-
-    header = get_header_by_context( ctx );
+    uint64_t bit_position = 0;
+    uint64_t old_size     = 0;
+    uint32_t index        = 0;
+    offset_t offset       = 0;
+    __ref    newref       = {0};
+    void *   new          = NULL;
+    void *   old          = NULL;
 
     if( header == NULL )
         return get_null_ref();
 
-    return get_null_ref();
+    fprintf( stdout, "_shrealloc entry\n" );
+    if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+    {
+        #ifdef SLAB_DEBUG
+        fprintf( stderr, "_shrealloc: Failed to obtain header lock.\n" );
+        #endif // SLAB_DEBUG
+        __C_MUTEX( &(header->locked) );
+        return get_null_ref();
+    }
+
+    if( unlikely( count > UINT_MAX ) )
+    {
+        // This should honestly be its own typedef
+        fprintf( stderr, "_shrealloc: need resize of type for allocset[]!\n" );
+        __C_MUTEX( &(header->locked) );
+        return get_null_ref();
+    }
+
+    fprintf( stdout, "_shrealloc setup\n" );
+    offset   = ref_get_offset( oldref );
+    old      = get_ptr_fast( oldref );
+    index    = ( offset / header->object_size ) - 1;
+    old_size = ( uint64_t ) _get_allocset_element_by_index( header, index );
+
+    #ifdef SLAB_DEBUG
+    fprintf( stdout, "_shrealloc: resizing ref from %lu to %lu objects\n", old_size, count );
+    #endif // SLAB_DEBUG
+
+    if( unlikely( count == old_size ) )
+    {
+        __C_MUTEX( &(header->locked) );
+        return oldref;
+    }
+
+    if( unlikely( count < old_size ) )
+    {
+        fprintf( stdout, "_shrealloc: fast track allocation shrink\n" );
+        // Fast track shrink
+        // Set allocset size to new size, shrink the FSM mask and return
+        newref = oldref;
+        _set_allocset_element_by_index( header, index, ( uint32_t ) count );
+        _clear_fsm_elements_by_range( header, index, index + old_size );
+        _set_fsm_elements_by_range( header, index, index + count );
+        __C_MUTEX( &(header->locked) );
+    }
+    else
+    {
+        fprintf( stdout, "_shrealloc: fast track allocation growth\n" );
+        // Fast track growth
+        errno = 0;
+        bit_position = _get_fsm_slot_by_width( header, count );
+
+        if( bit_position == ULONG_MAX || errno == ENOSPC )
+        {
+            // need to resize allocation XXXX
+            if( unlikely( !__shrealloc_internal( header, count ) ) )
+            {
+                fprintf( stderr, "_shrealloc: Failed to extend segment\n" );
+                errno = ENOSPC;
+                __C_MUTEX( &(header->locked) );
+                return get_null_ref();
+            }
+
+            bit_position = _get_fsm_slot_by_width( header, count );
+
+            if( unlikely( bit_position == ULONG_MAX ) )
+            {
+                fprintf( stderr, "_shrealloc: Failed to find FSM opening after resize\n" );
+                errno = ENOSPC;
+                __C_MUTEX( &(header->locked) );
+                return get_null_ref();
+            }
+        }
+        
+        newref = _get_alloc_element_by_index( header, bit_position );
+        header->n_allocs += count; // _shfree will decrement the old allocation
+
+        // We've done part of _shmalloc's job in allocating the FSM section (and allocset)
+        new = get_ptr_fast( newref );
+        memcpy(
+            old,
+            new,
+            old_size * header->object_size
+        );
+        
+        _shfree( header, oldref, true );
+        __C_MUTEX( &(header->locked) );
+    }
+     
+
+    return newref;
 }
 
-static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
+static __inline__ __ref _shmalloc( shalloc_header * header, size_t size, bool zero_fill )
 {
-    shalloc_header * header      = NULL;
     __ref            retref      = {0};
     uint64_t         num_objects = 0;
     uint64_t         index       = 0;
     void *           ptr         = NULL;
 
-    // this is unsafe, but the callers check our context prior
-    // to this dereference happening
-    header      = &(mapped_control->headers[ctx]);
+    if( header == NULL )
+        return get_null_ref();
+
     num_objects = size / header->object_size;
 
     fprintf(
         stdout,
-        "Handling _shmalloc( %lu, %zu, %s )\n",
-        ( uint64_t ) ctx,
+        "Handling _shmalloc( %p, %zu, %s )\n",
+        header,
         size,
         zero_fill ? "T" : "F"
     );
@@ -883,7 +1094,8 @@ static __inline__ __ref _shmalloc( context_t ctx, size_t size, bool zero_fill )
       )
     {
         fprintf( stderr, "Initializing slab\n" );
-        if( !_init_slab( ctx, header, false ) )
+        // Need to generate a context
+        if( !_init_slab( header, false ) )
         {
             fprintf(
                 stderr,
@@ -1082,7 +1294,6 @@ static __inline__ void _set_fsm_elements_by_range(
     start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
     end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
-/*
     fprintf(
         stdout,
         "_set_fsm_elements_by_range:\n"
@@ -1099,7 +1310,6 @@ static __inline__ void _set_fsm_elements_by_range(
         ( uint64_t ) fsm_end,
         ( uint64_t ) end_offset
     );
-*/
     // shiftless, bulk setting optimization
     if( fsm_start != fsm_end )
     {
@@ -1145,7 +1355,7 @@ static __inline__ void _set_fsm_elements_by_range(
             ( fsm_end * sizeof( fsm_t ) )
         );
 
-        *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << end_offset );
+        *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
         fprintf( stdout, "end\n" );
         print_bin(  ( uint64_t ) *fsm_word );
     }
@@ -1206,6 +1416,134 @@ static __inline__ void _set_fsm_element_by_index(
         return;
 
     *fsm_word |= ( fsm_t ) 1 << fsm_offset;
+
+    return;
+}
+
+static __inline__ void _clear_fsm_elements_by_range(
+    shalloc_header * header,
+    uint64_t         start,
+    uint64_t         end
+)
+{
+    fsm_t *  fsm_word     = NULL;
+    uint32_t fsm_start    = 0;
+    uint32_t fsm_end      = 0;
+    uint8_t  start_offset = 0;
+    uint8_t  end_offset   = 0;
+    uint32_t fsm_i        = 0;
+    void *   fsm          = NULL;
+
+    if( unlikely( header == NULL ) )
+    {
+        fprintf( stderr, "__clear_elements_by_range: NULL header.\n" );
+        return;
+    }
+
+    if( unlikely( start > end ) )
+    {
+        fprintf( stderr, "_clear_fsm_elements_by_range: start index exceeds end index.\n" );
+        return;
+    }
+
+    if( end > _get_fsm_length( header ) * FSM_WIDTH )
+    {
+        fprintf( stderr, "_clear_fsm_elements_by_index: end index is out of bounds\n" );
+        return;
+    }
+
+    // We set bits from start to end-1
+    // This function has a fenceposting issue
+    fsm          = get_ptr_fast( header->fsm );
+    fsm_start    = ( start / FSM_WIDTH );
+    start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
+    fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
+    end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
+    fprintf(
+        stdout,
+        "_clear_fsm_elements_by_range:\n"
+        "  start: %lu\n"
+        "  fsm_start: %lu\n"
+        "  start_offset: %lu\n"
+        "  end: %lu\n"
+        "  fsm_end: %lu\n"
+        "  end_offset: %lu\n",
+        ( uint64_t ) start,
+        ( uint64_t ) fsm_start,
+        ( uint64_t ) start_offset,
+        ( uint64_t ) end,
+        ( uint64_t ) fsm_end,
+        ( uint64_t ) end_offset
+    );
+    // shiftless, bulk setting optimization
+    if( fsm_start != fsm_end )
+    {
+        // This is the case where the request is fully aligned (on both sides) to the fsm word
+        if( end_offset == FSM_WIDTH - 1 && start_offset == 0 )
+        {
+            for( fsm_i = fsm_start; fsm_i <= fsm_end; fsm_i++ )
+            {
+                fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+                    fsm,
+                    ( fsm_i * sizeof( fsm_t ) )
+                );
+                *fsm_word = ( fsm_t ) 0;
+            }
+
+            return;
+        }
+
+        // This is the case where either the start or end are not fully aligned
+        // Bulk set the intermediate words (whole words between start and end offsets)
+        if( start_offset == 0 || fsm_start < fsm_end - 1 )
+        {
+            for( fsm_i = fsm_start; fsm_i < fsm_end; fsm_i++ )
+            {
+                fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+                    fsm,
+                    ( fsm_i * sizeof( fsm_t ) )
+                );
+                *fsm_word = ( fsm_t ) 0;
+            }
+        }
+        // Set the words at fsm_start and fsm_end
+        fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+            fsm,
+            ( fsm_start * sizeof( fsm_t ) )
+        );
+
+        fprintf( stdout, "FSM WORD:\n" );
+        print_bin( ( uint64_t ) *fsm_word );
+        *fsm_word &= ~( ( fsm_t ) ULONG_MAX << start_offset );
+        print_bin( ( uint64_t ) *fsm_word );
+        fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+            fsm,
+            ( fsm_end * sizeof( fsm_t ) )
+        );
+        *fsm_word &= ( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
+    }
+    else
+    {
+        // Handle case where FSM word is the same word and we're just setting
+        // a range within that word
+        fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
+            fsm,
+            ( fsm_start * sizeof( fsm_t ) )
+        );
+
+        // Special case - whole word fully aligned.
+        if( end_offset == FSM_WIDTH - 1 && start_offset == 0 )
+        {
+            // For implementation defined reasons, ( ULONG_MAX ) << 64 == ULONG_MAX, so we handle that here
+            // in amd64 world this is because the
+            //  shl rax, cl is often masked with cl & 0x3F, meaning rax may not be the expected 0 afterwards
+            *fsm_word = ( fsm_t ) 0;
+        }
+        else
+        {
+            *fsm_word &= ~( ~( ( ( fsm_t ) ULONG_MAX ) << ( end_offset - start_offset + 1 ) ) << start_offset );
+        }
+    }
 
     return;
 }
@@ -1284,33 +1622,18 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
 
     bit_position = __find_fsm_spot( header, width );
 
-    fprintf( stdout, "Got bit position %lu for initial FSM search (req: %lu)\n", bit_position, width );
-    //if( unlikely( bit_position == ULONG_MAX ) )
-    //    bit_position = __find_fsm_spot( header, width, true );
-
     if( unlikely( bit_position == ULONG_MAX ) )
     {
         errno = ENOSPC;
         return 0;
     }
 
-    // Mark field as used TODO this can be done in bulk i'm just lazy
+    #ifdef SLAB_DEBUG
     fprintf( stdout, "ISSUING ALLOCATION FOR INDEX %lu\n", bit_position );
-    fprintf( stdout, "FSM prior:\n" );
-
-    // XXX This function has a host of fenceposting issues and needs to be rethought
+    #endif // SLAB_DEBUG
     _set_fsm_elements_by_range( header, bit_position, bit_position + width );
 
-    fprintf( stdout, "Setting FSM range %lu to %lu\n", bit_position, bit_position + width );
-/*
-    for( fsm_index = bit_position; fsm_index < bit_position + width; fsm_index++ )
-    {
-        //fprintf( stdout, "Setting FSM bit %lu\n", ( uint64_t ) fsm_index );
-        // this can be bulkified so we dont have to call this routine for every single bit
-        _set_fsm_element_by_index( header, fsm_index );
-    }
-*/
-    // XXX: We need to track how large the allocation is for purposes of freeing later
+    // We need to track how large the allocation is for purposes of freeing later
     if( !_set_allocset_element_by_index( header, bit_position, width ) )
     {
         fprintf( stderr, "_get_fsm_slot_by_width: failed to set allocset\n" );
@@ -1319,7 +1642,12 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
     }
 
     #ifdef SLAB_DEBUG
-    fprintf( stdout, "_get_fsm_slot_by_width( %p, %lu ) FSM SNAPSHOT\n", header, width );
+    fprintf(
+        stdout,
+        "_get_fsm_slot_by_width( %p, %lu ) POST RUN FSM SNAPSHOT\n",
+        header,
+        width
+    );
     _print_fsm( header );
     #endif // SLAB_DEBUG
 
@@ -1336,7 +1664,7 @@ static __inline__ uint64_t _get_fsm_slot_by_width( shalloc_header * header, uint
  * search begins at the 'rear' (nth index) of the FSM, and moves towards the
  * 0th index for large allocations. Small (single) allocations are done by a
  * separate subroutine, which searches from the 'front' (0th index) of the FSM.
- * 
+ *
  * This algorithm makes the tradeoff between search speed and packing efficiency.
  * FSM_SHIFT_WIDTH controls this, and is expected to be 8, 16, 32, or 64
  * Another caveat is the end of an allocation is anchored to a multiple of the
@@ -1384,9 +1712,9 @@ static __inline__ uint64_t __find_fsm_spot(
 
     // Note that the position / iter expressed in these statements is inverted (directionally) prior
     // to return to caller, instead of the 0th element being the LSB of the 0th word, it's the MSB of the nth word.
-    #ifdef SLAB_DEBUG
-    fprintf( stdout, "__find_fsm_spot( %p, %lu ) startup\n", header, requested_length );
-    #endif // SLAB_DEBUG
+//    #ifdef SLAB_DEBUG
+//    fprintf( stdout, "__find_fsm_spot( %p, %lu ) startup\n", header, requested_length );
+//    #endif // SLAB_DEBUG
     if( requested_length <= FSM_SHIFT_WIDTH )
     {
         last_word      = true;
@@ -1405,9 +1733,9 @@ static __inline__ uint64_t __find_fsm_spot(
         { // Mask out the fsm word, if it's filled we can jump ahead by the full width
             iter     += FSM_WIDTH;
             position += FSM_WIDTH;
-            #ifdef SLAB_DEBUG
-            fprintf( stdout, "Fast skipped to iter %lu\n", ( uint64_t ) iter );
-            #endif // SLAB_DEBUG
+//            #ifdef SLAB_DEBUG
+//            fprintf( stdout, "Fast skipped to iter %lu\n", ( uint64_t ) iter );
+//            #endif // SLAB_DEBUG
             continue;
         }
 
@@ -1415,33 +1743,33 @@ static __inline__ uint64_t __find_fsm_spot(
         for( fsm_word_i = FSM_RATIO - 1; fsm_word_i != ( uint8_t ) UCHAR_MAX; --fsm_word_i )
         { // Iterate over words within the given fsm_t word, size FSM_SHIFT_WIDTH bits
             temp = ( fsm_cmp_t ) ( fsm_word >> ( ( fsm_word_i ) * FSM_SHIFT_WIDTH ) );
-            #ifdef SLAB_DEBUG
-            fprintf(
-                stdout,
-                "fsm_i: %lu, fsm_word_i: %lu, position %lu, iter %lu, bits_comp: %lu, last_word %s, compare_active %s\n",
-                ( uint64_t ) fsm_i,
-                ( uint64_t ) fsm_word_i,
-                ( uint64_t ) position,
-                ( uint64_t ) iter,
-                ( uint64_t ) bits_comp,
-                last_word ? "T" : "F",
-                compare_active ? "T" : "F"
-            );
-            fprintf( stdout, "Current FSM Word:\n" );
-            print_bin( ( uint64_t ) fsm_word );
-            fprintf( stdout, "Temp:\n" );
-            print_bin( ( uint64_t ) temp );
-            fprintf( stdout, "Mask:\n" );
-            print_bin( ( uint64_t ) mask );
-            #endif // SLAB_DEBUG
+//            #ifdef SLAB_DEBUG
+//            fprintf(
+//                stdout,
+//                "fsm_i: %lu, fsm_word_i: %lu, position %lu, iter %lu, bits_comp: %lu, last_word %s, compare_active %s\n",
+//                ( uint64_t ) fsm_i,
+//                ( uint64_t ) fsm_word_i,
+//                ( uint64_t ) position,
+//                ( uint64_t ) iter,
+//                ( uint64_t ) bits_comp,
+//                last_word ? "T" : "F",
+//                compare_active ? "T" : "F"
+//            );
+//            fprintf( stdout, "Current FSM Word:\n" );
+//            print_bin( ( uint64_t ) fsm_word );
+//            fprintf( stdout, "Temp:\n" );
+//            print_bin( ( uint64_t ) temp );
+//            fprintf( stdout, "Mask:\n" );
+//            print_bin( ( uint64_t ) mask );
+//            #endif // SLAB_DEBUG
             if( ( ~(temp) & mask ) == mask )
             {
                 if( last_word )
                 { // Prep for return & attempt to compactify past word boundaries
                     // Early exit when shifting wont help
-                    #ifdef SLAB_DEBUG
-                    fprintf( stdout, "Early exit triggered for position %lu\n", ( uint64_t ) position );
-                    #endif // SLAB_DEBUG
+//                    #ifdef SLAB_DEBUG
+//                    fprintf( stdout, "Early exit triggered for position %lu\n", ( uint64_t ) position );
+//                    #endif // SLAB_DEBUG
                     if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
                         return header->max_allocations - ( position + requested_length );
 
@@ -1470,9 +1798,9 @@ static __inline__ uint64_t __find_fsm_spot(
             }
             else
             {   // No match
-                #ifdef SLAB_DEBUG
-                fprintf( stdout, "No match - state reset.\n" );
-                #endif // SLAB_DEBUG
+//                #ifdef SLAB_DEBUG
+//                fprintf( stdout, "No match - state reset.\n" );
+//                #endif // SLAB_DEBUG
                 if( compare_active )
                 { // reset counters and markers
                     bits_comp = requested_length;
@@ -1533,7 +1861,7 @@ void slab_set_count_hint( context_t ctx, size_t count_hint )
     return;
 }
 
-static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool zero_fill )
+static __inline__ bool _init_slab( shalloc_header * header, bool zero_fill )
 {
     shm_handle handle         = SEGMENT_HANDLE_INVALID;
     void *     mapped_address = NULL;
@@ -1550,8 +1878,18 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     uint64_t   initial_size   = 0;
     void *     allocset       = NULL;
 
-    if( ctx == INVALID_CONTEXT || header == NULL )
+    if( header == NULL || header->self == INVALID_CONTEXT )
+    #ifdef SLAB_DEBUG
+    {
+        fprintf(
+            stderr,
+            "_init_slab: header is uninitialized, call slab_init() first\n"
+        );
+    #endif // SLAB_DEBUG
         return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
 
     // Don't want to trash an initialized segment and be idempotent
     if( header->segment != SEGMENT_HANDLE_INVALID )
@@ -1590,7 +1928,7 @@ static __inline__ bool _init_slab( context_t ctx, shalloc_header * header, bool 
     // Available space - accounting for headers and canaries
     available = ( get_segment_size( handle ) - ( 3 * sizeof( canary_t ) ) );
     header->max_allocations = ( available / unit_size ) * CHAR_BIT * sizeof( fsm_t );
-    
+
     allocset = new_segment( header->max_allocations * sizeof( uint32_t ) );
     header->allocset_handle = get_handle_from_ptr( allocset );
     header->allocset = get_ref( allocset );
@@ -2058,7 +2396,7 @@ static __inline__ __ref _move_to_shared(
     }
     #endif // SLAB_DEBUG
 
-    retref = _shmalloc( header->self, size, false );
+    retref = _shmalloc( header, size, false );
     target = get_ptr_fast( retref );
 
     if( unlikely( ref_is_null( retref ) || target == NULL ) )
@@ -2170,7 +2508,7 @@ static __inline__ void * _move_to_local( shalloc_header * header, __ref * ref, b
     __C_MUTEX( &(header->locked) );
     if( do_free )
     {
-        sfree( header->self, *ref );
+        _shfree( header, *ref, false );
         *ref = get_null_ref();
     }
 
