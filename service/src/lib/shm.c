@@ -1614,7 +1614,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     _shm_log(
         LL_SHM_DEBUG,
-        "Entrying critical section - resizing segment %lu from %zu to %zu bytes",
+        "Entering critical section - resizing segment %lu from %zu to %zu bytes",
         ( uint64_t ) segment,
         old_size,
         new_size
@@ -1656,9 +1656,9 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         return false;
     }
 
-    fprintf(
-        stdout,
-        ">>Copied %zu bytes from %p to %p (temp)\n",
+    _shm_log(
+        LL_SHM_DEBUG,
+        ">>Copied %zu bytes from %p to %p (temp)",
         __segment_lut[segment].mapped_size,
         __segment_lut[segment].mapped_address,
         temp
@@ -1739,9 +1739,9 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
             return false;
         }
-        fprintf(
-            stdout,
-            ">>Copied %zu bytes from %p (temp) to %p\n",
+        _shm_log(
+            LL_SHM_DEBUG,
+            ">>Copied %zu bytes from %p (temp) to %p",
             old_size + offsetof( seg_header, data ),
             temp,
             __segment_lut[segment].mapped_address

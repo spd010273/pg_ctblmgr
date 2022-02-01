@@ -73,6 +73,9 @@
 #include <stdlib.h>
 #include "barrier.h"
 #include "shm.h"
+#include <stdarg.h>
+#include <sys/time.h>
+#include <time.h>
 
 #define _SHALLOC_MAX_SLABS 16
 #define _SHALLOC_MAX_IDENT 64
@@ -225,4 +228,9 @@ extern void dump_context( context_t );
 extern bool force_canary_check( context_t );
 extern shalloc_header * get_header_by_context( context_t );
 extern void print_fsm( shalloc_header * header );
+
+typedef enum {
+    LL_SLAB_ERROR,
+    LL_SLAB_DEBUG
+} slab_ll;
 #endif // _SLAB_H
