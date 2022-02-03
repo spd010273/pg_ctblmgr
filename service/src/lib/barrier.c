@@ -66,6 +66,7 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
     return _res;
 }
 #  elif defined(__ppc__) || defined(__powerpc__) || defined(__ppc64__) || defined(__powerpc64__)
+// Note: we can probably leverage a better solution involving the PPC HTM (Hardware Transactional Memory)
 static __inline__ bool _test_and_set( volatile bool * mutex )
 {
     bool _t   = false;

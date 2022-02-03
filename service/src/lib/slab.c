@@ -151,22 +151,41 @@ bool slab_init( void )
     }
     else if( likely( shm_is_init() || p_pid != getpid() ) )
     {
+        _slab_log( LL_SLAB_DEBUG, "Initializing slab in child context" );
         // child initialization sequence
         shm_child_init();
         #ifndef SLAB_LAZY_LOAD
         map_all();
         #endif // SLAB_LAZY_LOAD
 
-        // segment address will be automatically mapped in when the __ref is dereferenced
+        #ifndef _SHALLOC_CONTROL_IN_OWN_SEGMENT
+        segment_address = get_control_data_section();
+        #else
         segment_address = get_ptr( control_segment_address );
+        #endif // _SHALLOC_CONTROL_IN_OWN_SEGMENT
+        // segment address will be automatically mapped in when the __ref is dereferenced
+        _slab_log( LL_SLAB_DEBUG, "Child has control segment %lu", ( uint64_t ) control_segment_address );
 
         if( segment_address == NULL || control_segment == SEGMENT_HANDLE_INVALID )
+        {
+            _slab_log( LL_SLAB_ERROR, "No control segment - has parent initialized the slab?" );
             return false;
+        }
 
+        _slab_log( LL_SLAB_DEBUG, "Child got %p for control segment", segment_address );
         mapped_control = ( shalloc_control * ) segment_address;
 
         if( mapped_control->magic != _SHALLOC_CONTROL_MAGIC )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Mapped control segment does not have correct magic %x, expected %x",
+                mapped_control->magic,
+                _SHALLOC_CONTROL_MAGIC
+            );
+
             return false;
+        }
 
         for( i = 0; i < _SHALLOC_MAX_SLABS; i++ )
         {
@@ -884,7 +903,8 @@ static __inline__ void _shfree( shalloc_header * header, __ref pointer, bool nol
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_shfree: Provided reference is not allocated"
+            "_shfree: Provided reference is not allocated (got index %lu)",
+            ( uint64_t) index
         );
         return;
     }
@@ -948,7 +968,7 @@ static __inline__ void _shfree( shalloc_header * header, __ref pointer, bool nol
 
     if( unlikely( !nolock ) )
         __C_MUTEX( &(header->locked) );
-    
+
     #ifdef SLAB_FSM_DEBUG
     _slab_log( LL_SLAB_DEBUG, "FSM after free:" );
     _print_fsm( header );
@@ -1022,6 +1042,7 @@ static __inline__ __ref _shrealloc(
         _clear_fsm_elements_by_range( header, index, index + old_size );
         _set_fsm_elements_by_range( header, index, index + count );
         __C_MUTEX( &(header->locked) );
+        header->n_allocs = header->n_allocs - old_size + count;
     }
     else
     {
@@ -1049,26 +1070,28 @@ static __inline__ __ref _shrealloc(
                     LL_SLAB_ERROR,
                     "_shrealloc: Failed to find FSM opening after resize"
                 );
+
                 errno = ENOSPC;
                 __C_MUTEX( &(header->locked) );
                 return get_null_ref();
             }
         }
-        
+
         newref = _get_alloc_element_by_index( header, bit_position );
         header->n_allocs += count; // _shfree will decrement the old allocation
 
         new = get_ptr_fast( newref );
         memcpy(
-            old,
             new,
+            old,
             old_size * header->object_size
         );
-        
+
+        _set_allocset_element_by_index( header, bit_position, count );
         _shfree( header, oldref, true );
         __C_MUTEX( &(header->locked) );
     }
-     
+
     return newref;
 }
 
@@ -1333,7 +1356,7 @@ static __inline__ void _set_fsm_elements_by_range(
     start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
     end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
-    
+
     #ifdef SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
@@ -1375,8 +1398,15 @@ static __inline__ void _set_fsm_elements_by_range(
         // Bulk set the intermediate words (whole words between start and end offsets)
         if( start_offset == 0 || fsm_start < fsm_end - 1 )
         {
-            for( fsm_i = fsm_start; fsm_i < fsm_end; fsm_i++ )
+            for( fsm_i = fsm_start + 1; fsm_i < fsm_end; fsm_i++ )
             {
+                #ifdef SLAB_FSM_DEBUG
+                _slab_log(
+                    LL_SLAB_DEBUG,
+                    "_set_fsm_elements_by_range: Setting fsm word %lu en-masse",
+                    ( uint64_t ) fsm_i
+                );
+                #endif // SLAB_FSM_DEBUG
                 fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
                     fsm,
                     ( fsm_i * sizeof( fsm_t ) )
@@ -1390,14 +1420,35 @@ static __inline__ void _set_fsm_elements_by_range(
             ( fsm_start * sizeof( fsm_t ) )
         );
 
+        #ifdef SLAB_FSM_DEBUG
+        _slab_log( LL_SLAB_DEBUG, "start:" );
+        print_bin( *fsm_word );
+        #endif // SLAB_FSM_DEBUG
         *fsm_word |= ( ( fsm_t ) ULONG_MAX ) << start_offset;
+        #ifdef SLAB_FSM_DEBUG
+        print_bin( *fsm_word );
+        #endif // SLAB_FSM_DEBUG
 
         fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
             fsm,
             ( fsm_end * sizeof( fsm_t ) )
         );
 
-        *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
+        if( end_offset == FSM_WIDTH - 1 )
+        {
+            *fsm_word = ( fsm_t ) ULONG_MAX;
+        }
+        else
+        {
+            *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
+        }
+        #ifdef SLAB_FSM_DEBUG
+        _slab_log( LL_SLAB_DEBUG, "start:" );
+        print_bin( *fsm_word );
+        #endif // SLAB_FSM_DEBUG
+        #ifdef SLAB_FSM_DEBUG
+        print_bin( *fsm_word );
+        #endif // SLAB_FSM_DEBUG
     }
     else
     {
@@ -1508,7 +1559,7 @@ static __inline__ void _clear_fsm_elements_by_range(
     start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
     end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
-    
+
     #ifdef SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
@@ -1550,7 +1601,7 @@ static __inline__ void _clear_fsm_elements_by_range(
         // Bulk set the intermediate words (whole words between start and end offsets)
         if( start_offset == 0 || fsm_start < fsm_end - 1 )
         {
-            for( fsm_i = fsm_start; fsm_i < fsm_end; fsm_i++ )
+            for( fsm_i = fsm_start + 1; fsm_i < fsm_end; fsm_i++ )
             {
                 fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
                     fsm,
@@ -1572,7 +1623,14 @@ static __inline__ void _clear_fsm_elements_by_range(
             ( fsm_end * sizeof( fsm_t ) )
         );
 
-        *fsm_word &= ( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
+        if( end_offset == FSM_WIDTH - 1 )
+        {
+            *fsm_word = ( fsm_t ) 0;
+        }
+        else
+        {
+            *fsm_word &= ( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
+        }
     }
     else
     {
@@ -1767,6 +1825,7 @@ static __inline__ uint64_t __find_fsm_spot(
     fsm_t              skip_mask        = ( fsm_t ) ULONG_MAX;
     register bool      compare_active   = false;
     register bool      last_word        = false;
+    uint8_t            pos_offset       = 0;
 
     fsm_length = _get_fsm_length( header );
     mask_last  = ~( mask_last << ( requested_length % FSM_SHIFT_WIDTH ) );
@@ -1787,6 +1846,8 @@ static __inline__ uint64_t __find_fsm_spot(
         last_word      = true;
         compare_active = true;
         mask           = mask_last;
+        pos_offset     = FSM_SHIFT_WIDTH - requested_length;
+        // Pos offset prevents overlap of allocations
     }
 
     for( fsm_i = 0; fsm_i < fsm_length; fsm_i++ )
@@ -1798,8 +1859,10 @@ static __inline__ uint64_t __find_fsm_spot(
 
         if( ( fsm_word & skip_mask ) == skip_mask )
         { // Mask out the fsm word, if it's filled we can jump ahead by the full width
-            iter     += FSM_WIDTH;
-            position += FSM_WIDTH;
+            iter          += FSM_WIDTH;
+            position       = iter;
+            bits_comp      = requested_length; // Reset counter in case we were mid compare
+            compare_active = false;
             #ifdef SLAB_FSM_DEBUG
             _slab_log(
                 LL_SLAB_DEBUG,
@@ -1819,14 +1882,15 @@ static __inline__ uint64_t __find_fsm_spot(
             _slab_log(
                 LL_SLAB_DEBUG,
                 "fsm_i: %lu, fsm_word_i: %lu, position %lu, iter %lu, "
-                "bits_comp: %lu, last_word %s, compare_active %s",
+                "bits_comp: %lu, last_word %s, compare_active %s, pos_offset: %lu",
                 ( uint64_t ) fsm_i,
                 ( uint64_t ) fsm_word_i,
                 ( uint64_t ) position,
                 ( uint64_t ) iter,
                 ( uint64_t ) bits_comp,
                 last_word ? "T" : "F",
-                compare_active ? "T" : "F"
+                compare_active ? "T" : "F",
+                ( uint64_t ) pos_offset
             );
             _slab_log( LL_SLAB_DEBUG, "Current FSM Word:" );
             print_bin( ( uint64_t ) fsm_word );
@@ -1849,11 +1913,16 @@ static __inline__ uint64_t __find_fsm_spot(
                     );
                     #endif // SLAB_FSM_DEBUG
                     if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
-                        return header->max_allocations - ( position + requested_length );
+                        return header->max_allocations - ( position + requested_length ) - pos_offset;
 
                     mask = ( fsm_cmp_t ) FSM_LAST_WORD_MASK;
                     temp = last_word_val;
-
+                    _slab_log(
+                        LL_SLAB_DEBUG,
+                        "Attempting to compactify from position %lu (ret: %lu)",
+                        position,
+                        header->max_allocations - ( position + requested_length ) - pos_offset
+                    );
                     while( ( ~temp & mask ) != 0 )
                     {
                         if( temp == 0 )
@@ -1862,7 +1931,7 @@ static __inline__ uint64_t __find_fsm_spot(
                         position--;
                     }
 
-                    return header->max_allocations - ( position + requested_length );
+                    return header->max_allocations - ( position + requested_length ) - pos_offset;
                 }
 
                 bits_comp -= FSM_SHIFT_WIDTH;
@@ -2032,8 +2101,12 @@ static __inline__ bool _init_slab( shalloc_header * header, bool zero_fill )
     #ifdef SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
-        "Layout:\n  Allocstart canary: %p\n  Alloc: %p\n"
-        "  FSMstart Canary: %p\n  FSM: %p\n  FSMend Canary %p",
+        "Layout:\n"
+        "  Allocstart canary: %p\n"
+        "  Alloc:             %p\n"
+        "  FSMstart Canary:   %p\n"
+        "  FSM:               %p\n"
+        "  FSMend Canary      %p",
         c_allocstart,
         alloc,
         c_fsmstart,
@@ -2250,6 +2323,7 @@ static __inline__ context_t get_ctx_by_id( const char * ident )
     if( found == true )
         return ( context_t ) i;
 
+    _slab_log( LL_SLAB_ERROR, "Could not locate context for %s\n", ident );
     return INVALID_CONTEXT;
 }
 
@@ -2562,10 +2636,11 @@ static void _print_fsm( shalloc_header * header )
             ( ( len - 1 - i ) * sizeof( fsm_t ) )
         );
 
-        fprintf( stdout, "FSM[%lu] (%p): ", ( len - 1 - i ), fsm_word );
+        fprintf( stdout, "FSM[%03lu] (%p): ", ( len - 1 - i ), fsm_word );
         print_bin( ( uint64_t ) *fsm_word );
     }
 
+    return;
 }
 
 static void print_byte( uint8_t data )
@@ -2602,28 +2677,28 @@ static void _dump_header( shalloc_header * header )
     fprintf( stdout, "==== SHALLOC HEADER %p\n", header );
     fprintf(
         stdout,
-        "  magic: %x\n"
-        "  segment: %lu\n"
-        "  object_size: %zu\n"
-        "  count_hint: %zu\n"
-        "  allocs: %p\n"
-        "  n_allocs: %lu\n"
-        "  fsm: %p\n"
-        "  max_allocations: %lu\n"
-        "  object_id: %s\n"
-        "  self: %lu\n"
-        "  locked: %s\n"
-        "  i_front_fsm_bit: %lu\n"
-        "  i_rear_fsm_word: %lu\n"
+        "  magic:            0x%08x\n"
+        "  segment:          %lu\n"
+        "  object_size:      %zu\n"
+        "  count_hint:       %zu\n"
+        "  allocs:           %p\n"
+        "  n_allocs:         %lu\n"
+        "  fsm:              %p\n"
+        "  max_allocations:  %lu\n"
+        "  object_id:        %s\n"
+        "  self:             %lu\n"
+        "  locked:           %s\n"
+        "  i_front_fsm_bit:  %lu\n"
+        "  i_rear_fsm_word:  %lu\n"
         "  loc_c_allocstart: %p\n"
-        "  c_allocstart: %x %x\n"
-        "  loc_c_fsmstart: %p\n"
-        "  c_fsmstart: %x %x\n"
-        "  loc_c_fsmend: %p\n"
-        "  c_fsmend: %x %x\n"
-        "  allocset: %p\n"
-        "  max_allocset %u\n"
-        "  allocset_handle %lu\n",
+        "  c_allocstart:     0x%08x%08x\n"
+        "  loc_c_fsmstart:   %p\n"
+        "  c_fsmstart:       0x%08x%08x\n"
+        "  loc_c_fsmend:     %p\n"
+        "  c_fsmend:         0x%08x%08x\n"
+        "  allocset:         %p\n"
+        "  max_allocset      %u\n"
+        "  allocset_handle   %lu\n",
         ( uint32_t ) header->magic,
         ( uint64_t ) header->segment,
         ( size_t ) header->object_size,
@@ -2676,7 +2751,8 @@ static void _dump_header( shalloc_header * header )
 
         for( j = 0; j < alloc_size; j++ )
         {
-            ptr = _PTR_ADD_OFFSET( ptr, header->object_size );
+            fprintf( stdout, "0x" );
+
             for( k = 0; k < header->object_size; k++ )
             {
                 fprintf(
@@ -2687,8 +2763,14 @@ static void _dump_header( shalloc_header * header )
                 );
             }
 
-            fprintf( stdout, "\n" );
+            ptr = _PTR_ADD_OFFSET( ptr, header->object_size );
+            if( ( j + 1 ) % 4 == 0 )
+                fprintf( stdout, "\n" );
+            else
+                fprintf( stdout, " " );
         }
+
+        fprintf( stdout, "\n" );
     }
 
     fprintf( stdout, "-- ALLOCSET[]\n" );
@@ -2697,7 +2779,7 @@ static void _dump_header( shalloc_header * header )
         ptr = _PTR_ADD_OFFSET( get_ptr( header->allocset ), i * sizeof( uint32_t ) );
         if( *((uint32_t * ) ptr) == 0 )
             continue;
-        fprintf( stdout, "ALLOCSET[%lu]: %lu\n", ( uint64_t ) i, ( uint64_t ) *(( uint32_t * ) ptr) );
+        fprintf( stdout, "ALLOCSET[%03lu]: %08lu\n", ( uint64_t ) i, ( uint64_t ) *(( uint32_t * ) ptr) );
     }
     fprintf( stdout, "==============================\n" );
     return;

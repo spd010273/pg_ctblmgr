@@ -57,6 +57,7 @@
 #define _SLAB_H
 
 #define SLAB_DEBUG 1
+//#define SLAB_FSM_DEBUG 1
 
 // since we're wrapping shm.c, we can control whether map_all() is called
 // by a forkee upon initialization. By lazy loading - we defer loading in
@@ -84,7 +85,7 @@
 #undef  _SHALLOC_CONTROL_IN_OWN_SEGMENT
 #define _SHALLOC_CONTROL_MAGIC 0xF0042069
 #define _SHALLOC_HEADER_MAGIC 0xDEED144A
-#define _INVALID_CONTEXT 0xB16F00FE
+#define _INVALID_CONTEXT ( ( uint64_t ) 0 - 1 )
 #define _ZERO_FILL_BYTE 0xEA // Sports. It's in the game.
 //#define _FORCE_SIGSEGV_ON_CANARY_FAILURE 1
 
@@ -156,6 +157,12 @@ typedef uint16_t fsm_cmp_t;
  *  a remap prior to dereferencing the pointer
  *
  */
+typedef enum {
+    COMPACT_AGGRESSIVE, // Attempt to reduce segment size after every free
+    COMPACT_LAZY,       // DEFAULT: 'Intelligently' reduce segment size when high FSM indexes are freed
+    COMPACT_NONE        // Do not compactify segments
+} compact_t;
+
 typedef struct shalloc_header {
     uint32_t       magic;
     shm_handle     segment;
@@ -181,6 +188,7 @@ typedef struct shalloc_header {
     __ref          allocset; // Different segment than the data segment
     uint32_t       max_allocset;
     shm_handle     allocset_handle;
+    compact_t      compact;
 } __attribute__((packed)) shalloc_header;
 
 typedef struct shalloc_control {
@@ -190,11 +198,13 @@ typedef struct shalloc_control {
     bool           locked;
 } shalloc_control;
 
+// TODO - add compactification (segment size reduction) for slabs on free 
 // Initialization / boilerplate
 extern bool slab_init( void );
 extern context_t new_slab( const char *, size_t );
 extern context_t new_slab_with_hint( const char *, size_t, uint64_t );
 extern void slab_set_count_hint( context_t, size_t );
+//extern void slab_set_compaction( context_t, compact_t );
 extern void destroy_slab( context_t );
 
 // Extra malloc/realloc calls where # of objects requested are used
@@ -233,4 +243,5 @@ typedef enum {
     LL_SLAB_ERROR,
     LL_SLAB_DEBUG
 } slab_ll;
+
 #endif // _SLAB_H
