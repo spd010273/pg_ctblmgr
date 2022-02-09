@@ -65,10 +65,11 @@ static __inline__ bool _ref_get_index_and_size( shalloc_header *, __ref, uint64_
 static __inline__ void * _move_to_local( shalloc_header *, __ref *, bool ) __attribute__((always_inline));
 static __inline__ __ref _move_to_shared( shalloc_header *, void **, size_t, bool ) __attribute__((always_inline));
 static __inline__ void _slab_log( slab_ll, char *, ... ) __attribute__((format (gnu_printf, 2, 3) ));
+static void _dump_control( shalloc_control * );
 
 #ifdef SLAB_DEBUG
 // Debugging
-static void _dump_header( shalloc_header * );
+static void _dump_header( shalloc_header *, bool );
 static void _dump_context( context_t ); // calls dump_header()
 static void print_byte( uint8_t );
 static void print_bin( uint64_t );
@@ -97,16 +98,18 @@ bool slab_init( void )
 {
     void *      segment_address = NULL;
     header_iter i               = 0;
+    size_t      ctrl_size       = 0;
 
     if( _slab_init == false )
     {
+        ctrl_size = sizeof( shalloc_control ) + ( sizeof( shalloc_header ) * _SHALLOC_MAX_SLABS );
         // Parent initialization sequence
         p_pid = getpid();
         #ifndef _SHALLOC_CONTROL_IN_OWN_SEGMENT
-        shm_init_extra( sizeof( shalloc_control ) );
+        shm_init_extra( ctrl_size );
         segment_address = get_control_data_section();
         #else
-        segment_address = new_segment( sizeof( shalloc_control ) );
+        segment_address = new_segment( ctrl_size );
         #endif // _SHALLOC_CONTROL_IN_OWN_SEGMENT
 
         if( segment_address == NULL )
@@ -125,6 +128,7 @@ bool slab_init( void )
 
         for( i = 0; i < _SHALLOC_MAX_SLABS; i++ )
         {
+            _slab_log( LL_SLAB_DEBUG, "Setting up header %lu", ( uint64_t ) i );
             mapped_control->headers[i].magic       = ( uint64_t ) _SHALLOC_HEADER_MAGIC;
             mapped_control->headers[i].segment     = SEGMENT_HANDLE_INVALID;
             mapped_control->headers[i].object_size = 0;
@@ -151,6 +155,12 @@ bool slab_init( void )
     }
     else if( likely( shm_is_init() || p_pid != getpid() ) )
     {
+        fprintf(
+            stdout,
+            "Initializing slab in subprocess. "
+            "Settings:\n  MAX SLABS: %lu\n  context_t size: %zu\n  header_iter size: %zu\n",
+            ( uint64_t ) _SHALLOC_MAX_SLABS, sizeof( context_t ), sizeof( header_iter )
+        );
         _slab_log( LL_SLAB_DEBUG, "Initializing slab in child context" );
         // child initialization sequence
         shm_child_init();
@@ -175,6 +185,7 @@ bool slab_init( void )
         _slab_log( LL_SLAB_DEBUG, "Child got %p for control segment", segment_address );
         mapped_control = ( shalloc_control * ) segment_address;
 
+        _dump_control( mapped_control );
         if( mapped_control->magic != _SHALLOC_CONTROL_MAGIC )
         {
             _slab_log(
@@ -187,6 +198,8 @@ bool slab_init( void )
             return false;
         }
 
+        // XXX we keep failing here - seems like the back-half of the headers are corrupted? maybe we're overwriting them
+        // or we are dereferencing the wrong pointer??
         for( i = 0; i < _SHALLOC_MAX_SLABS; i++ )
         {
             if( unlikely( !check_shalloc_header( i ) ) )
@@ -323,7 +336,8 @@ static __inline__ context_t _new_slab( const char * tag, size_t object_size, uin
         mapped_control->next_header += 1;
 
         __C_MUTEX( &(mapped_control->locked) );
-
+    
+        _slab_log( LL_SLAB_DEBUG, "INITIALIZING SLAB %lu\n", ( uint64_t ) ret );
         // Setup our header to a semi-initialized state - we'll
         // handle setup of allocs[] and fsm[] later
         mapped_control->headers[ret].object_size      = object_size;
@@ -2323,7 +2337,6 @@ static __inline__ context_t get_ctx_by_id( const char * ident )
     if( found == true )
         return ( context_t ) i;
 
-    _slab_log( LL_SLAB_ERROR, "Could not locate context for %s\n", ident );
     return INVALID_CONTEXT;
 }
 
@@ -2379,7 +2392,7 @@ static bool check_shalloc_header( header_iter index )
         return false;
     }
 
-    header = &(mapped_control->headers[index]);
+    header = ( shalloc_header * ) &(mapped_control->headers[index]);
 
     if( header->magic != _SHALLOC_HEADER_MAGIC )
     {
@@ -2663,7 +2676,7 @@ static void print_bin( uint64_t data )
     return;
 }
 
-static void _dump_header( shalloc_header * header )
+static void _dump_header( shalloc_header * header, bool simple )
 {
     void *   ptr        = NULL;
     uint64_t i          = 0;
@@ -2726,6 +2739,8 @@ static void _dump_header( shalloc_header * header )
         ( uint64_t ) header->allocset_handle
 
     );
+    if( simple )
+        return;
     fprintf( stdout, "---- HEADER DATA DETAIL:\n-- FSM:\n" );
     _print_fsm( header );
     fprintf( stdout, "-- ALLOCS[]:\n" );
@@ -2790,13 +2805,56 @@ static void _dump_context( context_t ctx )
     shalloc_header * header = NULL;
     header = _get_header_by_context( ctx );
 
-    return _dump_header( header );
+    return _dump_header( header, false );
 }
-void dump_context( context_t ctx )
+
+void dump_control( void )
 {
-    return _dump_context( ctx );
+    if( mapped_control == NULL )
+    {
+        _slab_log( LL_SLAB_ERROR, "No mapped control header" );
+        return;
+    }
+
+    _dump_control( mapped_control );
+    return;
+}
+
+static void _dump_control( shalloc_control * ctrl )
+{
+    header_iter i = 0;
+
+    if( ctrl == NULL )
+        return;
+
+    fprintf(
+        stdout,
+        "Control header %p:\n"
+        "  Magic: %x\n"
+        "  locked: %s\n"
+        "  headers[%lu]\n",
+        ctrl,
+        ( uint32_t ) ctrl->magic,
+        ctrl->locked ? "T" : "F",
+        ( uint64_t ) _SHALLOC_MAX_SLABS
+    );
+
+    for( i = 0; i < _SHALLOC_MAX_SLABS; i++ )
+    {
+        fprintf( stdout, " Header[%lu]:\n", ( uint64_t ) i );
+        _dump_header( &(ctrl->headers[i]), true );
+    }
 }
 #endif // SLAB_DEBUG
+
+void dump_context( context_t ctx )
+{
+    #ifdef SLAB_DEBUG
+    return _dump_context( ctx );
+    #endif // SLAB_DEBUG
+    _slab_log( LL_SLAB_ERROR, "Cannot dump context - DEBUG not enabled" );
+    return;
+}
 
 static void _slab_log( slab_ll log_level, char * message, ... )
 {

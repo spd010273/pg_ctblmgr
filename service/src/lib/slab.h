@@ -175,7 +175,7 @@ typedef struct shalloc_header {
     uint32_t       max_allocations;
     char           object_id[_SHALLOC_MAX_IDENT];
     context_t      self; // our index in the headers[]
-    bool           locked;
+    volatile bool  locked;
     uint64_t       i_front_fsm_bit;
     uint64_t       i_rear_fsm_word;
     __ref          loc_c_allocstart;
@@ -195,7 +195,7 @@ typedef struct shalloc_control {
     uint32_t       magic;
     shalloc_header headers[_SHALLOC_MAX_SLABS];
     header_iter    next_header; //next free header
-    bool           locked;
+    volatile bool  locked;
 } shalloc_control;
 
 // TODO - add compactification (segment size reduction) for slabs on free 
@@ -238,6 +238,7 @@ extern void dump_context( context_t );
 extern bool force_canary_check( context_t );
 extern shalloc_header * get_header_by_context( context_t );
 extern void print_fsm( shalloc_header * header );
+extern void dump_control( void );
 
 typedef enum {
     LL_SLAB_ERROR,

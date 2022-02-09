@@ -265,10 +265,14 @@ __inline__ void * get_ptr( __ref ref )
 
     mapped_size = __segment_lut[segment].mapped_size;
 
-    if( unlikely( ( ( seg_header * ) mapped_address )->size != mapped_size ) )
+    if( unlikely( ( control_header->sizes[segment] != mapped_size ) ) )
     {
         // Need a remap
-        _shm_log( LL_SHM_DEBUG, "Segment header size and mapped size do not match. This segment has been resized and will auto-remap" );
+        _shm_log(
+            LL_SHM_DEBUG,
+            "RESIZE: Segment header size and mapped size do not match."
+            " This segment has been resized and will auto-remap"
+        );
         if(
             unlikely(
                 !_shm_wrapper(
@@ -316,6 +320,9 @@ __inline__ void * get_ptr( __ref ref )
         #ifdef SHM_DEBUG
         }
         #endif // SHM_DEBUG
+        
+        __segment_lut[segment].mapped_size = mapped_size;
+        __segment_lut[segment].mapped_address = mapped_address;
     }
 
     ret = _PTR_ADD_OFFSET(
@@ -751,7 +758,29 @@ void * map_segment( shm_handle handle )
 
     // Already mapped
     if( __segment_lut[handle].handle == handle )
-        return ( void * ) GET_USER_PTR( __segment_lut[handle].mapped_address );
+    {
+        if( likely( __segment_lut[handle].mapped_size == control_header->sizes[handle] ) )
+            return ( void * ) GET_USER_PTR( __segment_lut[handle].mapped_address );
+
+        if(
+            unlikely(
+                !_shm_wrapper(
+                    SHM_DETACH,
+                    handle,
+                    0,
+                    NULL,
+                    NULL
+                )
+            )
+          )
+        {
+            _shm_log( LL_SHM_ERROR, "Failed to detach out-of-date segment for remap" );
+        }
+
+        __segment_lut[handle].mapped_address = NULL;
+        __segment_lut[handle].mapped_size = 0;
+        __segment_lut[handle].handle = SEGMENT_HANDLE_INVALID;
+    }
 
     // Map an existing handle
     if(
@@ -889,7 +918,7 @@ void * new_segment( size_t size )
         header->locked      = false;
         header->ref_count   = 1;
         header->control     = control_handle;
-        header->size        = mapped_size;
+        control_header->sizes[new_handle] = mapped_size;
 #ifdef SHM_DEBUG
         _shm_log(
             LL_SHM_DEBUG,
@@ -1748,7 +1777,13 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         );
     }
 
-    ( ( seg_header * ) mapped_address )->size = mapped_size;
+    _shm_log( LL_SHM_DEBUG, "SET segment %lu size from %zu to %zu",
+        ( uint64_t ) segment,
+        control_header->sizes[segment],
+        mapped_size
+    );
+
+    control_header->sizes[segment] = mapped_size;
 
     free( temp );
     if( !_release_lock( segment, SHM_HWLOCK ) )
@@ -1777,7 +1812,7 @@ size_t get_segment_size( shm_handle segment )
 
 void map_all( void )
 {
-    uint32_t seg_index = 0;
+    handle_iter seg_index = 0;
 
     if( control_header == NULL || control_handle == CONTROL_HANDLE_INVALID )
     {
@@ -2553,7 +2588,6 @@ static size_t _get_system_page_size( void )
 
 static inline bool _shm_check_owner( ctrl_header * header )
 {
-    __dump_ctrl_header( header );
     if( unlikely( !_shm_check_control( header ) ) )
 #ifdef SHM_DEBUG
     {
@@ -2947,14 +2981,12 @@ static void __dump_seg_header( seg_header * header )
           "MAGIC: %x\n  " \
           "OWNER: %d\n  " \
           "LOCKED: %s\n  " \
-          "SIZE: %zu\n  " \
           "REF_COUNT: %u\n  " \
           "CONTROL: %lu\n  " \
           "DATA: %p",
         header->magic,
         header->owner,
         header->locked ? "TRUE" : "FALSE",
-        header->size,
         header->ref_count,
         ( uint64_t ) header->control,
         header->data

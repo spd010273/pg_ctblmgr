@@ -472,18 +472,19 @@ typedef struct ctrl_header {
     handle_iter   max_entries;     // SHM_MAX_SEGMENTS
     shm_handle    segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
+    size_t        sizes[SHM_MAX_SEGMENTS];
     volatile bool hwlocks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here. (this is SHM_HWLOCK)
     uint8_t *     data;
 } ctrl_header;
 
 typedef struct seg_header {
-    uint32_t      magic;     // Should be SEGMENT_HEADER_MAGIC at all times
-    pid_t         owner;     // Parent process owning this segment
-    volatile bool locked;    // Shared between allocator and shm.c. This is SHM_LWLOCK
-    size_t        size;
-    uint32_t      ref_count; // Number of processes with this segment mapped
-    shm_handle    control;   // ID of control segment
-    uint8_t *     data;      // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
+    uint32_t        magic;     // Should be SEGMENT_HEADER_MAGIC at all times
+    pid_t           owner;     // Parent process owning this segment
+    volatile bool   locked;    // Shared between allocator and shm.c. This is SHM_LWLOCK
+    volatile size_t size; // XXX this needs to be moved to the control headers sizes[]. The resize's destroy/create might interfere
+    uint32_t        ref_count; // Number of processes with this segment mapped
+    shm_handle      control;   // ID of control segment
+    uint8_t *       data;      // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
 } seg_header;
 
 /*

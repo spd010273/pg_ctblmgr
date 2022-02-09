@@ -42,6 +42,7 @@ int main( void )
         return 1;
     }
 
+    dump_control();
     ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
 
     if( ref == get_null_ref() )
@@ -88,6 +89,7 @@ int main( void )
 #endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
 
 
+    dump_control();
     fprintf( stdout, "Extending allocation...\n" );
     ref2 = rsmalloc( slab, sizeof( uint64_t ) * ( ( TEST_SIZE * 4 ) + 2 ));
 
@@ -343,6 +345,7 @@ int main( void )
         return 1;
     }
 
+    fprintf( stdout, "Parent confirming child baseline writes...\n" );
     for( i = 0; i < 2048; i++ )
     {
         if( ptr[i] != 42 + i )
@@ -353,6 +356,23 @@ int main( void )
                 ( uint64_t ) i,
                 ( uint64_t ) ptr[i],
                 ( uint64_t ) 42 + i
+            );
+            return 1;
+        }
+    }
+
+    fprintf( stdout, "Parent confirming child extended writes...\n" );
+    dump_context( slab );
+    for( i = 2048; i < 4096; i++ )
+    {
+        if( ptr[i] != 42 * i )
+        {
+            fprintf(
+                stderr,
+                "Failed - extended write not visible to parent at index %lu, got %lu, expected %lu\n",
+                ( uint64_t ) i,
+                ( uint64_t ) ptr[i],
+                ( uint64_t ) 42 * i
             );
             return 1;
         }
@@ -393,6 +413,7 @@ static void child_routine( __ref ref )
         return;
     }
 
+    fprintf( stdout, "Performing SMD read/write test...\n" );
     for( i = 0; i < 2048; i++ )
     {
         if( ptr[i] != 42 )
@@ -409,6 +430,40 @@ static void child_routine( __ref ref )
 
         ptr[i] = 42 + i;
     }
+
+    fprintf( stdout, "Child extending slab...\n" );
+    ref = rsrealloc( slab, ref, sizeof( uint64_t ) * 4096 );
+    ptr = get_ptr( ref );
+
+    if( ptr == NULL )
+    {
+        fprintf( stderr, "Failed - child could not extend segment.\n" );
+        return;
+    }
+
+    fprintf( stdout, "Child performing extended read/write test...\n" );
+    for( i = 0; i < 4096; i++ )
+    {
+        if( i < 2048 )
+        {
+            if( ptr[i] != 42 + i )
+            {
+                fprintf(
+                    stderr,
+                    "Failed - old data corrupted at index %lu, got %lu, expected %lu\n",
+                    ( uint64_t ) i,
+                    ( uint64_t ) ptr[i],
+                    ( uint64_t ) i + 42
+                );
+                return;
+            }
+        }
+        else
+        {
+            ptr[i] = 42 * i;
+        }
+    }
+    //dump_context( slab );
 
     return;
 }
