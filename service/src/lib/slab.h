@@ -2,7 +2,7 @@
  *
  * slab.h
  *     Shared memory slab allocator
- * 
+ *
  * This library, together with shm.h, provides a simplified malloc/calloc/
  * realloc/free-like interface with shared memory. Shared memory segments, in
  * most implementations, come in multiples of 4KiB in size. This library
@@ -45,7 +45,18 @@
  * while only requiring the movement of the FSM to the end of the
  * resized segment.
  *
+ * Similar to malloc()/realloc()/calloc(), memory handling speed is improved by
+ * getting an allocation up-front, for the correct size, and working from that.
+ * Calls to realloc type functions are a little hazardous as the distributed
+ * references are not updated automatically in other processes. This can be
+ * worked around by creating a separate slab to store references to a reference
+ * that can be reallocated (akin to a double pointer). This works well but
+ * wastes a little space (both memory and source files).
  *
+ * TODO:
+ * - Convert allocset[] to a hashtable to avoid wasting memory
+ * - Complete compactify functionality (release space back to kernel when
+ *   segments shrink)
  * Copyright (c) 2021, MerchLogix Inc.
  *
  * IDENTIFICATION
@@ -56,7 +67,7 @@
 #ifndef _SLAB_H
 #define _SLAB_H
 
-#define SLAB_DEBUG 1
+//#define SLAB_DEBUG 1
 //#define SLAB_FSM_DEBUG 1
 
 // since we're wrapping shm.c, we can control whether map_all() is called
@@ -74,30 +85,31 @@
 #include <stdlib.h>
 #include "barrier.h"
 #include "shm.h"
+#include "compiler.h"
 #include <stdarg.h>
 #include <sys/time.h>
 #include <time.h>
 
-#define _SHALLOC_MAX_SLABS 16
-#define _SHALLOC_MAX_IDENT 64
-#define _SHALLOC_EXTRA_SANE 1 // Enable extra sanity checks
-#define _SHALLOC_REALLOC_MULTIPLE 2 // IFF a slab realloc occurs-  how aggressively do we overallocate?
-#undef  _SHALLOC_CONTROL_IN_OWN_SEGMENT
-#define _SHALLOC_CONTROL_MAGIC 0xF0042069
-#define _SHALLOC_HEADER_MAGIC 0xDEED144A
+#define _SLAB_MAX_SLABS 16
+#define _SLAB_MAX_IDENT 64
+#define _SLAB_EXTRA_SANE 1 // Enable extra sanity checks
+#define _SLAB_REALLOC_MULTIPLE 2 // unused: IFF a slab realloc occurs-  how aggressively do we overallocate?
+#undef  _SLAB_CONTROL_IN_OWN_SEGMENT
+#define _SLAB_CONTROL_MAGIC 0xF0042069
+#define _SLAB_HEADER_MAGIC 0xDEED144A
 #define _INVALID_CONTEXT ( ( uint64_t ) 0 - 1 )
 #define _ZERO_FILL_BYTE 0xEA // Sports. It's in the game.
 //#define _FORCE_SIGSEGV_ON_CANARY_FAILURE 1
 
-#if defined( _SHALLOC_MAX_SLABS ) && ( _SHALLOC_MAX_SLABS <= UCHAR_MAX )
+#if defined( _SLAB_MAX_SLABS ) && ( _SLAB_MAX_SLABS <= UCHAR_MAX )
 typedef uint8_t header_iter;
 typedef uint8_t context_t;
  #define INVALID_CONTEXT ( uint8_t ) _INVALID_CONTEXT
-#elif defined( _SHALLOC_MAX_SLABS ) && ( _SHALLOC_MAX_SLABS > UCHAR_MAX ) && ( _SHALLOC_MAX_SLABS <= USHRT_MAX )
+#elif defined( _SLAB_MAX_SLABS ) && ( _SLAB_MAX_SLABS > UCHAR_MAX ) && ( _SLAB_MAX_SLABS <= USHRT_MAX )
 typedef uint16_t header_iter;
 typedef uint16_t context_t;
  #define INVALID_CONTEXT ( uint16_t ) _INVALID_CONTEXT
-#elif defined( _SHALLOC_MAX_SLABS ) && ( _SHALLOC_MAX_SLABS > USHRT_MAX ) && ( _SHALLOC_MAX_SLABS <= UINT_MAX )
+#elif defined( _SLAB_MAX_SLABS ) && ( _SLAB_MAX_SLABS > USHRT_MAX ) && ( _SLAB_MAX_SLABS <= UINT_MAX )
 typedef uint32_t header_iter;
 typedef uint32_t context_t;
  #define INVALID_CONTEXT ( uint32_t ) _INVALID_CONTEXT
@@ -145,8 +157,8 @@ typedef uint16_t fsm_cmp_t;
  *              |                                   ^
  *              +-----------------------------------+
  *
- *  The shalloc_control and shalloc_headers are stored together in the data
- *  section of the shm.c control header. Each initialized slab (shalloc header)
+ *  The slab_control and slab_headers are stored together in the data
+ *  section of the shm.c control header. Each initialized slab (slab header)
  *  constitutes the data section, referenced by allocs[] and FSM refs. These reside
  *  on the same shm.c segment. allocsets live in their own shm.c segment.
  *
@@ -156,6 +168,10 @@ typedef uint16_t fsm_cmp_t;
  *  and the header's defined size, indicating that the calling process needs to perform
  *  a remap prior to dereferencing the pointer
  *
+ *  NOTES: There is an issue where when a given process performs a reallocation, the old
+ *  __refs pointing to it (in processes other than the one performing the reallocation)
+ *  become stale. This can be resolved by the defeloper storing their references in a slab,
+ *  and passing references around in that manner ( for now ).
  */
 typedef enum {
     COMPACT_AGGRESSIVE, // Attempt to reduce segment size after every free
@@ -163,7 +179,7 @@ typedef enum {
     COMPACT_NONE        // Do not compactify segments
 } compact_t;
 
-typedef struct shalloc_header {
+typedef struct slab_header {
     uint32_t       magic;
     shm_handle     segment;
     // Initialization / boilerplate// NOTE: this is the data segment, not the segment this header is stored in
@@ -173,7 +189,7 @@ typedef struct shalloc_header {
     uint32_t       n_allocs;
     __ref          fsm; // Free Space Map - bitmap of the free allocations slots. 0 = unallocated, 1 = allocated
     uint32_t       max_allocations;
-    char           object_id[_SHALLOC_MAX_IDENT];
+    char           object_id[_SLAB_MAX_IDENT];
     context_t      self; // our index in the headers[]
     volatile bool  locked;
     uint64_t       i_front_fsm_bit;
@@ -188,17 +204,17 @@ typedef struct shalloc_header {
     __ref          allocset; // Different segment than the data segment
     uint32_t       max_allocset;
     shm_handle     allocset_handle;
-    compact_t      compact;
-} __attribute__((packed)) shalloc_header;
+//    compact_t      compact;
+} PACKED slab_header;
 
-typedef struct shalloc_control {
-    uint32_t       magic;
-    shalloc_header headers[_SHALLOC_MAX_SLABS];
-    header_iter    next_header; //next free header
-    volatile bool  locked;
-} shalloc_control;
+typedef struct slab_control {
+    uint32_t      magic;
+    slab_header   headers[_SLAB_MAX_SLABS];
+    header_iter   next_header; //next free header
+    volatile bool locked;
+} slab_control;
 
-// TODO - add compactification (segment size reduction) for slabs on free 
+// TODO - add compactification (segment size reduction) for slabs on free
 // Initialization / boilerplate
 extern bool slab_init( void );
 extern context_t new_slab( const char *, size_t );
@@ -207,6 +223,9 @@ extern void slab_set_count_hint( context_t, size_t );
 //extern void slab_set_compaction( context_t, compact_t );
 extern void destroy_slab( context_t );
 
+// Note for users: *realloc*() functions are dangerous, and you need a method to share
+// the updated __ref with other processes. This can be done by setting aside a separate slab
+// for __refs (similar to a double pointer). It's a little more boilerplate but works. Sorry :(
 // Extra malloc/realloc calls where # of objects requested are used
 extern __ref rscalloc_object_count( context_t, uint64_t );
 extern __ref rsmalloc_object_count( context_t, uint64_t );
@@ -236,8 +255,8 @@ extern __ref move_to_shared( context_t, void **, size_t );
 // Debugging / testing functions
 extern void dump_context( context_t );
 extern bool force_canary_check( context_t );
-extern shalloc_header * get_header_by_context( context_t );
-extern void print_fsm( shalloc_header * header );
+extern slab_header * get_header_by_context( context_t );
+extern void print_fsm( slab_header * header );
 extern void dump_control( void );
 
 typedef enum {

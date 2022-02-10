@@ -13,7 +13,8 @@ static void child_routine( __ref );
 int main( void )
 {
     context_t  slab = 0;
-
+    context_t  slab2 = 0;
+    canary_t   save_canary = {0};
     __ref      ref  = get_null_ref();
     __ref      ref2 = get_null_ref();
     __ref      ref3 = get_null_ref();
@@ -23,6 +24,9 @@ int main( void )
     __ref      ref7 = get_null_ref();
     __ref      ref8 = get_null_ref();
     __ref      ref9 = get_null_ref();
+
+    __ref      refref = get_null_ref();
+    __ref *    refptr = NULL;
     pid_t      child = 0;
     uint64_t * ptr  = NULL;
     uint64_t   i    = 0;
@@ -42,7 +46,6 @@ int main( void )
         return 1;
     }
 
-    //dump_control();
     ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
 
     if( ref == get_null_ref() )
@@ -71,8 +74,9 @@ int main( void )
     }
 
     // Check setting flag - don't actually want to crash the test ;)
-#ifdef _FORCE_SIGSEGV_ON_CANARY_FAILURE
+#ifndef _FORCE_SIGSEGV_ON_CANARY_FAILURE
     fprintf( stdout, "Making out-of-bounds write to %p (%lu)\n", &(ptr[i]), i );
+    save_canary = ptr[i];
     ptr[i]=42;
 
     if( force_canary_check( slab ) )
@@ -80,6 +84,9 @@ int main( void )
         fprintf( stderr, "Canary check passed after unbounded write\n" );
         return 1;
     }
+
+    fprintf( stdout, "Canary OOB write test passed\n" );
+    ptr[i] = save_canary;
 #else
     fprintf(
         stdout,
@@ -89,7 +96,6 @@ int main( void )
 #endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
 
 
-    //dump_control();
     fprintf( stdout, "Extending allocation...\n" );
     ref2 = rsmalloc( slab, sizeof( uint64_t ) * ( ( TEST_SIZE * 4 ) + 2 ));
 
@@ -255,7 +261,6 @@ int main( void )
             return 1;
         }
     }
-    //dump_context( slab );
     fprintf( stdout, "Freeing allocations...\n" );
 
     rsfree( slab, ref );
@@ -266,10 +271,8 @@ int main( void )
     rsfree( slab, ref6 );
     rsfree( slab, ref7 );
     rsfree( slab, ref8 );
-    //dump_context( slab );
 
     fprintf( stdout, "Performing first reallocation test (no segment extension)...\n" );
-    //dump_context( slab );
     ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 1024 );
     if( ref_is_null( ref9 ) )
     {
@@ -277,7 +280,6 @@ int main( void )
          return 1;
     }
 
-    //dump_context( slab );
     ptr = get_ptr( ref9 );
     if( ptr == NULL )
     {
@@ -327,19 +329,40 @@ int main( void )
         ptr[i] = 42;
 
 
+    fprintf( stdout, "Preparing for SMP test...\n" );
+    fprintf( stdout, "Allocating __ref storage for pass by reference...\n" );
+    slab2 = new_slab( "ref", sizeof( __ref )  );
+    slab_set_count_hint( slab2, 1 );
+    refref = rsmalloc( slab2, sizeof( __ref ) );
+    refptr = ( __ref * ) get_ptr( refref );
+    if( refptr == NULL )
+    {
+        fprintf( stderr, "Failed to setup __ref storage\n" );
+        return 1;
+    }
+
+    *refptr = ref9;
+
     fprintf( stdout, "Beginning SMP test...\n" );
     child = fork();
 
     if( child == 0 )
     {
-        child_routine( ref9 );
+        child_routine( refref );
         exit(0);
     }
 
     wait( NULL );
-    __FENCE();
-    dump_context( slab );
-    ptr = get_ptr( ref9 );
+    refptr = get_ptr( refref );
+    if( refptr == NULL )
+    {
+        fprintf( stderr, "Failed to dereference __ref *\n" );
+        return 1;
+    }
+
+    ref9 = *refptr;
+    ptr  = get_ptr( ref9 );
+
     if( ptr == NULL )
     {
         fprintf( stderr, "Failed - parent returned NULL pointer after child exit\n" );
@@ -350,11 +373,9 @@ int main( void )
      * Here's the issue - the allocation gets moved by the child because it's large - but the ref remains absolute as an offset into the page.
      * We'll need to offset off of that when allocs get relocated, possibly by wrapping get_ptr in slab.c, possibly by allocset index and offset?
      */
-    fprintf( stdout, "Reading contents of segment %lu\n", ( uint64_t ) ref_get_segment( ref9 ) );
     fprintf( stdout, "Parent confirming child baseline writes...\n" );
     for( i = 0; i < 2048; i++ )
     {
-        fprintf( stdout, "P Address %p offset %lu\n", &(ptr[i]), ( uint64_t ) i );
         if( ptr[i] != 42 + i )
         {
             fprintf(
@@ -369,10 +390,8 @@ int main( void )
     }
 
     fprintf( stdout, "Parent confirming child extended writes...\n" );
-    //dump_context( slab );
     for( i = 2048; i < 4096; i++ )
     {
-        //fprintf( stdout, "P Address %p offset %lu\n", &(ptr[i]), ( uint64_t ) i );
         if( ptr[i] != 42 * i )
         {
             fprintf(
@@ -387,18 +406,35 @@ int main( void )
         }
     }
 
-    fprintf( stdout, "Freed all references, destroying slab...\n" );
+    fprintf( stdout, "Freed all references, forcing canary checks...\n" );
+    if( !force_canary_check( slab ) )
+    {
+        fprintf( stderr, "TEST slab failed canary check\n" );
+        return 1;
+    }
+
+    if( !force_canary_check( slab2 ) )
+    {
+        fprintf( stderr, "ref slab failed canary check\n" );
+        return 1;
+    }
+
+    fprintf( stdout, "Canary checks passed, destroying slabs...\n" );
     rsfree( slab, ref9 );
+    rsfree( slab2, refref );
     destroy_slab( slab );
+    destroy_slab( slab2 );
     fprintf( stdout, "Done.\n" );
     return 0;
 }
 
-static void child_routine( __ref ref )
+static void child_routine( __ref refref )
 {
-    context_t  slab = INVALID_CONTEXT;
-    uint64_t * ptr  = NULL;
-    uint64_t   i    = 0;
+    context_t  slab   = INVALID_CONTEXT;
+    uint64_t * ptr    = NULL;
+    __ref *    refptr = NULL;
+    __ref      ref    = get_null_ref();
+    uint64_t   i      = 0;
 
     if( !slab_init() )
     {
@@ -410,10 +446,25 @@ static void child_routine( __ref ref )
 
     if( slab == INVALID_CONTEXT )
     {
-        fprintf( stderr, "Failed - child could not get context\n" );
+        fprintf( stderr, "Failed - child could not get TEST context\n" );
         return;
     }
 
+    if( slab == INVALID_CONTEXT )
+    {
+        fprintf( stderr, "Failed - child count not get ref context\n" );
+        return;
+    }
+
+    refptr = get_ptr( refref );
+
+    if( refptr == NULL )
+    {
+        fprintf( stderr, "Failed - child dereferenced NULL double ref\n" );
+        return;
+    }
+
+    ref = *refptr;
     ptr = get_ptr( ref );
 
     if( ptr == NULL )
@@ -422,7 +473,7 @@ static void child_routine( __ref ref )
         return;
     }
 
-    fprintf( stdout, "Performing SMD read/write test...\n" );
+    fprintf( stdout, "Performing SMP read/write test...\n" );
     for( i = 0; i < 2048; i++ )
     {
         if( ptr[i] != 42 )
@@ -473,7 +524,8 @@ static void child_routine( __ref ref )
             ptr[i] = 42 * i;
         }
     }
-    //dump_context( slab );
+
+    *refptr = ref;
     __FENCE();
     return;
 }

@@ -158,6 +158,7 @@
  #include <signal.h>
 #endif // _POSIX_C_SOURCE
 
+#include "compiler.h"
 #include "barrier.h"
 
 /* ----------------------------- TUNABLES -------------------------------
@@ -454,7 +455,7 @@ typedef struct shm_segment {
     shm_handle handle;
     void *     mapped_address;
     size_t     mapped_size; // This is not the user requested size, but the actual size of the segment. Typically a
-} __attribute__((packed)) shm_segment;
+} PACKED shm_segment;
 #else
 typedef struct shm_segment {
     shm_handle handle;          // Mapped segment ID
@@ -473,7 +474,7 @@ typedef struct ctrl_header {
     shm_handle    segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
     size_t        sizes[SHM_MAX_SEGMENTS];
-    volatile bool hwlocks[SHM_MAX_SEGMENTS]; // TODO: Need to relocate segment header locks here. (this is SHM_HWLOCK)
+    volatile bool hwlocks[SHM_MAX_SEGMENTS]; // (this is SHM_HWLOCK)
     uint8_t *     data;
 } ctrl_header;
 
@@ -481,7 +482,6 @@ typedef struct seg_header {
     uint32_t        magic;     // Should be SEGMENT_HEADER_MAGIC at all times
     pid_t           owner;     // Parent process owning this segment
     volatile bool   locked;    // Shared between allocator and shm.c. This is SHM_LWLOCK
-    volatile size_t size; // XXX this needs to be moved to the control headers sizes[]. The resize's destroy/create might interfere
     uint32_t        ref_count; // Number of processes with this segment mapped
     shm_handle      control;   // ID of control segment
     uint8_t *       data;      // User ( allocator ) data starts here NOTE. NEED TO MAKE SURE THIS ADDRESS IS ALIGNED
@@ -540,7 +540,7 @@ typedef struct seg_header {
 typedef struct __ref {
     shm_handle _segment; // ID of the segment this ref points to
     offset_t   _offset;  // Offset into the segment (from the user facing pointer IE mapped_address + offsetof( seg_header, data ) )
-} __attribute__((packed)) __ref;
+} PACKED __ref;
  #else
   #ifdef __sys32
 typedef uint32_t __ref;
@@ -569,20 +569,20 @@ typedef enum {
 /*
  * get_ptr( __ref )
  */
-extern __inline__ void * get_ptr( __ref ); // Get local pointer to mapping
-extern __inline__ void * get_ptr_fast( __ref ) __attribute__((flatten)); // above but only for contexts where the segment will not chang
-extern __inline__ __ref get_ref( void * ); // Get absolute ref
+extern INLINE void * get_ptr( __ref ) FLATTEN_HOT; // Get local pointer to mapping
+extern INLINE void * get_ptr_fast( __ref ) FLATTEN_HOT; // above but only for contexts where the segment will not chang
+extern INLINE __ref get_ref( void * ) FLATTEN_HOT; // Get absolute ref
 extern ctrl_header * get_control_header( void );
 extern shm_handle get_control_segment( void );
 extern uint8_t * get_control_data_section( void );
-extern __inline__ bool ref_is_null( __ref ); // check if ref is null
-extern __inline__ __ref get_null_ref( void ); // Get a reference null
+extern INLINE bool ref_is_null( __ref ) FLATTEN_HOT; // check if ref is null
+extern INLINE __ref get_null_ref( void ) FLATTEN_HOT; // Get a reference null
 extern bool shm_remap( shm_handle );
-
-extern offset_t ref_get_offset( __ref );
-extern shm_handle ref_get_segment( __ref );
-extern __ref ref_set_segment( __ref, shm_handle );
-extern __ref ref_set_offset( __ref, offset_t );
+extern uint64_t get_ref_reference_count( __ref );
+extern offset_t ref_get_offset( __ref ) FLATTEN_HOT;
+extern shm_handle ref_get_segment( __ref ) FLATTEN_HOT;
+extern __ref ref_set_segment( __ref, shm_handle ) FLATTEN_HOT;
+extern __ref ref_set_offset( __ref, offset_t ) FLATTEN_HOT;
 
 extern bool is_locked( shm_handle, shm_lock );
 extern bool get_lock( shm_handle, shm_lock );

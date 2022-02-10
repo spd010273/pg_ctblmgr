@@ -53,11 +53,11 @@ static bool _close_segment_descriptor( int, char *, bool );
 static size_t _get_system_page_size( void );
 static size_t _round_to_multiple_of_page_size( size_t );
 static size_t _get_ctrl_header_size( uint32_t );
-static __inline__ shm_handle _get_handle_from_ptr( void * ) __attribute__((always_inline, flatten));
+static INLINE shm_handle _get_handle_from_ptr( void * ) ALWAYS_INLINE_FLATTEN;
 static void _free_segment( shm_handle );
 static void _append_to_cleanup_list( shm_handle );
 static void _cleanup_old_segments( void );
-static __inline__ bool _shm_remap( shm_handle ) __attribute__((always_inline, flatten));
+static INLINE bool _shm_remap( shm_handle ) ALWAYS_INLINE_FLATTEN;
 
 static inline bool _shm_check_owner( ctrl_header * );
 static inline bool _shm_check_control( ctrl_header * );
@@ -65,8 +65,8 @@ static inline bool _shm_check_seg_owner( seg_header * );
 static inline bool _shm_check_segment( seg_header * );
 
 #ifdef SHM_DEBUG
-static void __dump_ctrl_header( ctrl_header * ) __attribute__((unused));
-static void __dump_seg_header( seg_header * ) __attribute__((unused));
+static void __dump_ctrl_header( ctrl_header * ) UNUSED;
+static void __dump_seg_header( seg_header * ) UNUSED;
 #endif // SHM_DEBUG
 
 #ifdef SHM_ENABLE_RUNTIME_SANITY_CHECK
@@ -74,7 +74,7 @@ static bool directionality_check( void );
 static bool _dir_check_b( uint64_t * );
 #endif // SHM_ENABLE_RUNTIME_SANITY_CHECK
 
-static void _shm_log( shm_ll, char *, ... ) __attribute__ ((format (gnu_printf, 2, 3)));
+static void _shm_log( shm_ll, char *, ... ) PRINTF;
 
 static shm_handle    control_handle      = ( shm_handle ) CONTROL_HANDLE_INVALID;
 static ctrl_header * control_header      = NULL;
@@ -87,14 +87,14 @@ static uint16_t      cleanup_list_len    = 0;
 // Given a segment ID, lets us get the mapping info
 static shm_segment   __segment_lut[SHM_MAX_SEGMENTS] = {{0}};
 
-static __inline__ offset_t _ref_get_offset( __ref ) __attribute__((always_inline, flatten));
-static __inline__ shm_handle _ref_get_segment( __ref ) __attribute__((always_inline, flatten));
-static __inline__ __ref _ref_set_offset( __ref, offset_t ) __attribute__((always_inline, flatten));
-static __inline__ __ref _ref_set_segment( __ref, shm_handle ) __attribute__((always_inline, flatten));
+static INLINE offset_t _ref_get_offset( __ref ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE shm_handle _ref_get_segment( __ref ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE __ref _ref_set_offset( __ref, offset_t ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE __ref _ref_set_segment( __ref, shm_handle ) ALWAYS_INLINE_FLATTEN_HOT;
 
-static __inline__ bool _is_locked( shm_handle, shm_lock ) __attribute__((always_inline, flatten));
-static __inline__ bool _get_lock( shm_handle, shm_lock ) __attribute__((always_inline, flatten));
-static __inline__ bool _release_lock( shm_handle, shm_lock ) __attribute__((always_inline, flatten));
+static INLINE bool _is_locked( shm_handle, shm_lock ) ALWAYS_INLINE_FLATTEN;
+static INLINE bool _get_lock( shm_handle, shm_lock ) ALWAYS_INLINE_FLATTEN;
+static INLINE bool _release_lock( shm_handle, shm_lock ) ALWAYS_INLINE_FLATTEN;
 
 // External-facing getters for test harness
 offset_t ref_get_offset( __ref ref )
@@ -120,7 +120,7 @@ __ref ref_set_offset( __ref ref, offset_t offset )
  * Setters and getters for __ref type. Depending on optimizations, this may be
  * a struct or crammed into a uint32_t or uint64_t.
  */
-static __inline__ offset_t _ref_get_offset( __ref ref )
+static INLINE offset_t _ref_get_offset( __ref ref )
 {
     #ifdef __SHM_NO_STRUCT
     /*
@@ -133,19 +133,24 @@ static __inline__ offset_t _ref_get_offset( __ref ref )
     #endif // __SHM_NO_STRUCT
 }
 
-static __inline__ shm_handle _ref_get_segment( __ref ref )
+static INLINE shm_handle _ref_get_segment( __ref ref )
 {
     #ifdef SHM_EXTRA_SANE
     register shm_handle seg = SEGMENT_HANDLE_INVALID;
     #endif // SHM_EXTRA_SANE
-    
+
     #if ( defined( __SHM_NO_STRUCT ) && defined( SHM_EXTRA_SANE ) )
-    seg = ( shm_handle ) ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) & SHM_HANDLE_MASK );
+    seg = ( shm_handle ) (
+                            ref
+                         >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE )
+                          & SHM_HANDLE_MASK
+                         );
     if( unlikely( seg >= SHM_MAX_SEGMENTS ) )
         return SEGMENT_HANDLE_INVALID;
     return ( __segment_lut[seg].handle );
     #elif (  defined( __SHM_NO_STRUCT ) && !defined( SHM_EXTRA_SANE ) )
-    return ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) & SHM_HANDLE_MASK;
+    return ( ref >> ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) )
+         & SHM_HANDLE_MASK;
     #elif ( !defined( __SHM_NO_STRUCT ) && defined( SHM_EXTRA_SANE ) )
     seg = ( shm_handle ) ( ref._segment );
     if( unlikely( seg >= SHM_MAX_SEGMENTS ) )
@@ -156,7 +161,7 @@ static __inline__ shm_handle _ref_get_segment( __ref ref )
     #endif // SHM_EXTRA_SANE && __SHM_NO_STRUCT
 }
 
-static __inline__ __ref _ref_set_offset( __ref ref, offset_t offset )
+static INLINE __ref _ref_set_offset( __ref ref, offset_t offset )
 {
     #ifdef __SHM_NO_STRUCT
     /*
@@ -164,15 +169,15 @@ static __inline__ __ref _ref_set_offset( __ref ref, offset_t offset )
      * with 16-bit segments and 32-bit offsets, we're targeting the 0xFF'd
      * portion: 0x0000FFFFFFFF0000
      */
-    ref = ref & ~( ( ( __ref ) SHM_OFFSET_MASK << ( __SHM_RPAD_WIDTH ) ) );
-    ref = ref | ( ( ( __ref )  offset << ( __SHM_RPAD_WIDTH ) ) );
+    ref &= ~( ( ( __ref ) SHM_OFFSET_MASK << ( __SHM_RPAD_WIDTH ) ) );
+    ref |= ( ( ( __ref )  offset << ( __SHM_RPAD_WIDTH ) ) );
     #else
     ref._offset = offset;
     #endif // _SHM_NO_STRUCT
     return ref;
 }
 
-static __inline__ __ref _ref_set_segment( __ref ref, shm_handle segment )
+static INLINE __ref _ref_set_segment( __ref ref, shm_handle segment )
 {
     #ifdef __SHM_NO_STRUCT
     /*
@@ -180,8 +185,13 @@ static __inline__ __ref _ref_set_segment( __ref ref, shm_handle segment )
      * with 16-bit segments and 32-bit offsets, we're targeting the 0xFF'd
      * portion: 0xFFFF000000000000
      */
-    ref = ref & ~( ( ( __ref ) SHM_HANDLE_MASK << ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) );
-    ref = ref | ( ( ( __ref ) segment << ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE ) ) );
+    ref &= ~(
+                ( __ref ) SHM_HANDLE_MASK
+             << ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE )
+           );
+    ref |= (
+                ( __ref ) segment << ( ( __SHM_RPAD_WIDTH ) + SHM_OFFSET_SIZE )
+           );
     #else
     ref._segment = segment;
     #endif // _SHM_NO_STRUCT
@@ -197,7 +207,7 @@ static __inline__ __ref _ref_set_segment( __ref ref, shm_handle segment )
  * in situations where the segment is locked (not being manipulated) and
  * we cannot return a pointer out of range
  */
-__inline__ void * get_ptr_fast( __ref ref )
+INLINE void * get_ptr_fast( __ref ref )
 {
     #ifdef SHM_EXTRA_SANE
     return get_ptr( ref );
@@ -219,10 +229,19 @@ __inline__ void * get_ptr_fast( __ref ref )
 
 bool shm_remap( shm_handle segment )
 {
-    if( unlikely( ( segment == SEGMENT_HANDLE_INVALID ) || ( segment >= SHM_MAX_SEGMENTS ) ) )
+    if(
+        unlikely(
+            ( segment == SEGMENT_HANDLE_INVALID )
+         || ( segment >= SHM_MAX_SEGMENTS ) )
+      )
         return false;
 
-    if( unlikely( __segment_lut[segment].mapped_size == control_header->sizes[segment] ) )
+    if(
+        unlikely(
+            __segment_lut[segment].mapped_size
+         == control_header->sizes[segment]
+        )
+      )
     #ifdef SHM_DEBUG
     {
         _shm_log(
@@ -238,7 +257,7 @@ bool shm_remap( shm_handle segment )
     return _shm_remap( segment );
 }
 
-static __inline__ bool _shm_remap( shm_handle segment )
+static INLINE bool _shm_remap( shm_handle segment )
 {
     void * mapped_address = NULL;
     size_t mapped_size    = 0;
@@ -289,7 +308,7 @@ static __inline__ bool _shm_remap( shm_handle segment )
         return false;
     #ifdef SHM_DEBUG
     }
-    
+
     _shm_log(
         LL_SHM_DEBUG,
         "Successfully remapped segment %lu from %p to %p",
@@ -299,13 +318,14 @@ static __inline__ bool _shm_remap( shm_handle segment )
     );
     #endif // SHM_DEBUG
 
-    __segment_lut[segment].mapped_size = mapped_size;
+    // Update local state
+    __segment_lut[segment].mapped_size    = mapped_size;
     __segment_lut[segment].mapped_address = mapped_address;
 
     return true;
 }
 
-__inline__ void * get_ptr( __ref ref )
+INLINE void * get_ptr( __ref ref )
 {
     void *   mapped_address     = NULL;
     void *   ret                = NULL;
@@ -388,7 +408,7 @@ __inline__ void * get_ptr( __ref ref )
     return ret;
 }
 
-__inline__ __ref get_ref( void * ptr )
+INLINE __ref get_ref( void * ptr )
 {
     __ref      ret    = {0};
     shm_handle handle = 0;
@@ -758,14 +778,19 @@ void shm_child_init( void )
         {
             _shm_log(
                 LL_SHM_DEBUG,
-                "Child incremented ref count for segment %lu due to it being mapped post-fork",
+                "Child incremented ref count for segment"
+                " %lu due to it being mapped post-fork",
                 ( uint64_t ) seg
             );
             ( ( seg_header * ) __segment_lut[seg].mapped_address )->ref_count++;
             _shm_log(
                 LL_SHM_DEBUG,
                 "Ref count is now %lu",
-                ( uint64_t ) ( ( ( seg_header * ) __segment_lut[seg].mapped_address )->ref_count )
+                ( uint64_t ) (
+                    (
+                        ( seg_header * ) __segment_lut[seg].mapped_address
+                    )->ref_count
+                )
             );
         }
     }
@@ -804,8 +829,15 @@ void * map_segment( shm_handle handle )
     // Already mapped
     if( __segment_lut[handle].handle == handle )
     {
-        if( likely( __segment_lut[handle].mapped_size == control_header->sizes[handle] ) )
-            return ( void * ) GET_USER_PTR( __segment_lut[handle].mapped_address );
+        if(
+            likely(
+                __segment_lut[handle].mapped_size
+             == control_header->sizes[handle]
+            )
+          )
+            return ( void * ) GET_USER_PTR(
+                __segment_lut[handle].mapped_address
+            );
 
         if(
             unlikely(
@@ -819,12 +851,15 @@ void * map_segment( shm_handle handle )
             )
           )
         {
-            _shm_log( LL_SHM_ERROR, "Failed to detach out-of-date segment for remap" );
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to detach out-of-date segment for remap"
+            );
         }
 
         __segment_lut[handle].mapped_address = NULL;
-        __segment_lut[handle].mapped_size = 0;
-        __segment_lut[handle].handle = SEGMENT_HANDLE_INVALID;
+        __segment_lut[handle].mapped_size    = 0;
+        __segment_lut[handle].handle         = SEGMENT_HANDLE_INVALID;
     }
 
     // Map an existing handle
@@ -995,7 +1030,7 @@ void * new_segment( size_t size )
     return NULL;
 }
 
-static __inline__ shm_handle _get_handle_from_ptr( void * ptr )
+static INLINE shm_handle _get_handle_from_ptr( void * ptr )
 {
     seg_header * header = NULL;
     shm_handle   handle = SEGMENT_HANDLE_INVALID;
@@ -1030,9 +1065,9 @@ static __inline__ shm_handle _get_handle_from_ptr( void * ptr )
 
     header = ( seg_header * ) GET_HDR_PTR( ptr );
 
-    // TODO: Implement reverse lookup for header pointers (locally mapped) to shm_handle,
-    // This is exhaustive but safe as we don't have to dereference the header pointer, just do
-    // comparisons
+    // TODO: Implement reverse lookup for header pointers (locally mapped) to
+    // shm_handle, This is exhaustive but safe as we don't have to dereference
+    // the header pointer, just do comparisons
     for( i = 0; i < ( handle_iter ) SHM_MAX_SEGMENTS; i++ )
     {
         if(
@@ -1080,6 +1115,31 @@ shm_handle get_handle_from_ptr( void * ptr )
     return _get_handle_from_ptr( ptr );
 }
 
+uint64_t get_ref_reference_count( __ref ref )
+{
+    seg_header * header = NULL;
+    shm_handle   handle = SEGMENT_HANDLE_INVALID;
+
+    handle = _ref_get_segment( ref );
+
+    if(
+        unlikely(
+            ( handle == ( shm_handle ) SEGMENT_HANDLE_INVALID )
+         || ( handle >= ( shm_handle ) SHM_MAX_SEGMENTS )
+        )
+      )
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "get_ref_reference_count(): Invalid segment"
+        );
+        return 0;
+    }
+
+    header = ( seg_header * ) __segment_lut[handle].mapped_address;
+    return header->ref_count;
+}
+
 void unmap_segment( void * ptr )
 {
     seg_header * header = NULL;
@@ -1087,7 +1147,12 @@ void unmap_segment( void * ptr )
 
     handle = _get_handle_from_ptr( ptr );
 
-    if( unlikely( handle == ( shm_handle ) SEGMENT_HANDLE_INVALID ) )
+    if(
+        unlikely(
+            ( handle == ( shm_handle ) SEGMENT_HANDLE_INVALID )
+         || ( handle >= ( shm_handle ) SHM_MAX_SEGMENTS )
+        )
+      )
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -1194,9 +1259,6 @@ static void _free_segment( shm_handle handle )
     }
 
     control_header->segments[handle] = SEGMENT_HANDLE_INVALID;
-    // XXX - may need to compactify the segments array to prevent fragmentation
-    // The issue is we'll need a mechanism to locate __refs and update their
-    // reference on a segment move
 
     if( !_release_lock( SEGMENT_HANDLE_INVALID, SHM_EXCLUSIVE ) )
     {
@@ -1374,7 +1436,7 @@ bool is_locked( shm_handle segment, shm_lock locktype )
     return _is_locked( segment, locktype );
 }
 
-static __inline__ bool _is_locked( shm_handle segment, shm_lock locktype )
+static INLINE bool _is_locked( shm_handle segment, shm_lock locktype )
 {
     seg_header * header = NULL;
     handle_iter  i      = 0;
@@ -1451,7 +1513,7 @@ bool get_lock( shm_handle segment, shm_lock locktype )
     return _get_lock( segment, locktype );
 }
 
-static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
+static INLINE bool _get_lock( shm_handle segment, shm_lock locktype )
 {
     seg_header * header         = NULL;
     handle_iter  i              = 0;
@@ -1459,10 +1521,21 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
     uint64_t     num_locks      = 0;
     uint64_t     lock_i         = 0;
 
-    // provide a consistent interface for locking so that deadlocks are harder to trigger
-    if( unlikely( ((segment >= SHM_MAX_SEGMENTS) && (locktype != SHM_EXCLUSIVE)) ) )
+    // provide a consistent interface for locking so that deadlocks are
+    // harder to trigger
+    if(
+        unlikely(
+            ((segment >= SHM_MAX_SEGMENTS)
+         && (locktype != SHM_EXCLUSIVE))
+        )
+      )
         return false;
-    if( unlikely( ((locktype != SHM_EXCLUSIVE) && (__segment_lut[segment].mapped_address == NULL)) ) )
+    if(
+        unlikely(
+            ((locktype != SHM_EXCLUSIVE)
+         && (__segment_lut[segment].mapped_address == NULL))
+        )
+      )
         return false;
     if( unlikely( control_header == NULL ) )
         return false;
@@ -1491,9 +1564,13 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
         {
             if( unlikely( __segment_lut[i].mapped_address == NULL ) )
                 continue;
-            locks_acquired[lock_i] = ( volatile bool * ) &(control_header->hwlocks[i]);
+            locks_acquired[lock_i]
+                = ( volatile bool * ) &(control_header->hwlocks[i]);
             lock_i++;
-            locks_acquired[lock_i] = ( volatile bool * ) &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked);
+            locks_acquired[lock_i]
+                = ( volatile bool * ) &(
+                    (( seg_header * ) __segment_lut[i].mapped_address)->locked
+                  );
             lock_i++;
         }
     }
@@ -1505,10 +1582,14 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
             return false;
         }
 
-        locks_acquired[lock_i] = ( volatile bool * ) &(control_header->hwlocks[segment]);
+        locks_acquired[lock_i]
+            = ( volatile bool * ) &(control_header->hwlocks[segment]);
         lock_i++;
 
-        locks_acquired[lock_i] = ( volatile bool * ) &(( ( seg_header * ) __segment_lut[segment].mapped_address)->locked);
+        locks_acquired[lock_i]
+            = ( volatile bool * ) &(
+                (( seg_header * ) __segment_lut[segment].mapped_address)->locked
+              );
         lock_i++;
     }
     else if( locktype == SHM_LWLOCK )
@@ -1519,7 +1600,10 @@ static __inline__ bool _get_lock( shm_handle segment, shm_lock locktype )
             return false;
         }
 
-        locks_acquired[lock_i] = ( volatile bool * ) &(( ( seg_header * ) __segment_lut[segment].mapped_address)->locked);
+        locks_acquired[lock_i]
+            = ( volatile bool * ) &(
+                (( seg_header * ) __segment_lut[segment].mapped_address)->locked
+              );
         lock_i++;
     }
 
@@ -1550,23 +1634,43 @@ bool release_lock( shm_handle segment, shm_lock locktype )
     return _release_lock( segment, locktype );
 }
 
-static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
+static INLINE bool _release_lock( shm_handle segment, shm_lock locktype )
 {
     // This IS NOT SAFE to be called from _get_lock()
     seg_header * header         = NULL;
     handle_iter  i              = 0;
-    
-    // provide a consistent interface for locking so that deadlocks are harder to trigger
-    if( unlikely( ((locktype != SHM_EXCLUSIVE) && (segment >= SHM_MAX_SEGMENTS)) ) )
+
+    // provide a consistent interface for locking so that deadlocks are
+    // harder to trigger
+    if(
+        unlikely(
+            ((locktype != SHM_EXCLUSIVE) && (segment >= SHM_MAX_SEGMENTS))
+        )
+      )
     {
-        _shm_log( LL_SHM_ERROR, "Lock type is not exclusive and segment %lu is out of bounds", ( uint64_t ) segment );
+        _shm_log(
+            LL_SHM_ERROR,
+            "Lock type is not exclusive and segment %lu is out of bounds",
+            ( uint64_t ) segment
+        );
         return false;
     }
-    if( unlikely( ((locktype != SHM_EXCLUSIVE) && (__segment_lut[segment].mapped_address == NULL)) ) )
+
+    if(
+        unlikely(
+            ((locktype != SHM_EXCLUSIVE)
+         && (__segment_lut[segment].mapped_address == NULL))
+        )
+      )
     {
-        _shm_log( LL_SHM_ERROR, "Lock type is not exclusive and segment %lu is not mapped", ( uint64_t ) segment );
+        _shm_log(
+            LL_SHM_ERROR,
+            "Lock type is not exclusive and segment %lu is not mapped",
+            ( uint64_t ) segment
+        );
         return false;
     }
+
     if( unlikely( control_header == NULL ) )
     {
         _shm_log( LL_SHM_ERROR, "Control header is not mapped" );
@@ -1579,24 +1683,39 @@ static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
 
         if( unlikely( header == NULL ) )
         {
-            _shm_log( LL_SHM_ERROR, "Failed to locate header for segment %lu in LUT", ( uint64_t ) segment );
+            _shm_log(
+                LL_SHM_ERROR,
+                "Failed to locate header for segment %lu in LUT",
+                ( uint64_t ) segment
+            );
             return false;
         }
         if( unlikely( header->magic != SEGMENT_HEADER_MAGIC ) )
         {
-            _shm_log( LL_SHM_ERROR, "Bad magic, got %x, expected %x", header->magic, SEGMENT_HEADER_MAGIC );
+            _shm_log(
+                LL_SHM_ERROR,
+                "Bad magic, got %x, expected %x",
+                header->magic,
+                SEGMENT_HEADER_MAGIC
+            );
             return false;
         }
     }
 
     if( locktype == SHM_EXCLUSIVE )
     {
-        for( i = control_header->entry_count - 1; i != SHM_HANDLE_ITER_MAX; --i )
+        for(
+             i = control_header->entry_count - 1;
+             i != SHM_HANDLE_ITER_MAX;
+             --i
+           )
         {
             if( ( seg_header * ) __segment_lut[i].mapped_address == NULL )
                 continue;
 
-            __C_MUTEX( &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked ) );
+            __C_MUTEX(
+                &(( ( seg_header * ) __segment_lut[i].mapped_address )->locked )
+            );
             __C_MUTEX( &(control_header->hwlocks[i]) );
         }
 
@@ -1604,12 +1723,20 @@ static __inline__ bool _release_lock( shm_handle segment, shm_lock locktype )
     }
     else if( locktype == SHM_HWLOCK )
     {
-        __C_MUTEX( &(( ( seg_header * ) __segment_lut[segment].mapped_address )->locked ) );
+        __C_MUTEX(
+          &(
+              (( seg_header * ) __segment_lut[segment].mapped_address)->locked
+           )
+        );
         __C_MUTEX( &(control_header->hwlocks[segment]) );
     }
     else if( locktype == SHM_LWLOCK )
     {
-        __C_MUTEX( &(( ( seg_header * ) __segment_lut[segment].mapped_address )->locked ) );
+        __C_MUTEX(
+          &(
+              (( seg_header * ) __segment_lut[segment].mapped_address)->locked
+          )
+        );
     }
 
     return true;
@@ -1631,10 +1758,16 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         new_size
     );
 
-    // FYI - this entire routine could be made faster - indeed this is a naive implementation
-    // ideally, the systemv implementation would extend the segment using something similar to the
-    // mmap/posix routines that write out the pages
-    if( unlikely( ( segment >= SHM_MAX_SEGMENTS ) || ( segment == SEGMENT_HANDLE_INVALID ) ) )
+    // FYI - this entire routine could be made faster - indeed this is a naive
+    // implementation ideally, the systemv implementation would extend the
+    // segment using something similar to the mmap/posix routines that write
+    // out the pages
+    if(
+        unlikely(
+            ( segment >= SHM_MAX_SEGMENTS )
+         || ( segment == SEGMENT_HANDLE_INVALID )
+        )
+      )
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -1663,7 +1796,8 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     old_size = get_segment_size( segment );
 
-    if( old_size >= new_size ) // Keep existing segment. note- we can reduce overhead by taking no action?
+    // Keep existing segment. note- we can reduce overhead by taking no action?
+    if( old_size >= new_size )
     {
         _shm_log(
             LL_SHM_DEBUG,
@@ -1682,7 +1816,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         return false;
     }
     // Resize old_size to include the header (we're going to copy state data
-    // over as well since we'll be starting with a blank slate. 
+    // over as well since we'll be starting with a blank slate.
     old_size += offsetof( seg_header, data );
     // Need to expand the existing segment. This is not easily supported in
     // SystemV implementations, so we'll take the easy way out and allocate a
@@ -1692,7 +1826,8 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     _shm_log(
         LL_SHM_DEBUG,
-        "Entering critical section - resizing segment %lu from %zu to %zu bytes",
+        "Entering critical section - resizing"
+        " segment %lu from %zu to %zu bytes",
         ( uint64_t ) segment,
         old_size,
         new_size
@@ -1700,7 +1835,11 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     if( temp == NULL )
     {
-        _shm_log( LL_SHM_ERROR, "Failed to allocate temporary memory of %zu bytes", old_size );
+        _shm_log(
+            LL_SHM_ERROR,
+            "Failed to allocate temporary memory of %zu bytes",
+            old_size
+        );
         if( !_release_lock( segment, SHM_HWLOCK ) )
         {
             _shm_log(
@@ -1784,8 +1923,11 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
     {
         _shm_log(
             LL_SHM_DEBUG,
-            "Re-created segment %lu with size %zu", ( uint64_t ) segment, mapped_size
+            "Re-created segment %lu with size %zu",
+            ( uint64_t ) segment,
+            mapped_size
         );
+
         __segment_lut[segment].mapped_address = mapped_address;
         __segment_lut[segment].mapped_size    = mapped_size;
         __segment_lut[segment].handle         = segment;
@@ -1795,7 +1937,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
                 memcpy(
                     __segment_lut[segment].mapped_address,
                     temp,
-                    old_size // + offsetof( seg_header, data )
+                    old_size
                 ) == NULL
             )
          )
@@ -1863,8 +2005,6 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         );
     }
 
-    // XXX we need to indicate to other processes that this segment has been resized - we could do it
-    // in the auto map in get_ptr()
     __FENCE();
     return true;
 }
@@ -1946,7 +2086,14 @@ static bool _shm_wrapper(
     return _shm_mmap( op, handle, size, mapped_address, mapped_size );
 #endif // SHM_USE_MMAP
 #ifdef SHM_USE_SYSV
-    return _shm_sysv( op, handle, size, &sysv_private, mapped_address, mapped_size );
+    return _shm_sysv(
+        op,
+        handle,
+        size,
+        &sysv_private,
+        mapped_address,
+        mapped_size
+    );
 #endif // SHM_USE_SYSV
     return false;
 }
@@ -1979,7 +2126,9 @@ static bool _shm_mmap(
         "%s/%s%lu.%lu",
         SHM_FILE_MMAP_DIR,
         SHM_FILE_MMAP_PREFIX,
-        ( uint64_t ) ( control_handle == CONTROL_HANDLE_INVALID ) ? 0 : control_handle,
+        ( uint64_t ) ( control_handle == CONTROL_HANDLE_INVALID ) ?
+            0
+          : control_handle,
         ( uint64_t ) handle
     );
 
@@ -2061,7 +2210,8 @@ static bool _shm_mmap(
         {
             _shm_log(
                 LL_SHM_ERROR,
-                "Mismatch in shared memory segment %s. Loaded %zu, expected %zu",
+                "Mismatch in shared memory segment %s."
+                " Loaded %zu, expected %zu",
                 name,
                 statbuff.st_size,
                 size
@@ -2203,7 +2353,9 @@ static bool _shm_sysv(
         name,
         SHM_ID_NAME_SIZE,
         "%lu.%lu",
-        ( uint64_t ) ( control_handle == CONTROL_HANDLE_INVALID ) ? 0 : control_handle,
+        ( uint64_t ) ( control_handle == CONTROL_HANDLE_INVALID ) ?
+            0
+          : control_handle,
         ( uint64_t ) handle
     );
 
@@ -2484,7 +2636,8 @@ static bool _shm_posix(
         {
             _shm_log(
                 LL_SHM_ERROR,
-                "Mismatch in shared memory segment %s: loaded %zu bytes, expected %zu bytes",
+                "Mismatch in shared memory segment %s:"
+                " loaded %zu bytes, expected %zu bytes",
                 name,
                 statbuff.st_size,
                 size
@@ -2581,7 +2734,11 @@ static int _shm_posix_resize( int descriptor, size_t size )
 #endif // SHM_USE_POSIX
 
 #if defined( SHM_USE_POSIX ) || defined( SHM_USE_MMAP )
-static bool _close_segment_descriptor( int descriptor, char * name, bool do_unlink )
+static bool _close_segment_descriptor(
+    int    descriptor,
+    char * name,
+    bool   do_unlink
+)
 {
     int save_errno = 0;
 
@@ -2689,20 +2846,20 @@ static inline bool _shm_check_owner( ctrl_header * header )
 static inline bool _shm_check_control( ctrl_header * header )
 {
     if( unlikely( header == NULL ) )
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     {
         _shm_log(
             LL_SHM_ERROR,
             "Control header check failed:"
             " Header pointer is null"
         );
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
         return false;
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     }
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
     if( unlikely( header->magic != CONTROL_HEADER_MAGIC ) )
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -2711,13 +2868,13 @@ static inline bool _shm_check_control( ctrl_header * header )
             header->magic,
             CONTROL_HEADER_MAGIC
         );
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
         return false;
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     }
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
     if( unlikely( header->entry_count > header->max_entries ) )
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     {
         _shm_log(
             LL_SHM_ERROR,
@@ -2726,11 +2883,11 @@ static inline bool _shm_check_control( ctrl_header * header )
             ( uint64_t ) header->entry_count,
             ( uint64_t ) header->max_entries
         );
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
         return false;
-#ifdef SHM_DEBUG
+    #ifdef SHM_DEBUG
     }
-#endif // SHM_DEBUG
+    #endif // SHM_DEBUG
 
     return true;
 }
@@ -2936,7 +3093,8 @@ static void _cleanup_old_segments( void )
                 }
 
                 // Done removing segments, unmap & remove control handle
-                // we invalidate the control handle to represent uninitialized state
+                // we invalidate the control handle to represent uninitialized
+                // state
                 control_handle = CONTROL_HANDLE_INVALID;
                 if(
                     unlikely(
@@ -3074,7 +3232,7 @@ ctrl_header * get_control_header( void )
     return header;
 }
 
-__inline__ bool ref_is_null( __ref ref )
+INLINE bool ref_is_null( __ref ref )
 {
     #ifdef SHM_AUTO_MAP
     return ( _ref_get_segment( ref ) == SEGMENT_HANDLE_INVALID );
@@ -3087,13 +3245,17 @@ __inline__ bool ref_is_null( __ref ref )
     if( unlikely( __segment_lut[segment].mapped_address == NULL ) )
         return true;
     // If we reference something out-of-bounds
-    if( unlikely( _ref_get_offset( ref ) >= __segment_lut[segment]mapped_size ) )
+    if(
+        unlikely(
+            _ref_get_offset( ref ) >= __segment_lut[segment]mapped_size
+        )
+      )
         return true;
     return false;
     #endif // SHM_AUTO_MAP
 }
 
-__inline__ __ref get_null_ref( void )
+INLINE __ref get_null_ref( void )
 {
     __ref nullref = {0};
     return _ref_set_segment( nullref, SEGMENT_HANDLE_INVALID );
