@@ -39,4 +39,6 @@ extern void _clear_mutex( volatile bool * );
 #define __TNS_MUTEX(val) _test_and_set_mutex(val)
 #define __C_MUTEX(val) _clear_mutex(val)
 #endif // __BUF_NO_ATOMICS || __KERNEL_HAS_BARRIERS__
+extern void _fence( void );
+#define __FENCE() _fence()
 #endif // _BARRIER_H

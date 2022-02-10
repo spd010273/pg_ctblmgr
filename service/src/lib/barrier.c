@@ -12,6 +12,12 @@ bool _test_and_set_mutex( volatile bool * mutex )
     return true;
 }
 
+void _fence( void )
+{
+    __asm__ __volatile__( "" : : : "memory" );
+    return;
+}
+
 # ifdef __KERNEL_HAS_BARRIERS__
 static __inline__ bool _test_and_set( volatile bool * mutex )
 {

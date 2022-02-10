@@ -2683,7 +2683,7 @@ static void _dump_header( shalloc_header * header, bool simple )
     uint64_t j          = 0;
     uint64_t k          = 0;
     uint32_t alloc_size = 0;
-
+    void * inptr = NULL;
     if( header == NULL )
         return;
 
@@ -2695,8 +2695,10 @@ static void _dump_header( shalloc_header * header, bool simple )
         "  object_size:      %zu\n"
         "  count_hint:       %zu\n"
         "  allocs:           %p\n"
+        "  (allocs segment): %lu\n"
         "  n_allocs:         %lu\n"
         "  fsm:              %p\n"
+        "  (fsm segment):    %lu\n"
         "  max_allocations:  %lu\n"
         "  object_id:        %s\n"
         "  self:             %lu\n"
@@ -2710,6 +2712,7 @@ static void _dump_header( shalloc_header * header, bool simple )
         "  loc_c_fsmend:     %p\n"
         "  c_fsmend:         0x%08x%08x\n"
         "  allocset:         %p\n"
+        "  (allocset segment)%lu\n"
         "  max_allocset      %u\n"
         "  allocset_handle   %lu\n",
         ( uint32_t ) header->magic,
@@ -2717,8 +2720,10 @@ static void _dump_header( shalloc_header * header, bool simple )
         ( size_t ) header->object_size,
         ( size_t ) header->count_hint,
         ( void * ) get_ptr( header->allocs ),
+        ( uint64_t ) ref_get_segment( header->allocs ),
         ( uint64_t ) header->n_allocs,
         ( void * ) get_ptr( header->fsm ),
+        ( uint64_t ) ref_get_segment( header->fsm ),
         ( uint64_t ) header->max_allocations,
         ( char * ) header->object_id,
         ( uint64_t ) header->self,
@@ -2735,6 +2740,7 @@ static void _dump_header( shalloc_header * header, bool simple )
         ( uint32_t ) ( ( ( uint64_t ) header->c_fsmend ) >> 32 ),
         ( uint32_t ) header->c_fsmend,
         ( void * ) get_ptr( header->allocset ),
+        ( uint64_t ) ref_get_segment( header->allocset ),
         ( uint32_t ) header->max_allocset,
         ( uint64_t ) header->allocset_handle
 
@@ -2751,6 +2757,7 @@ static void _dump_header( shalloc_header * header, bool simple )
             ( i * header->object_size )
         );
 
+        inptr = ptr;
         alloc_size = _get_allocset_element_by_index( header, i );
 
         if( alloc_size == UINT_MAX )
@@ -2766,23 +2773,26 @@ static void _dump_header( shalloc_header * header, bool simple )
 
         for( j = 0; j < alloc_size; j++ )
         {
-            fprintf( stdout, "0x" );
-
-            for( k = 0; k < header->object_size; k++ )
-            {
-                fprintf(
-                    stdout,
-                    "%s%s",
-                    hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) >> 4],
-                    hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) & 0x0F]
-                );
-            }
-
+            fprintf( stdout, "OS [%lu] (%p): %lu", j, ptr,  *( ( uint64_t * ) ptr ) );
+            fprintf( stdout, " IN [%lu] (%p): %lu\n", j, &( ((uint64_t *) inptr )[j] ), ( ( uint64_t * ) inptr )[j] );
+            
+//            fprintf( stdout, "0x" );
+//
+//            for( k = 0; k < header->object_size; k++ )
+//            {
+//                fprintf(
+//                    stdout,
+//                    "%s%s",
+//                    hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) >> 4],
+//                    hexes[*( ( uint8_t * ) _PTR_ADD_OFFSET( ptr, k )) & 0x0F]
+//                );
+//            }
+//
             ptr = _PTR_ADD_OFFSET( ptr, header->object_size );
-            if( ( j + 1 ) % 4 == 0 )
-                fprintf( stdout, "\n" );
-            else
-                fprintf( stdout, " " );
+//            if( ( j + 1 ) % 4 == 0 )
+//                fprintf( stdout, "\n" );
+//            else
+//                fprintf( stdout, " " );
         }
 
         fprintf( stdout, "\n" );

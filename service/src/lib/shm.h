@@ -577,6 +577,7 @@ extern shm_handle get_control_segment( void );
 extern uint8_t * get_control_data_section( void );
 extern __inline__ bool ref_is_null( __ref ); // check if ref is null
 extern __inline__ __ref get_null_ref( void ); // Get a reference null
+extern bool shm_remap( shm_handle );
 
 extern offset_t ref_get_offset( __ref );
 extern shm_handle ref_get_segment( __ref );

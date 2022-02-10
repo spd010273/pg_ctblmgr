@@ -57,6 +57,7 @@ static __inline__ shm_handle _get_handle_from_ptr( void * ) __attribute__((alway
 static void _free_segment( shm_handle );
 static void _append_to_cleanup_list( shm_handle );
 static void _cleanup_old_segments( void );
+static __inline__ bool _shm_remap( shm_handle ) __attribute__((always_inline, flatten));
 
 static inline bool _shm_check_owner( ctrl_header * );
 static inline bool _shm_check_control( ctrl_header * );
@@ -216,6 +217,94 @@ __inline__ void * get_ptr_fast( __ref ref )
     #endif // SHM_EXTRA_SANE
 }
 
+bool shm_remap( shm_handle segment )
+{
+    if( unlikely( ( segment == SEGMENT_HANDLE_INVALID ) || ( segment >= SHM_MAX_SEGMENTS ) ) )
+        return false;
+
+    if( unlikely( __segment_lut[segment].mapped_size == control_header->sizes[segment] ) )
+    #ifdef SHM_DEBUG
+    {
+        _shm_log(
+            LL_SHM_DEBUG,
+            "Ignoring remap request for segment %lu, sizes match",
+            ( uint64_t ) segment
+        );
+    #endif // SHM_DEBUG
+        return true;
+    #ifdef SHM_DEBUG
+    }
+    #endif // SHM_DEBUG
+    return _shm_remap( segment );
+}
+
+static __inline__ bool _shm_remap( shm_handle segment )
+{
+    void * mapped_address = NULL;
+    size_t mapped_size    = 0;
+
+    if(
+        unlikely(
+            !_shm_wrapper(
+                SHM_DETACH,
+                segment,
+                0,
+                NULL,
+                NULL
+            )
+         )
+      )
+    #ifdef SLAB_DEBUG
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "get_ptr: Failed to remap (unmap) resized segment %lu\n",
+            ( uint64_t ) segment
+        );
+    #endif // SLAB_DEBUG
+        return false;
+    #ifdef SLAB_DEBUG
+    }
+    #endif // SLAB_DEBUG
+
+    if(
+        unlikely(
+            !_shm_wrapper(
+                SHM_ATTACH,
+                segment,
+                0,
+                ( void ** ) &mapped_address,
+                ( size_t * ) &mapped_size
+            )
+        )
+      )
+    #ifdef SHM_DEBUG
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "get_ptr: Failed to remap (remap) resized segment %lu",
+            ( uint64_t ) segment
+        );
+    #endif // SHM_DEBUG
+        return false;
+    #ifdef SHM_DEBUG
+    }
+    
+    _shm_log(
+        LL_SHM_DEBUG,
+        "Successfully remapped segment %lu from %p to %p",
+        ( uint64_t ) segment,
+        __segment_lut[segment].mapped_address,
+        mapped_address
+    );
+    #endif // SHM_DEBUG
+
+    __segment_lut[segment].mapped_size = mapped_size;
+    __segment_lut[segment].mapped_address = mapped_address;
+
+    return true;
+}
+
 __inline__ void * get_ptr( __ref ref )
 {
     void *   mapped_address     = NULL;
@@ -267,62 +356,18 @@ __inline__ void * get_ptr( __ref ref )
 
     if( unlikely( ( control_header->sizes[segment] != mapped_size ) ) )
     {
+        __FENCE();
         // Need a remap
         _shm_log(
             LL_SHM_DEBUG,
             "RESIZE: Segment header size and mapped size do not match."
             " This segment has been resized and will auto-remap"
         );
-        if(
-            unlikely(
-                !_shm_wrapper(
-                    SHM_DETACH,
-                    segment,
-                    0,
-                    NULL,
-                    NULL
-                )
-             )
-          )
-        #ifdef SLAB_DEBUG
-        {
-            _shm_log(
-                LL_SHM_ERROR,
-                "get_ptr: Failed to remap (unmap) resized segment %lu\n",
-                ( uint64_t ) segment
-            );
-        #endif // SLAB_DEBUG
+        if( unlikely( !_shm_remap( segment ) ) )
             return NULL;
-        #ifdef SLAB_DEBUG
-        }
-        #endif // SLAB_DEBUG
 
-        if(
-            unlikely(
-                !_shm_wrapper(
-                    SHM_ATTACH,
-                    segment,
-                    0,
-                    ( void ** ) &mapped_address,
-                    ( size_t * ) &mapped_size
-                )
-            )
-          )
-        #ifdef SHM_DEBUG
-        {
-            _shm_log(
-                LL_SHM_ERROR,
-                "get_ptr: Failed to remap (remap) resized segment %lu",
-                ( uint64_t ) segment
-            );
-        #endif // SHM_DEBUG
-            return NULL;
-        #ifdef SHM_DEBUG
-        }
-        #endif // SHM_DEBUG
-        
-        __segment_lut[segment].mapped_size = mapped_size;
-        __segment_lut[segment].mapped_address = mapped_address;
+        mapped_size    = __segment_lut[segment].mapped_size;
+        mapped_address = __segment_lut[segment].mapped_address;
     }
 
     ret = _PTR_ADD_OFFSET(
@@ -1636,10 +1681,14 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
         );
         return false;
     }
+    // Resize old_size to include the header (we're going to copy state data
+    // over as well since we'll be starting with a blank slate. 
+    old_size += offsetof( seg_header, data );
     // Need to expand the existing segment. This is not easily supported in
-    // SystemV implementations, so we'll take the easy way out and allocate a new segment
+    // SystemV implementations, so we'll take the easy way out and allocate a
+    // new segment
     new_size = new_size + offsetof( seg_header, data );
-    temp     = malloc( new_size + offsetof( seg_header, data ) );
+    temp     = malloc( old_size ); //new_size + offsetof( seg_header, data ) );
 
     _shm_log(
         LL_SHM_DEBUG,
@@ -1651,6 +1700,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     if( temp == NULL )
     {
+        _shm_log( LL_SHM_ERROR, "Failed to allocate temporary memory of %zu bytes", old_size );
         if( !_release_lock( segment, SHM_HWLOCK ) )
         {
             _shm_log(
@@ -1667,7 +1717,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
             memcpy(
                 temp,
                 __segment_lut[segment].mapped_address,
-                __segment_lut[segment].mapped_size
+                old_size
             ) == NULL
         )
        )
@@ -1745,7 +1795,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
                 memcpy(
                     __segment_lut[segment].mapped_address,
                     temp,
-                    old_size + offsetof( seg_header, data )
+                    old_size // + offsetof( seg_header, data )
                 ) == NULL
             )
          )
@@ -1786,6 +1836,24 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
     control_header->sizes[segment] = mapped_size;
 
     free( temp );
+    #if defined( MAP_NOSYNC ) && MAP_NOSYNC == 1
+    // Issue msync() for the mapping
+    if(
+        msync(
+            __segment_lut[segment].mapped_address,
+            __segment_lut[segment].mapped_size,
+            MS_SYNC
+        )
+      )
+    {
+        _shm_log(
+            LL_SHM_ERROR,
+            "Failed to synchronize shared memory mapping of segment %lu",
+            ( uint64_t ) segment
+        );
+    }
+    #endif // MAP_NOSYNC
+
     if( !_release_lock( segment, SHM_HWLOCK ) )
     {
         _shm_log(
@@ -1797,6 +1865,7 @@ bool shm_resize_segment( shm_handle segment, size_t new_size )
 
     // XXX we need to indicate to other processes that this segment has been resized - we could do it
     // in the auto map in get_ptr()
+    __FENCE();
     return true;
 }
 
@@ -2347,6 +2416,7 @@ static bool _shm_posix(
         if( mapped_size != NULL )
             *mapped_size = 0;
 
+        // Need to close the descriptor
         if( op == SHM_DESTROY && shm_unlink( name ) != 0 )
         {
             return false;

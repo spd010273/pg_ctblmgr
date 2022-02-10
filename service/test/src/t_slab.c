@@ -42,7 +42,7 @@ int main( void )
         return 1;
     }
 
-    dump_control();
+    //dump_control();
     ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
 
     if( ref == get_null_ref() )
@@ -89,7 +89,7 @@ int main( void )
 #endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
 
 
-    dump_control();
+    //dump_control();
     fprintf( stdout, "Extending allocation...\n" );
     ref2 = rsmalloc( slab, sizeof( uint64_t ) * ( ( TEST_SIZE * 4 ) + 2 ));
 
@@ -266,7 +266,7 @@ int main( void )
     rsfree( slab, ref6 );
     rsfree( slab, ref7 );
     rsfree( slab, ref8 );
-    dump_context( slab );
+    //dump_context( slab );
 
     fprintf( stdout, "Performing first reallocation test (no segment extension)...\n" );
     //dump_context( slab );
@@ -277,7 +277,7 @@ int main( void )
          return 1;
     }
 
-    dump_context( slab );
+    //dump_context( slab );
     ptr = get_ptr( ref9 );
     if( ptr == NULL )
     {
@@ -337,7 +337,8 @@ int main( void )
     }
 
     wait( NULL );
-
+    __FENCE();
+    dump_context( slab );
     ptr = get_ptr( ref9 );
     if( ptr == NULL )
     {
@@ -345,9 +346,15 @@ int main( void )
         return 1;
     }
 
+    /*
+     * Here's the issue - the allocation gets moved by the child because it's large - but the ref remains absolute as an offset into the page.
+     * We'll need to offset off of that when allocs get relocated, possibly by wrapping get_ptr in slab.c, possibly by allocset index and offset?
+     */
+    fprintf( stdout, "Reading contents of segment %lu\n", ( uint64_t ) ref_get_segment( ref9 ) );
     fprintf( stdout, "Parent confirming child baseline writes...\n" );
     for( i = 0; i < 2048; i++ )
     {
+        fprintf( stdout, "P Address %p offset %lu\n", &(ptr[i]), ( uint64_t ) i );
         if( ptr[i] != 42 + i )
         {
             fprintf(
@@ -362,15 +369,17 @@ int main( void )
     }
 
     fprintf( stdout, "Parent confirming child extended writes...\n" );
-    dump_context( slab );
+    //dump_context( slab );
     for( i = 2048; i < 4096; i++ )
     {
+        //fprintf( stdout, "P Address %p offset %lu\n", &(ptr[i]), ( uint64_t ) i );
         if( ptr[i] != 42 * i )
         {
             fprintf(
                 stderr,
-                "Failed - extended write not visible to parent at index %lu, got %lu, expected %lu\n",
+                "Failed - extended write not visible to parent at index %lu (%p), got %lu, expected %lu\n",
                 ( uint64_t ) i,
+                &( ptr[i] ),
                 ( uint64_t ) ptr[i],
                 ( uint64_t ) 42 * i
             );
@@ -444,6 +453,7 @@ static void child_routine( __ref ref )
     fprintf( stdout, "Child performing extended read/write test...\n" );
     for( i = 0; i < 4096; i++ )
     {
+        //fprintf( stdout, "CHILD ADDRESS %p offset %lu\n", &( ptr[i] ), ( uint64_t ) i );
         if( i < 2048 )
         {
             if( ptr[i] != 42 + i )
@@ -464,6 +474,6 @@ static void child_routine( __ref ref )
         }
     }
     //dump_context( slab );
-
+    __FENCE();
     return;
 }
