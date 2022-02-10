@@ -1,3 +1,16 @@
+/*------------------------------------------------------------------------
+ *
+ * compiler.h
+ *     Abstracts compiler function attributes
+
+ * Copyright (c) 2022, MerchLogix Inc.
+ *
+ * IDENTIFICATION
+ *        service/src/lib/compiler.h
+ *
+ *------------------------------------------------------------------------
+ */
+
 #ifndef _COMPILER_H
 #define _COMPILER_H
 
