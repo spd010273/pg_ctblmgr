@@ -47,6 +47,7 @@ int main( void )
     }
 
     ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
+    dump_context( slab );
 
     if( ref == get_null_ref() )
     {
@@ -64,6 +65,8 @@ int main( void )
 
     for( i = 0; i < TEST_SIZE; i++ )
         ptr[i] = TEST_SIZE - i;
+    
+    //dump_context( slab );
 
     fprintf( stdout, "Write check complete - running canary test\n" );
     // Canary check should pass as we've stayed within allocated bounds
@@ -72,7 +75,6 @@ int main( void )
         fprintf( stderr, "Canary check failed after bounded write\n" );
         return 1;
     }
-
     // Check setting flag - don't actually want to crash the test ;)
 #ifndef _FORCE_SIGSEGV_ON_CANARY_FAILURE
     fprintf( stdout, "Making out-of-bounds write to %p (%lu)\n", &(ptr[i]), i );
@@ -162,7 +164,9 @@ int main( void )
 
     fprintf( stdout, "Performing single allocation tests...\n" );
     ref3 = rsmalloc( slab, sizeof( uint64_t ) );
+    //dump_context( slab );
     ref4 = rsmalloc( slab, sizeof( uint64_t ) );
+    //dump_context( slab );
     ref5 = rsmalloc( slab, sizeof( uint64_t ) );
 
     // Write the three prior allocations
@@ -262,7 +266,6 @@ int main( void )
         }
     }
     fprintf( stdout, "Freeing allocations...\n" );
-
     rsfree( slab, ref );
     rsfree( slab, ref2 );
     rsfree( slab, ref3 );
@@ -270,8 +273,9 @@ int main( void )
     rsfree( slab, ref5 );
     rsfree( slab, ref6 );
     rsfree( slab, ref7 );
+    fprintf( stdout, "Freeing final element" );
     rsfree( slab, ref8 );
-
+    
     fprintf( stdout, "Performing first reallocation test (no segment extension)...\n" );
     ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 1024 );
     if( ref_is_null( ref9 ) )

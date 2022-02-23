@@ -57,6 +57,8 @@
  * - Convert allocset[] to a hashtable to avoid wasting memory
  * - Complete compactify functionality (release space back to kernel when
  *   segments shrink)
+ * - Make realloc() safer and easier by tracking/deriving issued allocs and
+ *   translating them when another process attempts to access a reallocated area
  * Copyright (c) 2021, MerchLogix Inc.
  *
  * IDENTIFICATION
@@ -67,7 +69,7 @@
 #ifndef _SLAB_H
 #define _SLAB_H
 
-//#define SLAB_DEBUG 1
+#define SLAB_DEBUG 1
 //#define SLAB_FSM_DEBUG 1
 
 // since we're wrapping shm.c, we can control whether map_all() is called
@@ -89,8 +91,24 @@
 #include <stdarg.h>
 #include <sys/time.h>
 #include <time.h>
-
+#if defined __GLIBC__ && defined __linux__
+ #define _SLAB_HAS_GETRANDOM
+ #if __GLIBC__ > 2 || __GLIBC_MINOR__ > 24
+#include <sys/random.h>
+ #else
+  #define _SLAB_RAND_USE_SYSCALL
+#include <sys/syscall.h>
+#include <linux/random.h>
+ #endif // GLIBC version
+#else
+ #undef _SLAB_HAS_GETRANDOM
+#endif // GLIBC / linux
 #define _SLAB_MAX_SLABS 16
+
+#if defined( _SLAB_MAX_SLABS ) && ( _SLAB_MAX_SLABS * 2 > SHM_MAX_SEGMENTS - 1 )
+#warning "MAX SLABS is dangerously close to the compiled max segments allowed"
+#endif // _SLAB_MAX_SLABS check
+
 #define _SLAB_MAX_IDENT 64
 #define _SLAB_EXTRA_SANE 1 // Enable extra sanity checks
 #define _SLAB_REALLOC_MULTIPLE 2 // unused: IFF a slab realloc occurs-  how aggressively do we overallocate?
@@ -173,11 +191,24 @@ typedef uint16_t fsm_cmp_t;
  *  become stale. This can be resolved by the defeloper storing their references in a slab,
  *  and passing references around in that manner ( for now ).
  */
+
+// Hash table parameters
+
 typedef enum {
     COMPACT_AGGRESSIVE, // Attempt to reduce segment size after every free
     COMPACT_LAZY,       // DEFAULT: 'Intelligently' reduce segment size when high FSM indexes are freed
     COMPACT_NONE        // Do not compactify segments
 } compact_t;
+
+typedef uint32_t _as_ind_t;
+typedef struct allocset_t {
+    __ref         set;
+    volatile bool locked;
+    _as_ind_t     max_allocset;
+    _as_ind_t     used;
+    _as_ind_t     head; // Form offset-based double linked list
+    _as_ind_t     tail;
+} PACKED allocset_t;
 
 typedef struct slab_header {
     uint32_t       magic;
@@ -200,10 +231,7 @@ typedef struct slab_header {
     canary_t       c_fsmstart;
     __ref          loc_c_fsmend;
     canary_t       c_fsmend;
-    // TODO - create hashtable to further compactify allocset
-    __ref          allocset; // Different segment than the data segment
-    uint32_t       max_allocset;
-    shm_handle     allocset_handle;
+    allocset_t     allocset;
 //    compact_t      compact;
 } PACKED slab_header;
 
@@ -213,6 +241,15 @@ typedef struct slab_control {
     header_iter   next_header; //next free header
     volatile bool locked;
 } slab_control;
+
+#define ALLOCSET_ITEM_INVALID ( UINT_MAX )
+typedef struct allocset_item_t {
+    __ref         issued_ref;
+    size_t        size;
+    uint64_t      index;
+    _as_ind_t     last;
+    _as_ind_t     next;
+} PACKED allocset_item_t;
 
 // TODO - add compactification (segment size reduction) for slabs on free
 // Initialization / boilerplate

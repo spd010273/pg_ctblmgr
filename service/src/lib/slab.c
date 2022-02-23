@@ -35,13 +35,12 @@ static pid_t          p_pid                   = 0;
 static INLINE bool _fail_canary( void ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool _init_slab( slab_header *, bool );
 static INLINE context_t get_ctx_by_id( const char * ) ALWAYS_INLINE_FLATTEN;
-static INLINE bool check_slab_header( header_iter ) ALWAYS_INLINE_FLATTEN; 
+static INLINE bool check_slab_header( header_iter ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool check_context( context_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool _check_canaries( slab_header * ) ALWAYS_INLINE_FLATTEN;
 static INLINE __ref _get_alloc_element_by_index( slab_header *, uint64_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE slab_header * _get_header_by_context( context_t ) ALWAYS_INLINE_FLATTEN;
-static INLINE uint32_t _get_allocset_element_by_index( slab_header *, uint32_t );
-static INLINE bool _set_allocset_element_by_index( slab_header *, uint32_t, uint32_t );
+static INLINE size_t _get_allocset_element_by_index( slab_header *, uint64_t );
 
 // Allocation helpers / primitives
 static INLINE context_t _new_slab( const char *, size_t, uint64_t );
@@ -65,6 +64,14 @@ static INLINE bool _ref_get_index_and_size( slab_header *, __ref, uint64_t *, si
 static INLINE void * _move_to_local( slab_header *, __ref *, bool ) ALWAYS_INLINE;
 static INLINE __ref _move_to_shared( slab_header *, void **, size_t, bool ) ALWAYS_INLINE;
 static INLINE void _slab_log( slab_ll, char *, ... ) PRINTF;
+static INLINE uint64_t _get_random( void );
+
+// Allocset tools
+static INLINE _as_ind_t _get_allocset_item_by_index( slab_header *, uint64_t index );
+static INLINE _as_ind_t _get_available_allocset_item( slab_header * );
+static INLINE bool _set_allocset_item_by_index( slab_header *, uint64_t, __ref, size_t );
+static INLINE bool _clear_allocset_item_by_index( slab_header *, uint64_t );
+
 
 #ifdef SLAB_DEBUG
 // Debugging
@@ -140,13 +147,18 @@ bool slab_init( void )
             control->headers[i].locked      = false;
             control->headers[i].count_hint  = 0;
 
-            control->headers[i].c_allocstart     = ( canary_t ) random();
-            control->headers[i].c_fsmstart       = ( canary_t ) random();
-            control->headers[i].c_fsmend         = ( canary_t ) random();
+            control->headers[i].c_allocstart     = ( canary_t ) _get_random();
+            control->headers[i].c_fsmstart       = ( canary_t ) _get_random();
+            control->headers[i].c_fsmend         = ( canary_t ) _get_random();
             control->headers[i].loc_c_allocstart = get_null_ref();
             control->headers[i].loc_c_fsmstart   = get_null_ref();
             control->headers[i].loc_c_fsmend     = get_null_ref();
 
+            control->headers[i].allocset.locked       = false;
+            control->headers[i].allocset.max_allocset = 0;
+            control->headers[i].allocset.used         = 0;
+            control->headers[i].allocset.head         = ALLOCSET_ITEM_INVALID;
+            control->headers[i].allocset.tail         = ALLOCSET_ITEM_INVALID;
             memset(
                 control->headers[i].object_id,
                 '\0',
@@ -257,7 +269,7 @@ void destroy_slab( context_t ctx )
     }
 
     allocs   = get_ptr_fast( header->allocs );
-    allocset = get_ptr_fast( header->allocset );
+    allocset = get_ptr_fast( header->allocset.set );
 
     if( unlikely( (allocs == NULL) || (allocset == NULL) ) )
     {
@@ -273,11 +285,8 @@ void destroy_slab( context_t ctx )
     // Reset back to uninitialized state
     header->n_allocs         = 0;
     header->max_allocations  = 0;
-    header->allocset_handle  = SEGMENT_HANDLE_INVALID;
     header->segment          = SEGMENT_HANDLE_INVALID;
     header->allocs           = get_null_ref();
-    header->allocset         = get_null_ref();
-    header->max_allocset     = 0;
     header->loc_c_allocstart = get_null_ref();
     header->loc_c_fsmstart   = get_null_ref();
     header->loc_c_fsmend     = get_null_ref();
@@ -295,6 +304,9 @@ void destroy_slab( context_t ctx )
         0,
         _SLAB_MAX_IDENT
     );
+
+    header->allocset.max_allocset   = 0;
+    header->allocset.set            = get_null_ref();
 
     __C_MUTEX( &(control->locked) );
     __C_MUTEX( &(header->locked) );
@@ -751,13 +763,14 @@ static INLINE bool __shrealloc_internal(
         old_fsm_length + 1
     );
 
+    // XXX
     // Check if we need to scale the allocset
-    if( header->max_allocset <= header->max_allocations )
+    if( header->allocset.max_allocset <= header->max_allocations )
     {
         // Extend allocset
-        size_needed = header->max_allocations * sizeof( uint32_t );
+        size_needed = header->max_allocations * sizeof( allocset_item_t );
 
-        if( !shm_resize_segment( header->allocset_handle, size_needed ) )
+        if( !shm_resize_segment( ref_get_segment( header->allocset.set ), size_needed ) )
         {
             _slab_log(
                 LL_SLAB_ERROR,
@@ -766,14 +779,14 @@ static INLINE bool __shrealloc_internal(
             return false;
         }
 
-        header->max_allocset = get_segment_size(
-                                   header->allocset_handle
-                               ) / sizeof( uint32_t );
+        header->allocset.max_allocset = get_segment_size(
+                                   ref_get_segment( header->allocset.set )
+                               ) / sizeof( allocset_item_t);
 
         _slab_log(
             LL_SLAB_DEBUG,
             "Resized allocset segment to hold %lu individual allocations",
-            ( uint64_t ) header->max_allocset
+            ( uint64_t ) header->allocset.max_allocset
         );
     }
 
@@ -863,10 +876,10 @@ static INLINE bool _ref_get_index_and_size(
     *index = ( offset / header->object_size ) - 1;
     *size  = ( size_t ) _get_allocset_element_by_index(
         header,
-        ( uint32_t ) *index
+        ( uint64_t ) *index
     );
 
-    if( *size == UINT_MAX )
+    if( *size == ULONG_MAX )
     {
         _slab_log(
             LL_SLAB_ERROR,
@@ -950,7 +963,7 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
 
     size = _get_allocset_element_by_index( header, index );
 
-    if( unlikely( size == UINT_MAX ) )
+    if( unlikely( size == ULONG_MAX ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
@@ -959,13 +972,6 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
         );
         return;
     }
-
-    _slab_log(
-        LL_SLAB_DEBUG,
-        "Freeing element of size %lu, index %lu",
-        ( uint64_t ) size,
-        ( uint64_t ) index
-    );
 
     if( unlikely( size == 0 ) )
     {
@@ -993,7 +999,7 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
     else
         _clear_fsm_element_by_index( header, index );
 
-    if( !_set_allocset_element_by_index( header, index, 0 ) )
+    if( !_clear_allocset_item_by_index( header, index ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
@@ -1017,13 +1023,13 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
 
 static INLINE __ref _shrealloc(
     slab_header * header,
-    __ref            oldref,
-    uint64_t         count
+    __ref         oldref,
+    uint64_t      count
 )
 {
     uint64_t bit_position = 0;
     uint64_t old_size     = 0;
-    uint32_t index        = 0;
+    uint64_t index        = 0;
     offset_t offset       = 0;
     __ref    newref       = {0};
     void *   new          = NULL;
@@ -1032,6 +1038,7 @@ static INLINE __ref _shrealloc(
     if( header == NULL )
         return get_null_ref();
 
+    _slab_log( LL_SLAB_DEBUG, "_shrealloc( %p, %lu ) entry", header, count );
     if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
     {
         _slab_log(
@@ -1056,7 +1063,7 @@ static INLINE __ref _shrealloc(
     offset   = ref_get_offset( oldref );
     old      = get_ptr_fast( oldref );
     index    = ( offset / header->object_size ) - 1;
-    old_size = ( uint64_t ) _get_allocset_element_by_index( header, index );
+    old_size = _get_allocset_element_by_index( header, index );
 
     #ifdef SLAB_DEBUG
     _slab_log(
@@ -1077,7 +1084,29 @@ static INLINE __ref _shrealloc(
     {
         // Set allocset size to new size, shrink the FSM mask and return
         newref = oldref;
-        _set_allocset_element_by_index( header, index, ( uint32_t ) count );
+
+        if( unlikely( !_clear_allocset_item_by_index( header, index ) ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_shrealloc: Failed to clear old allocset item for index %lu",
+                ( uint64_t ) index
+            );
+            __C_MUTEX( &(header->locked) );
+            return get_null_ref();
+        }
+
+        if( unlikely( !_set_allocset_item_by_index( header, index, newref, count ) ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_shrealloc: Failed to setup allocset for index %lu",
+                ( uint64_t ) index
+            );
+            __C_MUTEX( &(header->locked) );
+            return get_null_ref();
+        }
+
         _clear_fsm_elements_by_range( header, index, index + old_size );
         _set_fsm_elements_by_range( header, index, index + count );
         __C_MUTEX( &(header->locked) );
@@ -1126,7 +1155,28 @@ static INLINE __ref _shrealloc(
             old_size * header->object_size
         );
 
-        _set_allocset_element_by_index( header, bit_position, count );
+        if( unlikely( !_clear_allocset_item_by_index( header, bit_position ) ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_shrealloc: Failed to clear old allocset item at index %lu",
+                ( uint64_t ) bit_position
+            );
+            __C_MUTEX( &(header->locked) );
+            return get_null_ref();
+        }
+
+        if( unlikely( !_set_allocset_item_by_index( header, bit_position, newref, count ) ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_shrealloc: Failed to setup new allocset item at index %lu",
+                ( uint64_t ) bit_position
+            );
+            __C_MUTEX( &(header->locked) );
+            return get_null_ref();
+        }
+
         _shfree( header, oldref, true );
         __C_MUTEX( &(header->locked) );
     }
@@ -1292,7 +1342,7 @@ static INLINE __ref _shmalloc(
         }
 
         // Mark allocation size
-        if( !_set_allocset_element_by_index( header, index, 1 ) )
+        if( !_set_allocset_item_by_index( header, index, retref, 1 ) )
         {
             _slab_log(
                 LL_SLAB_ERROR,
@@ -1813,7 +1863,14 @@ static INLINE uint64_t _get_fsm_slot_by_width(
 
     // We need to track how large the allocation is for
     // purposes of freeing later
-    if( !_set_allocset_element_by_index( header, bit_position, width ) )
+    if(
+        !_set_allocset_item_by_index(
+            header,
+            bit_position,
+            _get_alloc_element_by_index( header, bit_position ),
+            width
+        )
+      )
     {
         _slab_log(
             LL_SLAB_ERROR,
@@ -2164,23 +2221,25 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
         return false;
 
     handle = get_handle_from_ptr( mapped_address );
-    header->segment         = handle;
+    header->segment = handle;
 
     // Available space - accounting for headers and canaries
     available = ( get_segment_size( handle ) - ( 3 * sizeof( canary_t ) ) );
     header->max_allocations = ( available / unit_size )
                             * CHAR_BIT * sizeof( fsm_t );
 
-    allocset = new_segment( header->max_allocations * sizeof( uint32_t ) );
+    allocset = new_segment( header->max_allocations * sizeof( allocset_item_t ) );
 
-    header->allocset_handle = get_handle_from_ptr( allocset );
-    header->allocset        = get_ref( allocset );
-    header->max_allocset    = get_segment_size( header->allocset_handle )
-                            / sizeof( uint32_t );
+    header->allocset.set          = get_ref( allocset );
+    header->allocset.max_allocset = get_segment_size( ref_get_segment( header->allocset.set ) )
+                                  / sizeof( uint32_t );
+    header->allocset.used   = ( _as_ind_t ) 0;
+    header->allocset.head   = ( _as_ind_t ) ALLOCSET_ITEM_INVALID;
+    header->allocset.tail   = ( _as_ind_t ) ALLOCSET_ITEM_INVALID;
     header->n_allocs        = 0;
-    header->c_allocstart    = ( canary_t ) random();
-    header->c_fsmstart      = ( canary_t ) random();
-    header->c_fsmend        = ( canary_t ) random();
+    header->c_allocstart    = ( canary_t ) _get_random();
+    header->c_fsmstart      = ( canary_t ) _get_random();
+    header->c_fsmend        = ( canary_t ) _get_random();
 
     // Layout setup - we'll calculate locally for readability,
     // then convert to __ref
@@ -2287,55 +2346,583 @@ static INLINE slab_header * _get_header_by_context( context_t ctx )
     return &(control->headers[ctx]);
 }
 
-static INLINE uint32_t _get_allocset_element_by_index(
-    slab_header * header,
-    uint32_t         index
-)
+static INLINE bool _clear_allocset_item_by_index( slab_header * header, uint64_t index )
 {
-    uint32_t * ptr = NULL;
+    _as_ind_t         ind  = 0;
+    allocset_item_t * item = NULL;
+    allocset_item_t * temp = NULL;
+    void *            base = NULL;
 
     if( unlikely( header == NULL ) )
-        return UINT_MAX;
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_clear_allocset_item_by_index: header NULL"
+        );
+        return false;
+    }
 
-    if( unlikely( index > header->max_allocset ) )
-        return UINT_MAX;
+    ind = _get_allocset_item_by_index( header, index );
 
-    ptr = ( uint32_t * ) _PTR_ADD_OFFSET(
-        get_ptr_fast( header->allocset ),
-        sizeof( uint32_t ) * index
+    if( unlikely( ind == ALLOCSET_ITEM_INVALID ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_clear_allocset_item_by_index: could not locate "
+            "item with index %lu",
+            ( uint64_t ) ind
+        );
+        return false;
+    }
+
+    if( unlikely( !__TNS_MUTEX( &(header->allocset.locked) ) ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_clear_allocset_item_by_index: Unable to obtain lock"
+        );
+        return false;
+    }
+
+    base = get_ptr_fast( header->allocset.set );
+
+    if( unlikely( base == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_clear_allocset_item_by_index: Base address is NULL"
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
+
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * ind )
     );
 
-    if( unlikely( ptr == NULL ) )
-        return UINT_MAX;
+    if( unlikely( item == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_clear_allocset_item_by_index: Dereferenced item is NULL at %lu",
+            ( uint64_t ) ind
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
 
-    return *ptr;
+    // Fixup offset-based pointers
+    if( ind == header->allocset.head )
+    {
+        header->allocset.head = item->next;
+        temp = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( ind * sizeof( allocset_item_t ) )
+        );
+
+        if( temp == NULL )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_clear_allocset_item_by_index: Dereferenced head pointer NULL"
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        temp->last = ALLOCSET_ITEM_INVALID;
+    }
+
+    if( ind == header->allocset.tail )
+    {
+        header->allocset.tail = item->last;
+        temp = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( ind * sizeof( allocset_item_t ) )
+        );
+
+        if( temp == NULL )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_clear_allocset_item_by_index: Dereferenced tail pointer NULL"
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        temp->next = ALLOCSET_ITEM_INVALID;
+    }
+
+    if( item->next != ALLOCSET_ITEM_INVALID )
+    {
+        temp = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( item->next * sizeof( allocset_item_t ) )
+        );
+
+        if( temp == NULL )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_clear_allocset_item_by_index: Dereferenced next pointer NULL"
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        temp->last = item->last;
+    }
+
+    if( item->last != ALLOCSET_ITEM_INVALID )
+    {
+        temp = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( item->last * sizeof( allocset_item_t ) )
+        );
+
+        if( temp == NULL )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_clear_allocset_item_by_index: Dereferenced last pointer NULL"
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        temp->next = item->next;
+    }
+
+    item->size       = 0;
+    item->issued_ref = get_null_ref();
+    item->index      = 0;
+    item->last       = ALLOCSET_ITEM_INVALID;
+    item->next       = ALLOCSET_ITEM_INVALID;
+    __C_MUTEX( &(header->allocset.locked) );
+    return true;
 }
 
-static INLINE bool _set_allocset_element_by_index(
+static INLINE bool _set_allocset_item_by_index(
     slab_header * header,
-    uint32_t         index,
-    uint32_t         value
+    uint64_t      index,
+    __ref         issued_ref,
+    size_t        size
 )
 {
-    uint32_t * ptr = NULL;
+    _as_ind_t         nextind = 0;
+    _as_ind_t         prevind = 0;
+    _as_ind_t         newind  = 0;
+    void *            base    = NULL;
+    allocset_item_t * next    = NULL;
+    allocset_item_t * new     = NULL;
+    allocset_item_t * prev    = NULL;
 
     if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: header NULL"
+        );
         return false;
+    }
 
-    if( unlikely( index > header->max_allocset ) )
+    base = get_ptr_fast( header->allocset.set );
+
+    if( unlikely( base == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: Allocset has bad base address"
+        );
         return false;
+    }
 
-    ptr = ( uint32_t * ) _PTR_ADD_OFFSET(
-        get_ptr_fast( header->allocset ),
-        sizeof( uint32_t ) * index
+    // Insertion case
+    newind = _get_available_allocset_item( header );
+
+    if( unlikely( !__TNS_MUTEX( &(header->allocset.locked) ) ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: Failed to get header lock"
+        );
+        return false;
+    }
+
+    if( newind == ALLOCSET_ITEM_INVALID )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: No available slots in allocset"
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
+
+    new = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * ( uint64_t ) newind )
     );
 
-    if( unlikely( ptr == NULL ) )
+    new->size       = size;
+    new->index      = index;
+    new->issued_ref = issued_ref;
+    new->last       = ALLOCSET_ITEM_INVALID;
+    new->next       = ALLOCSET_ITEM_INVALID;
+
+    if( unlikely( header->allocset.head == ALLOCSET_ITEM_INVALID ) )
+    {
+        // Initialization case
+        _slab_log(
+            LL_SLAB_DEBUG,
+            "Inserted new index %lu as head of list (initialized)",
+            ( uint64_t ) index
+        );
+        header->allocset.head = newind;
+        header->allocset.tail = newind;
+        __C_MUTEX( &(header->allocset.locked) );
+        return true;
+    }
+
+    next = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * header->allocset.head )
+    );
+
+    if( unlikely( next == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: List head dereferenced to NULL"
+        );
+        __C_MUTEX( &(header->allocset.locked) );
         return false;
+    }
 
-    *ptr = value;
+    // Trivial head replacement insertion case
+    if( unlikely( next->index > index ) )
+    {
+        next->last = newind;
+        new->next  = header->allocset.head;
+        __FENCE();
+        header->allocset.head = newind;
+        __C_MUTEX( &(header->allocset.locked) );
+        return true;
+    }
 
+    if( unlikely( next->index == index ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: INDEX COLLISION at %lu at head of allocset",
+            ( uint64_t ) index
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
+
+    while( next->next != ALLOCSET_ITEM_INVALID )
+    {
+        prev    = next;
+        prevind = nextind;
+        nextind = next->next;
+        next    = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( sizeof( allocset_item_t ) * nextind )
+        );
+
+        if( unlikely( next == NULL ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_set_allocset_item_by_index: Dereferenced next list node (%lu) is NULL",
+                ( uint64_t ) nextind
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        if( next->index > index )
+        {
+            next->last = newind;
+            new->next  = nextind;
+            prev->next = newind;
+            new->last  = prevind;
+            __C_MUTEX( &(header->allocset.locked) );
+            return true;
+        }
+
+        if( unlikely( next->index == index ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_set_allocset_item_by_index: INDEX COLLISION at %lu at AS IND %lu",
+                ( uint64_t ) index,
+                ( uint64_t ) nextind
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+    }
+
+    // Insert at tail, it can be inferred that tail->index <= index
+    if( header->allocset.tail == ALLOCSET_ITEM_INVALID )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: Tail insert failed - tail is invalid"
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
+
+    prevind = header->allocset.tail;
+    prev = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * prevind )
+    );
+
+    if( unlikely( prev == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: Tail index (%lu) dereferenced as NULL",
+            ( uint64_t ) prevind
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
+
+    if( unlikely( prev->index == index ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_set_allocset_item_by_index: INDEX COLLISION at %lu at TAIL",
+            ( uint64_t ) index
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return false;
+    }
+
+    new->last             = prevind;
+    prev->next            = newind;
+    header->allocset.tail = newind;
+    __C_MUTEX( &(header->allocset.locked) );
     return true;
+}
+
+static INLINE _as_ind_t _get_available_allocset_item( slab_header * header )
+{
+    register _as_ind_t i    = 0;
+    register void *    base = NULL;
+    allocset_item_t *  item = NULL;
+
+    /* Perform exhaustive search of allocset for available slot */
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_available_allocset_item: header NULL"
+        );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    base = get_ptr_fast( header->allocset.set );
+
+    if( unlikely( base == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_available_allocset_item: base address is NULL"
+        );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    if( unlikely( !__TNS_MUTEX( &(header->allocset.locked) ) ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_available_allocset_item: Could not obtain lock"
+        );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    for( i = 0; i < header->allocset.max_allocset; i++ )
+    {
+        item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( sizeof( allocset_item_t ) * i )
+        );
+
+        if( unlikely( item == NULL ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_get_available_allocset_item: in-bounds list "
+                "item is NULL at %lu",
+                ( uint64_t ) i
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return ALLOCSET_ITEM_INVALID;
+        }
+
+        if( item->size == 0 )
+            break;
+    }
+
+    if( i > header->allocset.used )
+        header->allocset.used++;
+
+    __C_MUTEX( &(header->allocset.locked) );
+    return i;
+}
+
+// Note we can remove extra uses of this such as the update portion of _set_allocset_item_by_index, etc
+static INLINE _as_ind_t _get_allocset_item_by_index(
+    slab_header * header,
+    uint64_t      index
+)
+{
+    allocset_item_t * item         = NULL;
+    _as_ind_t         curr_index   = 0;
+    void *            base         = NULL;
+
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_allocset_item_by_index: header NULL"
+        );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    if( unlikely( index > header->allocset.max_allocset ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_allocset_item_by_index: index is out-of-bounds"
+        );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    if( !__TNS_MUTEX( &(header->allocset.locked) ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_allocset_item_by_index: Failed to obtain lock"
+        );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    base = get_ptr_fast( header->allocset.set );
+
+    if( header->allocset.head == ALLOCSET_ITEM_INVALID )
+    { // Uninitialized
+        __C_MUTEX( &(header->allocset.locked) );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * ( uint64_t ) header->allocset.head )
+    );
+
+    if( unlikely( item == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_allocset_item_by_index: Base address or dereferenced "
+            "head (%lu) is NULL",
+            ( uint64_t ) header->allocset.head
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    curr_index = header->allocset.head;
+
+    while( item->next != ALLOCSET_ITEM_INVALID )
+    {
+        if( item->index == index )
+            break;
+
+        curr_index = item->next;
+
+        if( unlikely( curr_index == ALLOCSET_ITEM_INVALID ) )
+        {
+            __C_MUTEX( &(header->allocset.locked) );
+            return ALLOCSET_ITEM_INVALID;
+        }
+
+        item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( sizeof( allocset_item_t ) * ( uint64_t ) curr_index )
+        );
+
+        if( unlikely( item == NULL ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_get_allocset_item_by_index: Next item is NULL at index %lu",
+                ( uint64_t ) curr_index
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return ALLOCSET_ITEM_INVALID;
+        }
+    }
+
+    // Final sanity check
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * curr_index )
+    );
+
+    if( unlikely( item == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_get_allocset_item_by_index: Located item is NULL at %lu",
+            ( uint64_t ) curr_index
+        );
+        __C_MUTEX( &(header->allocset.locked) );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    if( unlikely( item->index != index ) )
+    {
+        // Not found
+        __C_MUTEX( &(header->allocset.locked) );
+        return ALLOCSET_ITEM_INVALID;
+    }
+
+    __C_MUTEX( &(header->allocset.locked) );
+    return curr_index;
+}
+
+static INLINE size_t _get_allocset_element_by_index(
+    slab_header * header,
+    uint64_t      index
+)
+{
+    _as_ind_t         allocset_index = 0;
+    allocset_item_t * item           = NULL;
+
+    allocset_index = _get_allocset_item_by_index( header, index );
+
+    if( unlikely( allocset_index == ALLOCSET_ITEM_INVALID ) )
+        return ULONG_MAX;
+
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        get_ptr_fast( header->allocset.set ),
+        ( sizeof( allocset_item_t ) * allocset_index )
+    );
+
+    if( unlikely( item == NULL ) )
+        return ULONG_MAX;
+
+    return item->size;
 }
 
 static INLINE bool _fail_canary( void )
@@ -2778,7 +3365,7 @@ static void _dump_header( slab_header * header, bool simple )
     uint64_t j          = 0;
     uint64_t k          = 0;
     uint32_t alloc_size = 0;
-
+    _as_ind_t ind       = 0;
     if( header == NULL )
         return;
 
@@ -2800,16 +3387,19 @@ static void _dump_header( slab_header * header, bool simple )
         "  locked:           %s\n"
         "  i_front_fsm_bit:  %lu\n"
         "  i_rear_fsm_word:  %lu\n"
-        "  loc_c_allocstart: %p\n"
+        "  loc_c_allocstart: %p (%08x%08x)\n"
         "  c_allocstart:     0x%08x%08x\n"
-        "  loc_c_fsmstart:   %p\n"
+        "  loc_c_fsmstart:   %p (%08x%08x)\n"
         "  c_fsmstart:       0x%08x%08x\n"
-        "  loc_c_fsmend:     %p\n"
+        "  loc_c_fsmend:     %p (%08x%08x)\n"
         "  c_fsmend:         0x%08x%08x\n"
-        "  allocset:         %p\n"
-        "  (allocset segment)%lu\n"
-        "  max_allocset      %u\n"
-        "  allocset_handle   %lu\n",
+        "    allocset.set:          %p\n"
+        "     segment:              %lu\n"
+        "    allocset.locked:       %s\n"
+        "    allocset.max_allocset: %lu\n"
+        "    allocset.used:         %lu\n"
+        "    allocset.head:         %lu\n"
+        "    allocset.tail:         %lu\n",
         ( uint32_t ) header->magic,
         ( uint64_t ) header->segment,
         ( size_t ) header->object_size,
@@ -2826,24 +3416,94 @@ static void _dump_header( slab_header * header, bool simple )
         ( uint64_t ) header->i_front_fsm_bit,
         ( uint64_t ) header->i_rear_fsm_word,
         ( void * ) get_ptr( header->loc_c_allocstart ),
+        ( uint32_t ) ( ( *( ( uint64_t * ) get_ptr( header->loc_c_allocstart ) ) ) >> 32 ),
+        ( uint32_t ) ( *( ( uint64_t * ) get_ptr( header->loc_c_allocstart ) ) ),
         ( uint32_t ) ( ( ( uint64_t ) header->c_allocstart ) >> 32 ),
         ( uint32_t ) header->c_allocstart,
         ( void * ) get_ptr( header->loc_c_fsmstart ),
+        ( uint32_t ) ( ( *( ( uint64_t * ) get_ptr( header->loc_c_fsmstart ) ) ) >> 32 ),
+        ( uint32_t ) ( *( ( uint64_t * ) get_ptr( header->loc_c_fsmstart ) ) ),
         ( uint32_t ) ( ( ( uint64_t ) header->c_fsmstart ) >> 32 ),
         ( uint32_t ) header->c_fsmstart,
         ( void * ) get_ptr( header->loc_c_fsmend ),
+        ( uint32_t ) ( ( *( ( uint64_t * ) get_ptr( header->loc_c_fsmend ) ) ) >> 32 ),
+        ( uint32_t ) ( *( ( uint64_t * ) get_ptr( header->loc_c_fsmend ) ) ),
         ( uint32_t ) ( ( ( uint64_t ) header->c_fsmend ) >> 32 ),
         ( uint32_t ) header->c_fsmend,
-        ( void * ) get_ptr( header->allocset ),
-        ( uint64_t ) ref_get_segment( header->allocset ),
-        ( uint32_t ) header->max_allocset,
-        ( uint64_t ) header->allocset_handle
-
+        ( void * ) get_ptr( header->allocset.set ),
+        ( uint64_t ) ref_get_segment( header->allocset.set ),
+        ( uint64_t ) header->allocset.locked ? "T" : "F",
+        ( uint64_t ) header->allocset.max_allocset,
+        ( uint64_t ) header->allocset.used,
+        ( uint64_t ) header->allocset.head,
+        ( uint64_t ) header->allocset.tail
     );
+
     if( simple )
         return;
     fprintf( stdout, "---- HEADER DATA DETAIL:\n-- FSM:\n" );
     _print_fsm( header );
+    fprintf( stdout, "-- ALLOCSET[]\n" );
+    if( header->allocset.head != ALLOCSET_ITEM_INVALID )
+    {
+        ind = header->allocset.head;
+        ptr = _PTR_ADD_OFFSET(
+            get_ptr( header->allocset.set ),
+            ( sizeof( allocset_item_t ) * ind )
+        );
+
+        if( ptr != NULL )
+        {
+            while( ind != ALLOCSET_ITEM_INVALID )
+            {
+                fprintf(
+                    stdout,
+                    "    ALLOCSET[%lu]\n"
+                    "      size:  %zu\n"
+                    "      index: %lu\n"
+                    "      __ref: %p\n"
+                    "      next:  %lu\n"
+                    "      last:  %lu\n",
+                    ( uint64_t ) ind,
+                    ( ( allocset_item_t * ) ptr )->size,
+                    ( uint64_t ) ( ( allocset_item_t * ) ptr )->index,
+                    get_ptr( ( ( allocset_item_t * ) ptr )->issued_ref ),
+                    ( uint64_t ) ( ( allocset_item_t * ) ptr )->next,
+                    ( uint64_t ) ( ( allocset_item_t * ) ptr )->last
+                );
+                ind = ( ( allocset_item_t * ) ptr )->next;
+                ptr = _PTR_ADD_OFFSET(
+                    get_ptr( header->allocset.set ),
+                    ( ind * sizeof( allocset_item_t ) )
+                );
+
+                if( ptr == NULL || ind == ALLOCSET_ITEM_INVALID )
+                    break;
+
+                if( unlikely( ind == ( ( allocset_item_t * ) ptr )->next ) )
+                {
+                    fprintf(
+                        stderr,
+                        "LOOP DETECTED. Next item is current index (%lu)\n",
+                        ( uint64_t ) ind
+                    );
+                    break;
+                }
+            }
+        }
+        else
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Null pointer from head"
+            );
+        }
+    }
+    else
+    {
+        fprintf( stdout, "    none\n" );
+    }
+/*
     fprintf( stdout, "-- ALLOCS[]:\n" );
     for( i = 0; i < header->max_allocations; i++ )
     {
@@ -2855,10 +3515,7 @@ static void _dump_header( slab_header * header, bool simple )
         alloc_size = _get_allocset_element_by_index( header, i );
 
         if( alloc_size == UINT_MAX )
-        {
-            fprintf( stderr, "allocset index %lu invalid\n", i );
             continue;
-        }
 
         if( alloc_size == 0 )
             continue;
@@ -2888,23 +3545,7 @@ static void _dump_header( slab_header * header, bool simple )
 
         fprintf( stdout, "\n" );
     }
-
-    fprintf( stdout, "-- ALLOCSET[]\n" );
-    for( i = 0; i < header->max_allocset; i++ )
-    {
-        ptr = _PTR_ADD_OFFSET(
-            get_ptr( header->allocset ),
-            i * sizeof( uint32_t )
-        );
-        if( *((uint32_t * ) ptr) == 0 )
-            continue;
-        fprintf(
-            stdout,
-            "ALLOCSET[%03lu]: %08lu\n",
-            ( uint64_t ) i,
-            ( uint64_t ) *(( uint32_t * ) ptr)
-        );
-    }
+*/
     fprintf( stdout, "==============================\n" );
     return;
 }
@@ -3021,4 +3662,59 @@ static void _slab_log( slab_ll log_level, char * message, ... )
     );
 
     return;
+}
+
+static INLINE uint64_t _get_random( void )
+{
+    uint64_t random_val = 0;
+    #ifdef _SLAB_HAS_RANDOM
+    // attempt to use /dev/urandom, then /dev/random, then rand() this is
+    // relatively safe - and will eventually return but provides maximal
+    // entropy in the cases where the system is has sufficient bytes in the
+    // urandom device. For the worst case, we fall back to rand() when the
+    // system has urandom/random as the same device and insufficient entropy
+    // is present.
+    if(
+    #ifndef _SLAB_RAND_USE_SYSCALL
+        getrandom(
+            &random_val,
+            sizeof( random_val ),
+            GRND_NOBLOCK
+        ) < sizeof( random_val )
+    #else
+        syscall(
+            SYS_getrandom,
+            &random_val,
+            sizeof( random_val ),
+            GRND_NOBLOCK
+        ) > 0
+    #endif // !_SLAB_RAND_USE_SYSCALL
+      )
+    {
+        random_val = 0;
+        if(
+        #ifndef _SLAB_RAND_USE_SYSCALL
+            getrandom(
+                &random_val,
+                sizeof( random_val ),
+                GRND_NOBLOCK | GRND_RANDOM
+            ) < sizeof( random_val )
+        #else
+            syscall(
+                SYS_getrandom,
+                &random_val,
+                sizeof( random_val ),
+                GRND_NOBLOCK | GRND_RANDOM
+            ) > 0
+        #endif // !_SLAB_RAND_USE_SYSCALL
+          )
+        {
+    #endif // _SLAB_HAS_RANDOM
+            random_val = rand();
+    #ifdef _SLAB_HAS_RANDOM
+        }
+    }
+    #endif // _SLAB_HAS_RANDOM
+
+    return random_val;
 }
