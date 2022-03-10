@@ -83,7 +83,8 @@
 // This can be overridden at runtime with slab_set_count_hint()
 #define SLAB_DEFAULT_ALLOCATION 32
 #define ALLOCSET_DEFAULT_ALLOC_BLOCK SLAB_DEFAULT_ALLOCATION
-
+// If the FSM is > 75% full, do exhaustive search
+#define FSM_INDEX_FILL_CUTOFF ( ( double ) 0.75 )
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -231,7 +232,6 @@ typedef struct slab_header {
     context_t      self; // our index in the headers[]
     volatile bool  locked;
     uint64_t       i_front_fsm_bit;
-    uint64_t       i_rear_fsm_word;
     __ref          loc_c_allocstart;
     canary_t       c_allocstart;
     __ref          loc_c_fsmstart;
@@ -256,6 +256,15 @@ typedef struct allocset_item_t {
     _as_ind_t     last;
     _as_ind_t     next;
 } PACKED allocset_item_t;
+
+typedef struct ptr_cache {
+    void * as_base;
+    size_t as_size;
+    void * allocs_base;
+    size_t allocs_size;
+    void * fsm_base;
+    size_t fsm_size;
+} ptr_cache;
 
 // TODO - add compactification (segment size reduction) for slabs on free
 // Initialization / boilerplate

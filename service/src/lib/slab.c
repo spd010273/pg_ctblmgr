@@ -25,11 +25,12 @@
  */
 #include "slab.h"
 
-static shm_handle     control_segment         = SEGMENT_HANDLE_INVALID;
-static __ref          control_segment_address = {0};
-static slab_control * control                 = NULL;
-static bool           _slab_init              = false;
-static pid_t          p_pid                   = 0;
+static shm_handle     control_segment              = SEGMENT_HANDLE_INVALID;
+static __ref          control_segment_address      = {0};
+static slab_control * control                      = NULL;
+static bool           _slab_init                   = false;
+static pid_t          p_pid                        = 0;
+static ptr_cache      __ptr_cache[_SLAB_MAX_SLABS] = {{0}};
 
 // Check and boilerplate helpers
 static INLINE bool _fail_canary( void ) ALWAYS_INLINE_FLATTEN;
@@ -73,8 +74,108 @@ static INLINE _as_ind_t _get_available_allocset_item( slab_header * );
 static INLINE bool _set_allocset_item_by_index( slab_header *, uint64_t, __ref, size_t, _as_ind_t );
 static INLINE bool _clear_allocset_item_by_index( slab_header *, uint64_t );
 
+// ref_t functions
 static INLINE void * _to_ptr( slab_header *, ref_t ) ALWAYS_INLINE_FLATTEN_HOT;
 static INLINE ref_t _to_ref( slab_header *, void * ) ALWAYS_INLINE_FLATTEN;
+
+// Caching functions
+static INLINE void * _as_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE void * _allocs_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE void * _fsm_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
+
+static INLINE void * _as_ptr_cache( slab_header * header )
+{
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Header is NULL"
+        );
+        return NULL;
+    }
+
+    if( unlikely( header->self == INVALID_CONTEXT ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Invalid header context"
+        );
+        return NULL;
+    }
+    #endif // _SLAB_EXTRA_SANE
+    if( unlikely( __ptr_cache[header->self].as_size != ( header->allocset.max_allocset * sizeof( allocset_item_t ) ) ) )
+    {
+        __ptr_cache[header->self].as_size = ( header->allocset.max_allocset * sizeof( allocset_item_t ) );
+        __ptr_cache[header->self].as_base = get_ptr( header->allocset.set );
+        __FENCE();
+    }
+
+    return __ptr_cache[header->self].as_base;
+}
+
+static INLINE void * _allocs_ptr_cache( slab_header * header )
+{
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Header is NULL"
+        );
+        return NULL;
+    }
+
+    if( unlikely( header->self == INVALID_CONTEXT ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Invalid header context"
+        );
+        return NULL;
+    }
+    #endif // _SLAB_EXTRA_SANE
+    if( unlikely( __ptr_cache[header->self].allocs_size != ( header->max_allocations * header->object_size ) ) )
+    {
+        __ptr_cache[header->self].allocs_size = ( header->max_allocations * header->object_size );
+        __ptr_cache[header->self].allocs_base = get_ptr( header->allocs );
+        __FENCE();
+    }
+
+    return __ptr_cache[header->self].allocs_base;
+}
+
+static INLINE void * _fsm_ptr_cache( slab_header * header )
+{
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Header is NULL"
+        );
+        return NULL;
+    }
+
+    if( unlikely( header->self == INVALID_CONTEXT ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Invalid header context"
+        );
+        return NULL;
+    }
+    #endif // _SLAB_EXTRA_SANE
+    if( unlikely( __ptr_cache[header->self].fsm_size != ( _get_fsm_length( header ) * sizeof( fsm_t ) ) ) )
+    {
+        __ptr_cache[header->self].fsm_size = ( _get_fsm_length( header ) * sizeof( fsm_t ) );
+        __ptr_cache[header->self].fsm_base = get_ptr( header->fsm );
+        __FENCE();
+    }
+
+    return __ptr_cache[header->self].fsm_base;
+}
+
 #ifdef SLAB_DEBUG
 // Debugging
 static void _dump_control( slab_control * );
@@ -114,7 +215,7 @@ static INLINE void * _to_ptr( slab_header * header, ref_t ref )
     void * ptr = NULL;
 
     ptr = _PTR_ADD_OFFSET(
-        get_ptr( header->allocset.set ),
+        ( _as_ptr_cache( header ) ),
         ( sizeof( allocset_item_t ) * ( uint64_t ) ref )
     );
 
@@ -144,7 +245,7 @@ static INLINE ref_t _to_ref( slab_header * header, void * ptr )
         return NULLREF;
 
     ind = header->allocset.head;
-    base = get_ptr( header->allocset.set );
+    base = _as_ptr_cache( header );
 
     if( unlikely( base == NULL ) )
         return NULLREF;
@@ -367,8 +468,8 @@ void destroy_slab( context_t ctx )
         return;
     }
 
-    allocs   = get_ptr_fast( header->allocs );
-    allocset = get_ptr_fast( header->allocset.set );
+    allocs   = _allocs_ptr_cache( header );
+    allocset = _as_ptr_cache( header );
 
     if( unlikely( (allocs == NULL) || (allocset == NULL) ) )
     {
@@ -397,7 +498,6 @@ void destroy_slab( context_t ctx )
     header->self             = INVALID_CONTEXT;
     header->count_hint       = 0;
     header->i_front_fsm_bit  = ( uint64_t ) 0;
-    header->i_rear_fsm_word  = ( uint64_t ) 0;
     memset(
         header->object_id,
         0,
@@ -409,6 +509,12 @@ void destroy_slab( context_t ctx )
 
     __C_MUTEX( &(control->locked) );
     __C_MUTEX( &(header->locked) );
+    __ptr_cache[ctx].as_base     = NULL;
+    __ptr_cache[ctx].as_size     = 0;
+    __ptr_cache[ctx].allocs_base = NULL;
+    __ptr_cache[ctx].allocs_size = 0;
+    __ptr_cache[ctx].fsm_base    = NULL;
+    __ptr_cache[ctx].fsm_size    = 0;
     return;
 }
 
@@ -473,7 +579,6 @@ static INLINE context_t _new_slab(
         control->headers[ret].self             = ret;
         control->headers[ret].locked           = false;
         control->headers[ret].max_allocations  = 0;
-        control->headers[ret].i_rear_fsm_word  = 0;
         control->headers[ret].i_front_fsm_bit  = 0;
         control->headers[ret].count_hint       = count_hint;
 
@@ -801,7 +906,8 @@ static INLINE bool _realloc_internal(
     //  or
     //  - Just allocate (requested_size) + existing size
     //
-    //  We'll be doing the latter.
+    //  We'll be doing the latter, for now. The collateral benefit is we make
+    //  more room for singleton allocations but this is a reach.
     alloc_offset = get_segment_size( header->segment );
     size_needed  = ( size_needed * unit_size ) + alloc_offset;
     old_fsm      = get_ptr_fast( header->loc_c_fsmstart );
@@ -853,6 +959,11 @@ static INLINE bool _realloc_internal(
         old_fsm_length * sizeof( fsm_t ) + sizeof( canary_t )
     );
 
+    // allocs base stays static
+    __ptr_cache[header->self].allocs_base = get_ptr( header->allocs );
+    __ptr_cache[header->self].allocs_size = ( header->object_size * header->max_allocations ); 
+    __ptr_cache[header->self].fsm_base    = fsm;
+    __ptr_cache[header->self].fsm_size    = ( sizeof( fsm_t ) * _get_fsm_length( header ) );
     header->loc_c_fsmend   = get_ref( c_fsmend );
     header->loc_c_fsmstart = get_ref( c_fsmstart );
     header->fsm            = get_ref( fsm );
@@ -860,15 +971,13 @@ static INLINE bool _realloc_internal(
     *( ( canary_t * ) c_fsmend ) = header->c_fsmend;
 
     // Blank out the old FSM and canaries to avoid divulging allocation
-    // information to the caller
+    // information / canaries to the caller
     memset(
         old_fsm,
         0,
         old_fsm_length + 1
     );
 
-    // XXX
-    // Check if we need to scale the allocset
     if( header->allocset.used >= header->allocset.max_allocset )
     {
         // Extend allocset
@@ -886,7 +995,9 @@ static INLINE bool _realloc_internal(
 
         header->allocset.max_allocset = get_segment_size(
                                    ref_get_segment( header->allocset.set )
-                               ) / sizeof( allocset_item_t);
+                               ) / sizeof( allocset_item_t );
+        __ptr_cache[header->self].as_base = get_ptr( header->allocset.set );
+        __ptr_cache[header->self].as_size = header->allocset.max_allocset * sizeof( allocset_item_t );
 
         _slab_log(
             LL_SLAB_DEBUG,
@@ -1059,7 +1170,7 @@ static INLINE void _shfree( slab_header * header, ref_t pointer, bool nolock )
     }
 
     item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
-        get_ptr( header->allocset.set ),
+        ( _as_ptr_cache( header ) ),
         ( sizeof( allocset_item_t ) * pointer )
     );
 
@@ -1219,7 +1330,7 @@ static INLINE ref_t _shrealloc(
         return NULLREF;
     }
 
-    base = get_ptr( header->allocset.set );
+    base = _as_ptr_cache( header );
     item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
         base,
         ( sizeof( allocset_item_t ) * ( uint64_t ) olduserref )
@@ -1289,7 +1400,7 @@ static INLINE ref_t _shrealloc(
         // will be placed here as some specialized work needs to be done
         errno = 0;
         bit_position = _get_fsm_slot_by_width( header, count, false );
-        _slab_log( LL_SLAB_DEBUG, "INPLACE REALLOCATION OF %lu GOT INDEX %lu", ( uint64_t ) olduserref, ( uint64_t ) bit_position );
+
         if( bit_position == ULONG_MAX || errno == ENOSPC )
         {
             if( unlikely( !_realloc_internal( header, count ) ) )
@@ -1304,15 +1415,11 @@ static INLINE ref_t _shrealloc(
             }
 
             // Item /may/ have moved here! - get new ptr
-            if( unlikely( base != get_ptr( header->allocset.set ) ) )
-            {
-                base = get_ptr_fast( header->allocset.set );
-                item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
-                    base,
-                    ( sizeof( allocset_item_t ) * olduserref )
-                );
-                __FENCE();
-            }
+            base = _as_ptr_cache( header );
+            item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+                base,
+                ( sizeof( allocset_item_t ) * olduserref )
+            );
 
             bit_position = _get_fsm_slot_by_width( header, count, false );
 
@@ -1328,7 +1435,6 @@ static INLINE ref_t _shrealloc(
                 return NULLREF;
             }
         }
-
         // We're at a position now where the underlying index into the alloc/fsm
         // has changed from index->bit_posititon. We'll need to fixup the allocset
         // linkedlist
@@ -1534,7 +1640,6 @@ static INLINE ref_t _shmalloc(
 
     if( num_objects > 1 )
     {
-        // XXX Need to implement usage of i_rear_fsm_word index
         errno = 0;
         index = _get_fsm_slot_by_width( header, num_objects, true );
 
@@ -1557,8 +1662,9 @@ static INLINE ref_t _shmalloc(
             }
         }
 
-        retref = _get_alloc_element_by_index( header, index );
+        retref  = _get_alloc_element_by_index( header, index );
         userref = _get_allocset_item_by_index( header, index );
+        
         #ifdef SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
@@ -1656,8 +1762,8 @@ static INLINE __ref _get_alloc_element_by_index(
 
     return get_ref(
         _PTR_ADD_OFFSET(
-            get_ptr_fast( header->allocs ),
-            ( header->object_size ) * ind
+            ( _allocs_ptr_cache( header ) ),
+            ( ( header->object_size ) * ind )
         )
     );
 }
@@ -1713,7 +1819,7 @@ static INLINE void _set_fsm_elements_by_range(
 
     // We set bits from start to end-1
     // This function has a fenceposting issue
-    fsm          = get_ptr_fast( header->fsm );
+    fsm = _fsm_ptr_cache( header );
     fsm_start    = ( start / FSM_WIDTH );
     start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
@@ -1847,7 +1953,7 @@ static INLINE void _set_fsm_elements_by_range(
 
 static INLINE void _set_fsm_element_by_index(
     slab_header * header,
-    uint64_t         ind
+    uint64_t      ind
 )
 {
     uint32_t fsm_index  = 0;
@@ -1868,7 +1974,7 @@ static INLINE void _set_fsm_element_by_index(
     fsm_index  = ( ind / FSM_WIDTH );
     fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
-        get_ptr_fast( header->fsm ),
+        ( _fsm_ptr_cache( header ) ),
         fsm_index * sizeof( fsm_t )
     );
 
@@ -1923,7 +2029,7 @@ static INLINE void _clear_fsm_elements_by_range(
 
     // We set bits from start to end-1
     // This function has a fenceposting issue
-    fsm          = get_ptr_fast( header->fsm );
+    fsm          = _fsm_ptr_cache( header );
     fsm_start    = ( start / FSM_WIDTH );
     start_offset = start - ( ( start / FSM_WIDTH ) * FSM_WIDTH );
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
@@ -2054,7 +2160,7 @@ static INLINE void _clear_fsm_element_by_index(
     fsm_index  = ( ind / FSM_WIDTH );
     fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
-        get_ptr_fast( header->fsm ),
+        ( _fsm_ptr_cache( header ) ),
         fsm_index * sizeof( fsm_t )
     );
 
@@ -2092,7 +2198,7 @@ static INLINE bool _get_fsm_element_by_index(
     fsm_index  = ( ind / FSM_WIDTH );
     fsm_offset = ind - ( ( ind / FSM_WIDTH ) * FSM_WIDTH );
     fsm_word   = ( fsm_t * ) _PTR_ADD_OFFSET(
-        get_ptr_fast( header->fsm ),
+        ( _fsm_ptr_cache( header ) ),
         fsm_index * sizeof( fsm_t )
     );
 
@@ -2127,7 +2233,6 @@ static INLINE uint64_t _get_fsm_slot_by_width(
     #endif // SLAB_DEBUG
 
     _set_fsm_elements_by_range( header, bit_position, bit_position + width );
-
     // We need to track how large the allocation is for
     // purposes of freeing later
     if( set_allocset )
@@ -2248,7 +2353,7 @@ static INLINE uint64_t __find_fsm_spot(
     {
         // Iterate over words of sizeof( fsm_t ) bytes
         fsm_word = *( ( fsm_t * ) _PTR_ADD_OFFSET(
-            get_ptr_fast( header->fsm ),
+            ( _fsm_ptr_cache( header ) ),
             ( ( fsm_length - 1 - fsm_i ) * sizeof( fsm_t ) )
         )); // Deref in outer loop
 
@@ -2534,6 +2639,13 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
         ( sizeof( fsm_t ) * _get_fsm_length( header ) )
     );
 
+    __ptr_cache[header->self].as_base     = allocset;
+    __ptr_cache[header->self].as_size     = ( ALLOCSET_DEFAULT_ALLOC_BLOCK * sizeof( allocset_item_t ) );
+    __ptr_cache[header->self].allocs_base = alloc;
+    __ptr_cache[header->self].allocs_size = ( header->object_size * header->max_allocations );
+    __ptr_cache[header->self].fsm_base    = fsm;
+    __ptr_cache[header->self].fsm_size    = ( sizeof( fsm_t ) * _get_fsm_length( header ) );
+
     #ifdef SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
@@ -2571,7 +2683,6 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
     // Indexes to the word and bit positions in the FSM. We ignore endian-ness
     // and treat it as an array with 0'th position being leftmost and nth being
     // rightmost
-    header->i_rear_fsm_word  = _get_fsm_length( header ) - 1;
     header->i_front_fsm_bit  = 0;
 
     if(
@@ -2585,7 +2696,7 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
     if( zero_fill == true )
     {
         memset(
-            get_ptr_fast( header->allocs ),
+            _allocs_ptr_cache( header ),
             ( unsigned char ) _ZERO_FILL_BYTE,
             ( header->object_size * header->max_allocations )
         );
@@ -2624,7 +2735,7 @@ static INLINE bool _clear_allocset_item_by_index( slab_header * header, uint64_t
     _as_ind_t         ind  = 0;
     allocset_item_t * item = NULL;
     allocset_item_t * temp = NULL;
-    void *            base = NULL;
+    register void *   base = NULL;
 
     if( unlikely( header == NULL ) )
     {
@@ -2657,7 +2768,7 @@ static INLINE bool _clear_allocset_item_by_index( slab_header * header, uint64_t
         return false;
     }
 
-    base = get_ptr( header->allocset.set );
+    base = _as_ptr_cache( header );
 
     if( unlikely( base == NULL ) )
     {
@@ -2788,7 +2899,7 @@ static INLINE bool _set_allocset_item_by_index(
     _as_ind_t         nextind = 0;
     _as_ind_t         prevind = 0;
     _as_ind_t         newind  = 0;
-    void *            base    = NULL;
+    register void *   base    = NULL;
     allocset_item_t * next    = NULL;
     allocset_item_t * new     = NULL;
     allocset_item_t * prev    = NULL;
@@ -2813,7 +2924,7 @@ static INLINE bool _set_allocset_item_by_index(
         return false;
     }
 
-    base = get_ptr( header->allocset.set );
+    base = _as_ptr_cache( header );
 
     if( unlikely( base == NULL ) )
     {
@@ -3054,7 +3165,7 @@ static INLINE _as_ind_t _get_available_allocset_item( slab_header * header )
         return ALLOCSET_ITEM_INVALID;
     }
 
-    base = get_ptr( header->allocset.set );
+    base = _as_ptr_cache( header );
 
     if( unlikely( base == NULL ) )
     {
@@ -3132,7 +3243,7 @@ static INLINE _as_ind_t _get_allocset_item_by_index(
         return ALLOCSET_ITEM_INVALID;
     }
 
-    base = get_ptr( header->allocset.set );
+    base = _as_ptr_cache( header );
 
     if( header->allocset.head == ALLOCSET_ITEM_INVALID )
     { // Uninitialized
@@ -3231,7 +3342,7 @@ static INLINE size_t _get_allocset_element_by_index(
         return ULONG_MAX;
 
     item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
-        get_ptr( header->allocset.set ),
+        ( _as_ptr_cache( header ) ),
         ( sizeof( allocset_item_t ) * allocset_index )
     );
 
@@ -3588,7 +3699,7 @@ static INLINE void * _move_to_local(
     }
 
     item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
-        get_ptr( header->allocset.set ),
+        ( _as_ptr_cache( header ) ),
         ( sizeof( allocset_item_t ) * ( uint64_t ) *ref )
     );
 
@@ -3668,7 +3779,7 @@ static void _print_fsm( slab_header * header )
     for( i = 0; i < len; i++ )
     {
         fsm_word = (fsm_t *) _PTR_ADD_OFFSET(
-            get_ptr( header->fsm ),
+            ( _fsm_ptr_cache( header ) ),
             ( ( len - 1 - i ) * sizeof( fsm_t ) )
         );
 
@@ -3727,7 +3838,6 @@ static void _dump_header( slab_header * header, bool simple )
         "  self:             %lu\n"
         "  locked:           %s\n"
         "  i_front_fsm_bit:  %lu\n"
-        "  i_rear_fsm_word:  %lu\n"
         "  loc_c_allocstart: %p (%08x%08x)\n"
         "  c_allocstart:     0x%08x%08x\n"
         "  loc_c_fsmstart:   %p (%08x%08x)\n"
@@ -3755,7 +3865,6 @@ static void _dump_header( slab_header * header, bool simple )
         ( uint64_t ) header->self,
         header->locked ? "T" : "F",
         ( uint64_t ) header->i_front_fsm_bit,
-        ( uint64_t ) header->i_rear_fsm_word,
         ( void * ) get_ptr( header->loc_c_allocstart ),
         ( uint32_t ) ( ( *( ( uint64_t * ) get_ptr( header->loc_c_allocstart ) ) ) >> 32 ),
         ( uint32_t ) ( *( ( uint64_t * ) get_ptr( header->loc_c_allocstart ) ) ),
@@ -3771,7 +3880,7 @@ static void _dump_header( slab_header * header, bool simple )
         ( uint32_t ) ( *( ( uint64_t * ) get_ptr( header->loc_c_fsmend ) ) ),
         ( uint32_t ) ( ( ( uint64_t ) header->c_fsmend ) >> 32 ),
         ( uint32_t ) header->c_fsmend,
-        ( void * ) get_ptr( header->allocset.set ),
+        ( void * ) _as_ptr_cache( header ),
         ( uint64_t ) ref_get_segment( header->allocset.set ),
         ( uint64_t ) header->allocset.locked ? "T" : "F",
         ( uint64_t ) header->allocset.max_allocset,
@@ -3789,7 +3898,7 @@ static void _dump_header( slab_header * header, bool simple )
     {
         ind = header->allocset.head;
         ptr = _PTR_ADD_OFFSET(
-            get_ptr( header->allocset.set ),
+            ( _as_ptr_cache( header ) ),
             ( sizeof( allocset_item_t ) * ind )
         );
 
@@ -3814,7 +3923,7 @@ static void _dump_header( slab_header * header, bool simple )
                 );
                 ind = ( ( allocset_item_t * ) ptr )->next;
                 ptr = _PTR_ADD_OFFSET(
-                    get_ptr( header->allocset.set ),
+                    ( _as_ptr_cache( header ) ),
                     ( ind * sizeof( allocset_item_t ) )
                 );
 
@@ -3849,7 +3958,7 @@ static void _dump_header( slab_header * header, bool simple )
     for( i = 0; i < header->max_allocations; i++ )
     {
         ptr = _PTR_ADD_OFFSET(
-            get_ptr( header->allocs ),
+            ( _allocs_ptr_cache( header ) ),
             ( i * header->object_size )
         );
 
