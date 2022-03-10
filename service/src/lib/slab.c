@@ -44,10 +44,11 @@ static INLINE size_t _get_allocset_element_by_index( slab_header *, uint64_t );
 
 // Allocation helpers / primitives
 static INLINE context_t _new_slab( const char *, size_t, uint64_t );
-static INLINE __ref _shmalloc( slab_header *, size_t, bool );
-static INLINE bool __shrealloc_internal( slab_header *, uint64_t );
-static INLINE __ref _shrealloc( slab_header *, __ref, uint64_t );
-static INLINE void _shfree( slab_header *, __ref, bool );
+static INLINE ref_t _shmalloc( slab_header *, size_t, bool );
+static INLINE bool _realloc_internal( slab_header *, uint64_t );
+static INLINE ref_t _shrealloc( slab_header *, ref_t, uint64_t );
+static INLINE void _shfree( slab_header *, ref_t, bool ) ALWAYS_INLINE_FLATTEN;
+static INLINE bool __free_by_index( slab_header *, uint64_t, size_t, bool ) ALWAYS_INLINE_FLATTEN;
 
 // FSM helpers
 static INLINE uint64_t _get_fsm_length( slab_header * ) ALWAYS_INLINE_FLATTEN;
@@ -56,23 +57,24 @@ static INLINE void _set_fsm_elements_by_range( slab_header *, uint64_t, uint64_t
 static INLINE void _clear_fsm_element_by_index( slab_header *, uint64_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE void _clear_fsm_elements_by_range( slab_header *, uint64_t, uint64_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool _get_fsm_element_by_index( slab_header *, uint64_t ) ALWAYS_INLINE_FLATTEN;
-static INLINE uint64_t _get_fsm_slot_by_width( slab_header *, uint64_t ) ALWAYS_INLINE_FLATTEN;
+static INLINE uint64_t _get_fsm_slot_by_width( slab_header *, uint64_t, bool ) ALWAYS_INLINE_FLATTEN;
 static INLINE uint64_t __find_fsm_spot( slab_header *, uint64_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool _ref_get_index_and_size( slab_header *, __ref, uint64_t *, size_t * ) ALWAYS_INLINE;
 
 // Utility
-static INLINE void * _move_to_local( slab_header *, __ref *, bool ) ALWAYS_INLINE;
-static INLINE __ref _move_to_shared( slab_header *, void **, size_t, bool ) ALWAYS_INLINE;
+static INLINE void * _move_to_local( slab_header *, ref_t *, bool ) ALWAYS_INLINE;
+static INLINE ref_t _move_to_shared( slab_header *, void **, size_t, bool ) ALWAYS_INLINE;
 static INLINE void _slab_log( slab_ll, char *, ... ) PRINTF;
 static INLINE uint64_t _get_random( void );
 
 // Allocset tools
 static INLINE _as_ind_t _get_allocset_item_by_index( slab_header *, uint64_t index );
 static INLINE _as_ind_t _get_available_allocset_item( slab_header * );
-static INLINE bool _set_allocset_item_by_index( slab_header *, uint64_t, __ref, size_t );
+static INLINE bool _set_allocset_item_by_index( slab_header *, uint64_t, __ref, size_t, _as_ind_t );
 static INLINE bool _clear_allocset_item_by_index( slab_header *, uint64_t );
 
-
+static INLINE void * _to_ptr( slab_header *, ref_t ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE ref_t _to_ref( slab_header *, void * ) ALWAYS_INLINE_FLATTEN;
 #ifdef SLAB_DEBUG
 // Debugging
 static void _dump_control( slab_control * );
@@ -94,6 +96,103 @@ static const char * hexes[16] = {
     [12] = "C",   [13] = "D",   [14] = "E",   [15] = "F",
 };
 #endif // SLAB_DEBUG
+
+void * to_ptr( context_t ctx, ref_t ref )
+{
+    slab_header * header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( ( header == NULL ) || ( ref == NULLREF ) ) )
+        return NULL;
+
+    return _to_ptr( header, ref );
+}
+
+static INLINE void * _to_ptr( slab_header * header, ref_t ref )
+{
+    void * ptr = NULL;
+
+    ptr = _PTR_ADD_OFFSET(
+        get_ptr( header->allocset.set ),
+        ( sizeof( allocset_item_t ) * ( uint64_t ) ref )
+    );
+
+    if( unlikely( ptr == NULL ) )
+        return NULL;
+
+    ptr = get_ptr( ( ( allocset_item_t * ) ptr )->issued_ref );
+
+    _slab_log(
+        LL_SLAB_DEBUG,
+        "Returning pointer %p for ref %lu",
+        ptr,
+        ( uint64_t ) ref
+    );
+
+    return ptr;
+
+}
+
+static INLINE ref_t _to_ref( slab_header * header, void * ptr )
+{
+    _as_ind_t         ind  = ALLOCSET_ITEM_INVALID;
+    void *            base = NULL;
+    allocset_item_t * item = NULL;
+
+    if( unlikely( header->allocset.head == ALLOCSET_ITEM_INVALID ) )
+        return NULLREF;
+
+    ind = header->allocset.head;
+    base = get_ptr( header->allocset.set );
+
+    if( unlikely( base == NULL ) )
+        return NULLREF;
+
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * ind )
+    );
+
+    if( unlikely( item == NULL ) )
+        return NULLREF;
+
+    if( _PTR_BOUND_CHECK( ptr, get_ptr( item->issued_ref ), item->size ) )
+        return ( ref_t ) ind;
+
+    while( item->next != ALLOCSET_ITEM_INVALID )
+    {
+        ind  = item->next;
+        item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( sizeof( allocset_item_t ) * ind )
+        );
+
+        if( unlikely( item == NULL ) )
+            return NULLREF;
+
+        if( _PTR_BOUND_CHECK( ptr, get_ptr( item->issued_ref ), item->size ) )
+            return ( ref_t ) ind;
+    }
+
+    return NULLREF;
+}
+
+ref_t to_ref( context_t ctx, void * ptr )
+{
+    // This is rather expensive, but we don't expect the user to invoke this a lot
+    slab_header *     header = NULL;
+
+    header = _get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+        return NULLREF;
+
+    if( unlikely( ptr == NULL ) )
+        return NULLREF;
+
+    return _to_ref( header, ptr );
+}
 
 /*
  * bool slab_init()
@@ -391,7 +490,7 @@ static INLINE context_t _new_slab(
 // Main interface allocation functions
 
 /*
- * __ref rscalloc( context_t, size_t, uint64_t )
+ * ref_t rscalloc( context_t, size_t, uint64_t )
  *
  *  Shared memory equivilent of calloc()
  *  Makes an allocation of size * count and zeros out the allocation
@@ -402,14 +501,14 @@ static INLINE context_t _new_slab(
  *               for standardization with calloc()
  *  uint64_t count: Number of objects being requested
  */
-__ref rscalloc( context_t ctx, size_t size, uint64_t count )
+ref_t rscalloc( context_t ctx, size_t size, uint64_t count )
 {
     slab_header * header = NULL;
 
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
-        return get_null_ref();
+        return NULLREF;
 
     if(
         unlikely(
@@ -424,64 +523,63 @@ __ref rscalloc( context_t ctx, size_t size, uint64_t count )
             size,
             header->object_size
         );
-        return get_null_ref();
+        return NULLREF;
     }
 
     return _shmalloc( header, size, true );
 }
 
 /*
- * __ref rsmalloc( context_t, size_t )
+ * ref_t rsmalloc( context_t, size_t )
  *
  * Shared memory equivilent of malloc()
  * Makes an allocation of size bytes (or size / header->object_size units)
- * and returns a __ref to that memory location to the caller.
+ * and returns a ref_t to that memory location to the caller.
  *
  *  context_t ctx: Slab context the allocation is made in
  *  size_t size: Size in bytes to make for this allocation
  *
  */
-__ref rsmalloc( context_t ctx, size_t size )
+ref_t rsmalloc( context_t ctx, size_t size )
 {
     slab_header * header = NULL;
 
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
-        return get_null_ref();
-
+        return NULLREF;
 
     return _shmalloc( header, size, false );
 }
 
 /*
- * __ref rsrealloc( context_t, __ref, size_t )
+ * ref_t rsrealloc( context_t, ref_t, size_t )
  *
  * Shared memory equivilent of realloc()
- * Reallocates the passed in __ref to the requested size, returning a __ref to
+ * Reallocates the passed in ref_t to the requested size, returning a ref_t to
  * that location in memory to the caller
  *
  * context_t ctx: Slab context the allocation is made in
- * __ref oldref: Reference in which we would like to reallocate
+ * ref_t oldref: Reference in which we would like to reallocate
  * size_t size: The new size we would like for oldref
  */
-__ref rsrealloc( context_t ctx, __ref oldref, size_t size )
+ref_t rsrealloc( context_t ctx, ref_t oldref, size_t size )
 {
     slab_header * header = NULL;
 
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
-        return get_null_ref();
+        return NULLREF;
 
     if( size % header->object_size != 0 )
-        return get_null_ref();
+        return NULLREF;
 
     return _shrealloc( header, oldref, size / header->object_size );
 }
 
 /*
- * __ref rscalloc_object_count( context_t, uint64_t )
+ * ref_t rscalloc_object_count( context_t, uint64_t )
  *
  * Shared memory equivilent of calloc(). Instead of taking a
  * size_t (bytes) argument, this takes the number of object we
@@ -490,20 +588,20 @@ __ref rsrealloc( context_t ctx, __ref oldref, size_t size )
  *  context_t ctx: Slab context the allocation is made in
  *  uint64_t count: The number of objects requested.
  */
-__ref rscalloc_object_count( context_t ctx, uint64_t count )
+ref_t rscalloc_object_count( context_t ctx, uint64_t count )
 {
     slab_header * header = NULL;
 
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
-        return get_null_ref();
+        return NULLREF;
 
     return _shmalloc( header, count * header->object_size, true );
 }
 
 /*
- * __ref rsmalloc_object_count( context_t, uint64_t )
+ * ref_t rsmalloc_object_count( context_t, uint64_t )
  *
  * Shared memory equivilent of malloc(). Instead of taking a
  * size_t (bytes) argument, this takes the number of objects we
@@ -513,38 +611,38 @@ __ref rscalloc_object_count( context_t ctx, uint64_t count )
  * uint64_t count: The number of objects requested.
  *
  */
-__ref rsmalloc_object_count( context_t ctx, uint64_t count )
+ref_t rsmalloc_object_count( context_t ctx, uint64_t count )
 {
     slab_header * header = NULL;
 
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
-        return get_null_ref();
+        return NULLREF;
 
     return _shmalloc( header, count * header->object_size, false );
 }
 
 /*
- * __ref rsrealloc_object_count( context_t, __ref, uint64_t )
+ * ref_t rsrealloc_object_count( context_t, ref_t, uint64_t )
  *
  * Shared memory equivilent of realloc(). Instead of taking a
  * size_t (bytes) argument, this takes the number of objects we
- * want the reallocated __ref to contain.
+ * want the reallocated ref_t to contain.
  *
  * context_t ctx: Slab context the allocation is made in
- * __ref oldref: Reference to the memory area we want to reallocate
- * uint64_t count: Number of objects the reallocated __ref should hold
+ * ref_t oldref: Reference to the memory area we want to reallocate
+ * uint64_t count: Number of objects the reallocated ref_t should hold
  *
  */
-__ref rsrealloc_object_count( context_t ctx, __ref oldref, uint64_t count )
+ref_t rsrealloc_object_count( context_t ctx, ref_t oldref, uint64_t count )
 {
     slab_header * header = NULL;
 
     header = _get_header_by_context( ctx );
 
     if( unlikely( header == NULL ) )
-        return get_null_ref();
+        return NULLREF;
 
     return _shrealloc( header, oldref, count );
 }
@@ -558,7 +656,8 @@ void * scalloc_object_count( context_t ctx, uint64_t count )
     if( unlikely( header == NULL ) )
         return NULL;
 
-    return get_ptr_fast(
+    return _to_ptr(
+        header,
         _shmalloc( header, count * header->object_size, true )
     );
 }
@@ -572,7 +671,8 @@ void * smalloc_object_count( context_t ctx, uint64_t count )
     if( unlikely( header == NULL ) )
         return NULL;
 
-    return get_ptr_fast(
+    return _to_ptr(
+        header,
         _shmalloc( header, count * header->object_size, false )
     );
 }
@@ -586,8 +686,9 @@ void * srealloc_object_count( context_t ctx, void * oldptr, uint64_t count )
     if( unlikely( header == NULL ) )
         return NULL;
 
-    return get_ptr_fast(
-        _shrealloc( header, get_ref( oldptr ), count )
+    return _to_ptr(
+        header,
+        _shrealloc( header, _to_ref( header, oldptr ), count )
     );
 }
 
@@ -600,7 +701,8 @@ void * scalloc( context_t ctx, size_t size, uint64_t count )
     if( unlikely( header == NULL ) )
         return NULL;
 
-    return get_ptr_fast(
+    return _to_ptr(
+        header,
         _shmalloc( header, size, true )
     );
 }
@@ -614,7 +716,8 @@ void * smalloc( context_t ctx, size_t size )
     if( unlikely( header == NULL ) )
         return NULL;
 
-    return get_ptr_fast(
+    return _to_ptr(
+        header,
         _shmalloc( header, size, false )
     );
 }
@@ -631,13 +734,14 @@ void * srealloc( context_t ctx, void * oldptr, size_t size )
     if( size % header->object_size != 0 )
         return NULL;
 
-    return get_ptr_fast(
-        _shrealloc( header, get_ref( oldptr ), size / header->object_size )
+    return _to_ptr(
+        header,
+        _shrealloc( header, _to_ref( header, oldptr ), size / header->object_size )
     );
 }
 
 /*
- * __shrealloc_internal( slab_header *, uint64_t )
+ * __realloc_internal( slab_header *, uint64_t )
  *     slab_header *: Reference to the header for the segment in which we want
  *                    to resize
  *     uint64_t:      The number of objects desired for the new segment
@@ -647,7 +751,7 @@ void * srealloc( context_t ctx, void * oldptr, size_t size )
  * lives in, we use that to perform the resize. This is passed onto the
  * underlying shm functions
  */
-static INLINE bool __shrealloc_internal(
+static INLINE bool _realloc_internal(
     slab_header * header,
     uint64_t      new_size
 )
@@ -666,7 +770,7 @@ static INLINE bool __shrealloc_internal(
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "___shrealloc_internal: Invalid header"
+            "__realloc_internal: Invalid header"
         );
         return false;
     }
@@ -675,7 +779,7 @@ static INLINE bool __shrealloc_internal(
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "__shrealloc_internal: Expected locked header as input"
+            "_realloc_internal: Expected locked header as input"
         );
         return false;
     }
@@ -706,7 +810,7 @@ static INLINE bool __shrealloc_internal(
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_shrealloc_internal: Failed to resize segment"
+            "realloc_internal: Failed to resize segment"
         );
         return false;
     }
@@ -715,7 +819,7 @@ static INLINE bool __shrealloc_internal(
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_shrealloc_internal: Failed to validate segment header post-resize"
+            "realloc_internal: Failed to validate segment header post-resize"
         );
         return false;
     }
@@ -765,16 +869,17 @@ static INLINE bool __shrealloc_internal(
 
     // XXX
     // Check if we need to scale the allocset
-    if( header->allocset.max_allocset <= header->max_allocations )
+    if( header->allocset.used >= header->allocset.max_allocset )
     {
         // Extend allocset
-        size_needed = header->max_allocations * sizeof( allocset_item_t );
+        size_needed = header->allocset.max_allocset
+                    + ( ALLOCSET_DEFAULT_ALLOC_BLOCK * sizeof( allocset_item_t ) );
 
         if( !shm_resize_segment( ref_get_segment( header->allocset.set ), size_needed ) )
         {
             _slab_log(
                 LL_SLAB_ERROR,
-                "_shrealloc_internal: Failed to resize allocset segment"
+                "realloc_internal: Failed to resize allocset segment"
             );
             return false;
         }
@@ -893,7 +998,7 @@ static INLINE bool _ref_get_index_and_size(
     return true;
 }
 
-void rsfree( context_t ctx, __ref ref )
+void rsfree( context_t ctx, ref_t ref )
 {
     slab_header * header = NULL;
 
@@ -908,21 +1013,23 @@ void rsfree( context_t ctx, __ref ref )
 void sfree( context_t ctx, void * ptr )
 {
     slab_header * header = NULL;
-    __ref            ref    = {0};
+    ref_t         ref = NULLREF;
 
-    ref    = get_ref( ptr );
     header = get_header_by_context( ctx );
 
     if( header == NULL )
         return;
 
+    ref = _to_ref( header, ptr );
+
     return _shfree( header, ref, false );
 }
 
-static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
+static INLINE void _shfree( slab_header * header, ref_t pointer, bool nolock )
 {
-    uint64_t         index  = 0;
-    uint64_t         size   = 0;
+    uint64_t          index   = 0;
+    uint64_t          size    = 0;
+    allocset_item_t * item    = NULL;
 
     if( unlikely( header == NULL ) )
     {
@@ -933,7 +1040,7 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
         return;
     }
 
-    if( unlikely( ref_is_null( pointer ) ) )
+    if( unlikely( pointer == NULLREF ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
@@ -942,62 +1049,43 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
         return;
     }
 
-    if( unlikely( !_ref_get_index_and_size( header, pointer, &index, &size ) ) )
+    if( unlikely( pointer >= header->allocset.max_allocset ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_shfree: Failed to find allocation info for __ref"
+            "_shfree: pointer out of bounds"
         );
         return;
     }
 
-    if( !_get_fsm_element_by_index( header, index ) )
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        get_ptr( header->allocset.set ),
+        ( sizeof( allocset_item_t ) * pointer )
+    );
+
+    if( unlikely( item == NULL ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_shfree: Provided reference is not allocated (got index %lu)",
-            ( uint64_t) index
+            "_shfree: Failed to locate allocset item"
         );
         return;
     }
 
-    size = _get_allocset_element_by_index( header, index );
+    index = item->index;
+    size  = item->size;
 
-    if( unlikely( size == ULONG_MAX ) )
+    if( unlikely( !__free_by_index( header, index, size, nolock ) ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_shfree: allocset[%lu] invalid",
-            ( uint64_t ) index
+            "Failed to free_by_index %lu, size %zu",
+            ( uint64_t ) index,
+            ( size_t ) size
         );
         return;
     }
 
-    if( unlikely( size == 0 ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_shfree: Cannot free 0-sized element"
-        );
-        return;
-    }
-
-    if( unlikely( !nolock ) )
-    {
-        if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
-        {
-            _slab_log(
-                LL_SLAB_ERROR,
-                "_shfree: Unable to obtain lock on header"
-            );
-            return;
-        }
-    }
-
-    if( size > 1 )
-        _clear_fsm_elements_by_range( header, index, index + size );
-    else
-        _clear_fsm_element_by_index( header, index );
 
     if( !_clear_allocset_item_by_index( header, index ) )
     {
@@ -1009,8 +1097,50 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
         return;
     }
 
-    header->n_allocs -= size;
+    header->allocset.used--;
 
+    return;
+}
+
+static INLINE bool __free_by_index( slab_header * header, uint64_t index, size_t size, bool nolock )
+{
+    if( !_get_fsm_element_by_index( header, index ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "__free_by_index: Provided reference is not allocated (got index %lu)",
+            ( uint64_t) index
+        );
+        return false;
+    }
+
+    if( unlikely( size == 0 ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "__free_by_index: Cannot free 0-sized element"
+        );
+        return false;
+    }
+
+    if( unlikely( !nolock ) )
+    {
+        if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "__free_by_index: Unable to obtain lock on header"
+            );
+            return false;
+        }
+    }
+
+    if( size > 1 )
+        _clear_fsm_elements_by_range( header, index, index + size );
+    else
+        _clear_fsm_element_by_index( header, index );
+
+    header->n_allocs -= size;
     if( unlikely( !nolock ) )
         __C_MUTEX( &(header->locked) );
 
@@ -1018,34 +1148,42 @@ static INLINE void _shfree( slab_header * header, __ref pointer, bool nolock )
     _slab_log( LL_SLAB_DEBUG, "FSM after free:" );
     _print_fsm( header );
     #endif // SLAB_FSM_DEBUG
-    return;
+    return true;
 }
 
-static INLINE __ref _shrealloc(
+static INLINE ref_t _shrealloc(
     slab_header * header,
-    __ref         oldref,
+    ref_t         olduserref,
     uint64_t      count
 )
 {
-    uint64_t bit_position = 0;
-    uint64_t old_size     = 0;
-    uint64_t index        = 0;
-    offset_t offset       = 0;
-    __ref    newref       = {0};
-    void *   new          = NULL;
-    void *   old          = NULL;
+    uint64_t          bit_position = 0;
+    uint64_t          old_size     = 0;
+    uint64_t          index        = 0;
+    void *            new          = NULL;
+    void *            old          = NULL;
+    void *            base         = NULL;
+    allocset_item_t * item         = NULL;
+    allocset_item_t * temp         = NULL;
 
-    if( header == NULL )
-        return get_null_ref();
+    if( unlikely( header == NULL ) )
+        return NULLREF;
 
-    _slab_log( LL_SLAB_DEBUG, "_shrealloc( %p, %lu ) entry", header, count );
+    #ifdef SLAB_DEBUG
+    _slab_log(
+        LL_SLAB_DEBUG,
+        "_shrealloc( %p, %lu ) entry",
+        header,
+        ( uint64_t ) count
+    );
+    #endif // SLAB_DEBUG
     if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
             "_shrealloc: Failed to obtain header lock."
         );
-        return get_null_ref();
+        return NULLREF;
     }
 
     if( unlikely( count > UINT_MAX ) )
@@ -1057,13 +1195,49 @@ static INLINE __ref _shrealloc(
             "_shrealloc: need resize of type for allocset[]!"
         );
         __C_MUTEX( &(header->locked) );
-        return get_null_ref();
+        return NULLREF;
     }
 
-    offset   = ref_get_offset( oldref );
-    old      = get_ptr_fast( oldref );
-    index    = ( offset / header->object_size ) - 1;
-    old_size = _get_allocset_element_by_index( header, index );
+
+    if( unlikely( olduserref == NULLREF ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_shrealloc: Passed ref is NULL"
+        );
+        __C_MUTEX( &(header->locked) );
+        return NULLREF;
+    }
+
+    if( unlikely( olduserref >= header->allocset.max_allocset ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_shrealloc: Passed ref is out of bounds"
+        );
+        __C_MUTEX( &(header->locked) );
+        return NULLREF;
+    }
+
+    base = get_ptr( header->allocset.set );
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        base,
+        ( sizeof( allocset_item_t ) * ( uint64_t ) olduserref )
+    );
+
+    if( unlikely( item == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_shrealloc: Failed to get allocset item"
+        );
+        __C_MUTEX( &(header->locked) );
+        return NULLREF;
+    }
+
+    index    = item->index;
+    old_size = item->size;
+    old      = get_ptr( item->issued_ref );
 
     #ifdef SLAB_DEBUG
     _slab_log(
@@ -1077,13 +1251,12 @@ static INLINE __ref _shrealloc(
     if( unlikely( count == old_size ) )
     {
         __C_MUTEX( &(header->locked) );
-        return oldref;
+        return olduserref;
     }
 
     if( unlikely( count < old_size ) )
     {
         // Set allocset size to new size, shrink the FSM mask and return
-        newref = oldref;
 
         if( unlikely( !_clear_allocset_item_by_index( header, index ) ) )
         {
@@ -1093,33 +1266,33 @@ static INLINE __ref _shrealloc(
                 ( uint64_t ) index
             );
             __C_MUTEX( &(header->locked) );
-            return get_null_ref();
+            return NULLREF;
         }
 
-        if( unlikely( !_set_allocset_item_by_index( header, index, newref, count ) ) )
-        {
-            _slab_log(
-                LL_SLAB_ERROR,
-                "_shrealloc: Failed to setup allocset for index %lu",
-                ( uint64_t ) index
-            );
-            __C_MUTEX( &(header->locked) );
-            return get_null_ref();
-        }
-
+        item->size = count;
         _clear_fsm_elements_by_range( header, index, index + old_size );
         _set_fsm_elements_by_range( header, index, index + count );
         __C_MUTEX( &(header->locked) );
+
         header->n_allocs = header->n_allocs - old_size + count;
     }
     else
     {
+        // Here we do the whole thing that justifies the existence of ref_t types. We're going to
+        // relocate the memory to a different area, with a new index (not _as_ind_t, but rather new FSM/allocs[] index)
+        // and return the same ref_t to the user. This involves an Indiana Jones'-esque swap behind the scenes
+        // where we need to:
+        // - Update the information in our ref_t (_as_ind_t)'s position
+        // - reorder the linked list - likely moving our node down a few spots (but not guaranteed).
+        // - perform sanity checks.
+        // This is the ~~only~~ place we need to do this type of work, so the logic that was previously in _set_allocset_item_by_index
+        // will be placed here as some specialized work needs to be done
         errno = 0;
-        bit_position = _get_fsm_slot_by_width( header, count );
-
+        bit_position = _get_fsm_slot_by_width( header, count, false );
+        _slab_log( LL_SLAB_DEBUG, "INPLACE REALLOCATION OF %lu GOT INDEX %lu", ( uint64_t ) olduserref, ( uint64_t ) bit_position );
         if( bit_position == ULONG_MAX || errno == ENOSPC )
         {
-            if( unlikely( !__shrealloc_internal( header, count ) ) )
+            if( unlikely( !_realloc_internal( header, count ) ) )
             {
                 _slab_log(
                     LL_SLAB_ERROR,
@@ -1127,10 +1300,21 @@ static INLINE __ref _shrealloc(
                 );
                 errno = ENOSPC;
                 __C_MUTEX( &(header->locked) );
-                return get_null_ref();
+                return NULLREF;
             }
 
-            bit_position = _get_fsm_slot_by_width( header, count );
+            // Item /may/ have moved here! - get new ptr
+            if( unlikely( base != get_ptr( header->allocset.set ) ) )
+            {
+                base = get_ptr_fast( header->allocset.set );
+                item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+                    base,
+                    ( sizeof( allocset_item_t ) * olduserref )
+                );
+                __FENCE();
+            }
+
+            bit_position = _get_fsm_slot_by_width( header, count, false );
 
             if( unlikely( bit_position == ULONG_MAX ) )
             {
@@ -1141,62 +1325,141 @@ static INLINE __ref _shrealloc(
 
                 errno = ENOSPC;
                 __C_MUTEX( &(header->locked) );
-                return get_null_ref();
+                return NULLREF;
             }
         }
 
-        newref = _get_alloc_element_by_index( header, bit_position );
+        // We're at a position now where the underlying index into the alloc/fsm
+        // has changed from index->bit_posititon. We'll need to fixup the allocset
+        // linkedlist
+        item->index      = bit_position;
+        item->issued_ref = _get_alloc_element_by_index( header, bit_position );
+        new              = get_ptr( item->issued_ref );
+        item->size       = count;
         header->n_allocs += count; // _shfree will decrement the old allocation
 
-        new = get_ptr_fast( newref );
+        if( unlikely( new == NULL ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Newly reallocated reference is NULL for index %lu",
+                ( uint64_t ) bit_position
+            );
+            return NULLREF;
+        }
+
+        if( item->last != ALLOCSET_ITEM_INVALID )
+        {
+            temp = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+                base,
+                ( sizeof( allocset_item_t ) * ( uint64_t ) item->last )
+            );
+
+            temp->next = item->next;
+        }
+        else
+        {
+            // We're removing the head
+            if( item->next != ALLOCSET_ITEM_INVALID )
+            {
+                header->allocset.head = item->next;
+            }
+            else
+            {
+                header->allocset.head = ALLOCSET_ITEM_INVALID;
+                header->allocset.tail = ALLOCSET_ITEM_INVALID;
+            }
+        }
+
+        if( item->next != ALLOCSET_ITEM_INVALID )
+        {
+            temp = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+                base,
+                ( sizeof( allocset_item_t ) * ( uint64_t ) item->next )
+            );
+
+            temp->last = item->last;
+        }
+        else
+        {
+            // We're removing the tail
+            if( item->last != ALLOCSET_ITEM_INVALID )
+            {
+                header->allocset.tail = item->last;
+            }
+            else
+            {
+                header->allocset.head = ALLOCSET_ITEM_INVALID;
+                header->allocset.tail = ALLOCSET_ITEM_INVALID;
+            }
+        }
+
+        // We've detached item from the linked list, now we need to find its new home
+        if(
+               ( header->allocset.head == ALLOCSET_ITEM_INVALID )
+            && ( header->allocset.tail == ALLOCSET_ITEM_INVALID )
+          )
+        {
+            header->allocset.head = olduserref;
+            header->allocset.tail = olduserref;
+        }
+        else
+        {
+            if(
+                !_set_allocset_item_by_index(
+                    header,
+                    bit_position,
+                    item->issued_ref,
+                    count,
+                    olduserref
+                )
+              )
+            {
+                _slab_log(
+                    LL_SLAB_ERROR,
+                    "_shrealloc: Failed to reorder linked list"
+                );
+                __C_MUTEX( &(header->locked) );
+                return NULLREF;
+            }
+        }
+
         memcpy(
             new,
             old,
             old_size * header->object_size
         );
 
-        if( unlikely( !_clear_allocset_item_by_index( header, bit_position ) ) )
+        if( unlikely( !__free_by_index( header, index, old_size, true ) ) )
         {
             _slab_log(
                 LL_SLAB_ERROR,
-                "_shrealloc: Failed to clear old allocset item at index %lu",
-                ( uint64_t ) bit_position
+                "_shrealloc: Free failed"
             );
-            __C_MUTEX( &(header->locked) );
-            return get_null_ref();
+            return NULLREF;
         }
-
-        if( unlikely( !_set_allocset_item_by_index( header, bit_position, newref, count ) ) )
-        {
-            _slab_log(
-                LL_SLAB_ERROR,
-                "_shrealloc: Failed to setup new allocset item at index %lu",
-                ( uint64_t ) bit_position
-            );
-            __C_MUTEX( &(header->locked) );
-            return get_null_ref();
-        }
-
-        _shfree( header, oldref, true );
         __C_MUTEX( &(header->locked) );
+        __FENCE();
+
     }
 
-    return newref;
+    return olduserref;
 }
 
-static INLINE __ref _shmalloc(
+static INLINE ref_t _shmalloc(
     slab_header * header,
-    size_t           size,
-    bool             zero_fill
+    size_t        size,
+    bool          zero_fill
 )
 {
     __ref    retref      = {0};
+    ref_t    userref     = NULLREF;
     uint64_t num_objects = 0;
     uint64_t index       = 0;
     void *   ptr         = NULL;
 
     if( header == NULL )
-        return get_null_ref();
+        return NULLREF;
 
     num_objects = size / header->object_size;
 
@@ -1219,7 +1482,7 @@ static INLINE __ref _shmalloc(
             ( uint64_t ) size,
             ( uint64_t ) header->object_size
         );
-        return get_null_ref();
+        return NULLREF;
     }
 
     // Check to see if this context has ever been allocated.
@@ -1242,7 +1505,7 @@ static INLINE __ref _shmalloc(
                 LL_SLAB_ERROR,
                 "Attempt to allocate to uninitialized segment"
             );
-            return get_null_ref();
+            return NULLREF;
         }
     }
 
@@ -1252,20 +1515,20 @@ static INLINE __ref _shmalloc(
             LL_SLAB_ERROR,
             "Failed to acquire segment lock"
         );
-        return get_null_ref();
+        return NULLREF;
     }
 
     // Layout & usage of free list:
     // [ front - single allocs ..... contiguous allocs - rear ]
     if( num_objects >= ( header->max_allocations - header->n_allocs ) )
     {
-        if( unlikely( !__shrealloc_internal( header, num_objects ) ) )
+        if( unlikely( !_realloc_internal( header, num_objects ) ) )
         {
             _slab_log(
                 LL_SLAB_ERROR,
                 "Failed to reallocate segment"
             );
-            return get_null_ref();
+            return NULLREF;
         }
     }
 
@@ -1273,16 +1536,16 @@ static INLINE __ref _shmalloc(
     {
         // XXX Need to implement usage of i_rear_fsm_word index
         errno = 0;
-        index = _get_fsm_slot_by_width( header, num_objects );
+        index = _get_fsm_slot_by_width( header, num_objects, true );
 
         if( unlikely( errno == ENOSPC ) ) // Need to reallocate
         {
             errno = 0;
 
-            if( unlikely( !__shrealloc_internal( header, num_objects ) ) )
-                return get_null_ref();
+            if( unlikely( !_realloc_internal( header, num_objects ) ) )
+                return NULLREF;
 
-            index = _get_fsm_slot_by_width( header, num_objects );
+            index = _get_fsm_slot_by_width( header, num_objects, true );
 
             if( errno == ENOSPC )
             {
@@ -1290,11 +1553,12 @@ static INLINE __ref _shmalloc(
                     LL_SLAB_ERROR,
                     "Failed to allocate to segment after extension"
                 );
-                return get_null_ref();
+                return NULLREF;
             }
         }
 
         retref = _get_alloc_element_by_index( header, index );
+        userref = _get_allocset_item_by_index( header, index );
         #ifdef SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
@@ -1342,7 +1606,7 @@ static INLINE __ref _shmalloc(
         }
 
         // Mark allocation size
-        if( !_set_allocset_item_by_index( header, index, retref, 1 ) )
+        if( !_set_allocset_item_by_index( header, index, retref, 1, ALLOCSET_ITEM_INVALID ) )
         {
             _slab_log(
                 LL_SLAB_ERROR,
@@ -1351,6 +1615,8 @@ static INLINE __ref _shmalloc(
             );
             return get_null_ref();
         }
+
+        userref = _get_allocset_item_by_index( header, index );
     }
 
     if( zero_fill == true )
@@ -1374,7 +1640,7 @@ static INLINE __ref _shmalloc(
 
     __C_MUTEX( &(header->locked) );
 
-    return retref;
+    return userref;
 }
 
 static INLINE __ref _get_alloc_element_by_index(
@@ -1838,7 +2104,8 @@ static INLINE bool _get_fsm_element_by_index(
 
 static INLINE uint64_t _get_fsm_slot_by_width(
     slab_header * header,
-    uint64_t      width
+    uint64_t      width,
+    bool          set_allocset
 )
 {
     uint64_t bit_position = 0;
@@ -1863,23 +2130,26 @@ static INLINE uint64_t _get_fsm_slot_by_width(
 
     // We need to track how large the allocation is for
     // purposes of freeing later
-    if(
-        !_set_allocset_item_by_index(
-            header,
-            bit_position,
-            _get_alloc_element_by_index( header, bit_position ),
-            width
-        )
-      )
+    if( set_allocset )
     {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_get_fsm_slot_by_width: failed to set allocset"
-        );
-        errno = EINVAL;
-        return 0;
+        if(
+            !_set_allocset_item_by_index(
+                header,
+                bit_position,
+                _get_alloc_element_by_index( header, bit_position ),
+                width,
+                ALLOCSET_ITEM_INVALID
+            )
+          )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_get_fsm_slot_by_width: failed to set allocset"
+            );
+            errno = EINVAL;
+            return 0;
+        }
     }
-
     #ifdef SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
@@ -2213,8 +2483,7 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
     if( initial_size == 0 )
         initial_size = 1;
 
-    initial_size = initial_size * unit_size + sizeof( canary_t ) * 3;
-
+    initial_size   = initial_size * unit_size + sizeof( canary_t ) * 3;
     mapped_address = new_segment( initial_size );
 
     if( mapped_address == NULL )
@@ -2228,19 +2497,23 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
     header->max_allocations = ( available / unit_size )
                             * CHAR_BIT * sizeof( fsm_t );
 
-    allocset = new_segment( header->max_allocations * sizeof( allocset_item_t ) );
-
+    allocset = new_segment( ALLOCSET_DEFAULT_ALLOC_BLOCK * sizeof( allocset_item_t ) );
     header->allocset.set          = get_ref( allocset );
     header->allocset.max_allocset = get_segment_size( ref_get_segment( header->allocset.set ) )
-                                  / sizeof( uint32_t );
-    header->allocset.used   = ( _as_ind_t ) 0;
-    header->allocset.head   = ( _as_ind_t ) ALLOCSET_ITEM_INVALID;
-    header->allocset.tail   = ( _as_ind_t ) ALLOCSET_ITEM_INVALID;
-    header->n_allocs        = 0;
-    header->c_allocstart    = ( canary_t ) _get_random();
-    header->c_fsmstart      = ( canary_t ) _get_random();
-    header->c_fsmend        = ( canary_t ) _get_random();
-
+                                  / sizeof( allocset_item_t );
+    header->allocset.used = ( _as_ind_t ) 0;
+    header->allocset.head = ( _as_ind_t ) ALLOCSET_ITEM_INVALID;
+    header->allocset.tail = ( _as_ind_t ) ALLOCSET_ITEM_INVALID;
+    header->n_allocs      = 0;
+    header->c_allocstart  = ( canary_t ) _get_random();
+    header->c_fsmstart    = ( canary_t ) _get_random();
+    header->c_fsmend      = ( canary_t ) _get_random();
+    _slab_log(
+        LL_SLAB_DEBUG,
+        "Initialized allocset at segment %lu, max_allocset %lu",
+        ( uint64_t ) ref_get_segment( header->allocset.set ),
+        ( uint64_t ) header->allocset.max_allocset
+    );
     // Layout setup - we'll calculate locally for readability,
     // then convert to __ref
     c_allocstart = mapped_address;
@@ -2384,7 +2657,7 @@ static INLINE bool _clear_allocset_item_by_index( slab_header * header, uint64_t
         return false;
     }
 
-    base = get_ptr_fast( header->allocset.set );
+    base = get_ptr( header->allocset.set );
 
     if( unlikely( base == NULL ) )
     {
@@ -2508,7 +2781,8 @@ static INLINE bool _set_allocset_item_by_index(
     slab_header * header,
     uint64_t      index,
     __ref         issued_ref,
-    size_t        size
+    size_t        size,
+    _as_ind_t     useind
 )
 {
     _as_ind_t         nextind = 0;
@@ -2519,6 +2793,17 @@ static INLINE bool _set_allocset_item_by_index(
     allocset_item_t * new     = NULL;
     allocset_item_t * prev    = NULL;
 
+    #ifdef SLAB_DEBUG
+    _slab_log(
+        LL_SLAB_DEBUG,
+        "_set_allocset_item_by_index( %p, %lu, __ref, %zu, %lu ) entry",
+        header,
+        ( uint64_t ) index,
+        ( size_t ) size,
+        ( uint64_t ) useind
+    );
+    #endif // SLAB_DEBUG
+
     if( unlikely( header == NULL ) )
     {
         _slab_log(
@@ -2528,7 +2813,7 @@ static INLINE bool _set_allocset_item_by_index(
         return false;
     }
 
-    base = get_ptr_fast( header->allocset.set );
+    base = get_ptr( header->allocset.set );
 
     if( unlikely( base == NULL ) )
     {
@@ -2539,38 +2824,76 @@ static INLINE bool _set_allocset_item_by_index(
         return false;
     }
 
-    // Insertion case
-    newind = _get_available_allocset_item( header );
-
-    if( unlikely( !__TNS_MUTEX( &(header->allocset.locked) ) ) )
+    if( useind == ALLOCSET_ITEM_INVALID )
     {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_set_allocset_item_by_index: Failed to get header lock"
-        );
-        return false;
-    }
+        _slab_log( LL_SLAB_DEBUG, "Handling insertion case of index %lu, size %zu", ( uint64_t ) index, ( size_t ) size );
+        // Insertion case
+        newind = _get_available_allocset_item( header );
 
-    if( newind == ALLOCSET_ITEM_INVALID )
+        if( unlikely( !__TNS_MUTEX( &(header->allocset.locked) ) ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_set_allocset_item_by_index: Failed to get header lock"
+            );
+            return false;
+        }
+
+        if( newind == ALLOCSET_ITEM_INVALID )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_set_allocset_item_by_index: No available slots in allocset"
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        new = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( sizeof( allocset_item_t ) * ( uint64_t ) newind )
+        );
+
+        new->size       = size;
+        new->index      = index;
+        new->issued_ref = issued_ref;
+        new->last       = ALLOCSET_ITEM_INVALID;
+        new->next       = ALLOCSET_ITEM_INVALID;
+    }
+    else
     {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_set_allocset_item_by_index: No available slots in allocset"
+        if( unlikely( useind >= header->allocset.max_allocset ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_set_allocset_item_by_index: provided reuse-index %lu is out of bounds",
+                ( uint64_t ) useind
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        newind = useind;
+        new = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+            base,
+            ( sizeof( allocset_item_t ) * ( uint64_t ) newind )
         );
-        __C_MUTEX( &(header->allocset.locked) );
-        return false;
+
+        if( unlikely( new == NULL ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "_set_allocset_item_by_index: Recycled allocset node %lu dereferenced to NULL",
+                ( uint64_t ) newind
+            );
+            __C_MUTEX( &(header->allocset.locked) );
+            return false;
+        }
+
+        // Later part of the insertion routine relies on these being /NULL/
+        new->last = ALLOCSET_ITEM_INVALID;
+        new->next = ALLOCSET_ITEM_INVALID;
     }
-
-    new = ( allocset_item_t * ) _PTR_ADD_OFFSET(
-        base,
-        ( sizeof( allocset_item_t ) * ( uint64_t ) newind )
-    );
-
-    new->size       = size;
-    new->index      = index;
-    new->issued_ref = issued_ref;
-    new->last       = ALLOCSET_ITEM_INVALID;
-    new->next       = ALLOCSET_ITEM_INVALID;
 
     if( unlikely( header->allocset.head == ALLOCSET_ITEM_INVALID ) )
     {
@@ -2616,8 +2939,9 @@ static INLINE bool _set_allocset_item_by_index(
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "_set_allocset_item_by_index: INDEX COLLISION at %lu at head of allocset",
-            ( uint64_t ) index
+            "_set_allocset_item_by_index: INDEX COLLISION at %lu at head of allocset, head size is %zu",
+            ( uint64_t ) index,
+            ( size_t ) next->size
         );
         __C_MUTEX( &(header->allocset.locked) );
         return false;
@@ -2658,9 +2982,10 @@ static INLINE bool _set_allocset_item_by_index(
         {
             _slab_log(
                 LL_SLAB_ERROR,
-                "_set_allocset_item_by_index: INDEX COLLISION at %lu at AS IND %lu",
+                "_set_allocset_item_by_index: INDEX COLLISION at %lu at AS IND %lu, collided size is %zu",
                 ( uint64_t ) index,
-                ( uint64_t ) nextind
+                ( uint64_t ) nextind,
+                ( size_t ) next->size
             );
             __C_MUTEX( &(header->allocset.locked) );
             return false;
@@ -2729,7 +3054,7 @@ static INLINE _as_ind_t _get_available_allocset_item( slab_header * header )
         return ALLOCSET_ITEM_INVALID;
     }
 
-    base = get_ptr_fast( header->allocset.set );
+    base = get_ptr( header->allocset.set );
 
     if( unlikely( base == NULL ) )
     {
@@ -2798,15 +3123,6 @@ static INLINE _as_ind_t _get_allocset_item_by_index(
         return ALLOCSET_ITEM_INVALID;
     }
 
-    if( unlikely( index > header->allocset.max_allocset ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_get_allocset_item_by_index: index is out-of-bounds"
-        );
-        return ALLOCSET_ITEM_INVALID;
-    }
-
     if( !__TNS_MUTEX( &(header->allocset.locked) ) )
     {
         _slab_log(
@@ -2816,7 +3132,7 @@ static INLINE _as_ind_t _get_allocset_item_by_index(
         return ALLOCSET_ITEM_INVALID;
     }
 
-    base = get_ptr_fast( header->allocset.set );
+    base = get_ptr( header->allocset.set );
 
     if( header->allocset.head == ALLOCSET_ITEM_INVALID )
     { // Uninitialized
@@ -2915,7 +3231,7 @@ static INLINE size_t _get_allocset_element_by_index(
         return ULONG_MAX;
 
     item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
-        get_ptr_fast( header->allocset.set ),
+        get_ptr( header->allocset.set ),
         ( sizeof( allocset_item_t ) * allocset_index )
     );
 
@@ -3136,7 +3452,7 @@ static INLINE bool check_context( context_t ctx )
     return true;
 }
 
-__ref move_to_shared( context_t ctx, void ** pointer, size_t size )
+ref_t move_to_shared( context_t ctx, void ** pointer, size_t size )
 {
     slab_header * header = NULL;
 
@@ -3145,21 +3461,21 @@ __ref move_to_shared( context_t ctx, void ** pointer, size_t size )
     return _move_to_shared( header, pointer, size, true );
 }
 
-static INLINE __ref _move_to_shared(
+static INLINE ref_t _move_to_shared(
     slab_header * header,
     void **       pointer,
     size_t        size,
     bool          do_free
 )
 {
-    void * target = NULL;
-    __ref  retref = {0};
-
+    void * target  = NULL;
+    __ref  retref  = {0};
+    ref_t  userref = NULLREF;
     retref = get_null_ref();
     // We're trusting the user to have set a correct object size
     // - we can only do cursory checks
     if( unlikely( pointer == NULL || *pointer == NULL ) )
-        return retref;
+        return NULLREF;
 
     if( unlikely( header == NULL ) )
     {
@@ -3167,7 +3483,7 @@ static INLINE __ref _move_to_shared(
             LL_SLAB_ERROR,
             "move_to_shared: Invalid context."
         );
-        return retref;
+        return NULLREF;
     }
 
     if( unlikely( ( size % header->object_size ) != 0 ) )
@@ -3179,7 +3495,7 @@ static INLINE __ref _move_to_shared(
             size,
             ( uint64_t ) header->object_size
         );
-        return retref;
+        return NULLREF;
     }
 
     if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
@@ -3188,19 +3504,19 @@ static INLINE __ref _move_to_shared(
             LL_SLAB_ERROR,
             "move_to_shared: Failed to obtain header lock"
         );
-        return retref;
+        return NULLREF;
     }
 
-    retref = _shmalloc( header, size, false );
-    target = get_ptr_fast( retref );
+    userref = _shmalloc( header, size, false );
+    target = _to_ptr( header, userref );
 
-    if( unlikely( ref_is_null( retref ) || target == NULL ) )
+    if( unlikely( userref == NULLREF || target == NULL ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
             "move_to_shared: Failed to allocate shared memory"
         );
-        return retref;
+        return NULLREF;
     }
 
     memcpy(
@@ -3218,7 +3534,7 @@ static INLINE __ref _move_to_shared(
     return retref;
 }
 
-void * move_to_local( context_t ctx, __ref * ref )
+void * move_to_local( context_t ctx, ref_t * ref )
 {
     slab_header * header = NULL;
 
@@ -3228,14 +3544,14 @@ void * move_to_local( context_t ctx, __ref * ref )
 
 static INLINE void * _move_to_local(
     slab_header * header,
-    __ref *       ref,
+    ref_t *       ref,
     bool          do_free
 )
 {
-    void *   target = NULL;
-    void *   source = NULL;
-    size_t   size   = 0;
-    uint64_t index  = 0;
+    void *            target  = NULL;
+    void *            source  = NULL;
+    size_t            size    = 0;
+    allocset_item_t * item    = NULL;
 
     if( unlikely( header == NULL ) )
     {
@@ -3246,6 +3562,12 @@ static INLINE void * _move_to_local(
         return NULL;
     }
 
+    if( unlikely( ref == NULL ) )
+        return NULL;
+
+    if( unlikely( *ref == NULLREF ) )
+        return NULL;
+
     if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
     {
         _slab_log(
@@ -3255,16 +3577,35 @@ static INLINE void * _move_to_local(
         return NULL;
     }
 
-    if( unlikely( !_ref_get_index_and_size( header, *ref, &index, &size ) ) )
+    if( unlikely( !( *ref < header->allocset.used ) ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "move_to_local: Failed to get allocation info for __ref"
+            "move_to_local: ref out of range"
         );
+        __C_MUTEX( &(header->locked) );
         return NULL;
     }
 
-    source = ( void * ) get_ptr_fast( *ref );
+    item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
+        get_ptr( header->allocset.set ),
+        ( sizeof( allocset_item_t ) * ( uint64_t ) *ref )
+    );
+
+    if( unlikely( item == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "move_to_local: Failed to get allocset item for move"
+        );
+        __C_MUTEX( &(header->locked) );
+        return NULL;
+    }
+
+    //index = item->index;
+    size  = item->size;
+
+    source = ( void * ) _to_ptr( header, *ref );
 
     if( unlikely( source == NULL ) )
     {
@@ -3297,7 +3638,7 @@ static INLINE void * _move_to_local(
     if( do_free )
     {
         _shfree( header, *ref, false );
-        *ref = get_null_ref();
+        *ref = NULLREF;
     }
 
     return target;
@@ -3503,7 +3844,7 @@ static void _dump_header( slab_header * header, bool simple )
     {
         fprintf( stdout, "    none\n" );
     }
-/*
+
     fprintf( stdout, "-- ALLOCS[]:\n" );
     for( i = 0; i < header->max_allocations; i++ )
     {
@@ -3545,7 +3886,7 @@ static void _dump_header( slab_header * header, bool simple )
 
         fprintf( stdout, "\n" );
     }
-*/
+
     fprintf( stdout, "==============================\n" );
     return;
 }

@@ -368,6 +368,7 @@ INLINE void * get_ptr( __ref ref )
             return NULL;
         }
 
+        __FENCE();
         mapped_address = __segment_lut[segment].mapped_address;
     }
     #endif // SHM_AUTO_MAP
@@ -380,8 +381,9 @@ INLINE void * get_ptr( __ref ref )
         // Need a remap
         _shm_log(
             LL_SHM_DEBUG,
-            "RESIZE: Segment header size and mapped size do not match."
-            " This segment has been resized and will auto-remap"
+            "RESIZE: Segment header (%lu) size and mapped size do not match."
+            " This segment has been resized and will auto-remap",
+            ( uint64_t ) segment
         );
         if( unlikely( !_shm_remap( segment ) ) )
             return NULL;

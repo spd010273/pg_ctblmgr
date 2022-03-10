@@ -8,25 +8,22 @@
 #include "../src/lib/slab.h"
 #define TEST_SIZE 256
 int main( void );
-static void child_routine( __ref );
+static void child_routine( ref_t );
 
 int main( void )
 {
     context_t  slab = 0;
-    context_t  slab2 = 0;
     canary_t   save_canary = {0};
-    __ref      ref  = get_null_ref();
-    __ref      ref2 = get_null_ref();
-    __ref      ref3 = get_null_ref();
-    __ref      ref4 = get_null_ref();
-    __ref      ref5 = get_null_ref();
-    __ref      ref6 = get_null_ref();
-    __ref      ref7 = get_null_ref();
-    __ref      ref8 = get_null_ref();
-    __ref      ref9 = get_null_ref();
+    ref_t      ref  = NULLREF;
+    ref_t      ref2 = NULLREF;
+    ref_t      ref3 = NULLREF;
+    ref_t      ref4 = NULLREF;
+    ref_t      ref5 = NULLREF;
+    ref_t      ref6 = NULLREF;
+    ref_t      ref7 = NULLREF;
+    ref_t      ref8 = NULLREF;
+    ref_t      ref9 = NULLREF;
 
-    __ref      refref = get_null_ref();
-    __ref *    refptr = NULL;
     pid_t      child = 0;
     uint64_t * ptr  = NULL;
     uint64_t   i    = 0;
@@ -47,15 +44,14 @@ int main( void )
     }
 
     ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
-    dump_context( slab );
 
-    if( ref == get_null_ref() )
+    if( ref == NULLREF )
     {
         fprintf( stderr, "FAILED: Could not allocate shared memory\n" );
         return 1;
     }
 
-    ptr = ( uint64_t * ) get_ptr( ref );
+    ptr = ( uint64_t * ) to_ptr( slab, ref );
 
     if( ptr == NULL )
     {
@@ -65,8 +61,6 @@ int main( void )
 
     for( i = 0; i < TEST_SIZE; i++ )
         ptr[i] = TEST_SIZE - i;
-    
-    //dump_context( slab );
 
     fprintf( stdout, "Write check complete - running canary test\n" );
     // Canary check should pass as we've stayed within allocated bounds
@@ -108,7 +102,7 @@ int main( void )
     }
 
     fprintf( stdout, "Making second allocation...\n" );
-    ptr = ( uint64_t * ) get_ptr( ref2 );
+    ptr = ( uint64_t * ) to_ptr( slab, ref2 );
 
     if( ptr == NULL )
     {
@@ -124,7 +118,7 @@ int main( void )
 
     fprintf( stdout, "Performing readback test on both allocations...\n" );
 
-    ptr = get_ptr( ref );
+    ptr = to_ptr( slab, ref );
     for( i = 0; i < TEST_SIZE; i++ )
     {
         if( ptr[i] != TEST_SIZE - i )
@@ -143,7 +137,7 @@ int main( void )
         }
     }
 
-    ptr = get_ptr( ref2 );
+    ptr = to_ptr( slab, ref2 );
     for( i = 0; i < ( TEST_SIZE * 4 ) + 2; i++ )
     {
         if( ptr[i] != TEST_SIZE + i + 1 )
@@ -164,19 +158,17 @@ int main( void )
 
     fprintf( stdout, "Performing single allocation tests...\n" );
     ref3 = rsmalloc( slab, sizeof( uint64_t ) );
-    //dump_context( slab );
     ref4 = rsmalloc( slab, sizeof( uint64_t ) );
-    //dump_context( slab );
     ref5 = rsmalloc( slab, sizeof( uint64_t ) );
 
     // Write the three prior allocations
-    *( ( uint64_t * ) get_ptr( ref3 ) ) = 0xAAAAAAAAAAAAAAAA;
-    *( ( uint64_t * ) get_ptr( ref4 ) ) = 0xBBBBBBBBBBBBBBBB;
-    *( ( uint64_t * ) get_ptr( ref5 ) ) = 0xCCCCCCCCCCCCCCCC;
+    *( ( uint64_t * ) to_ptr( slab, ref3 ) ) = 0xAAAAAAAAAAAAAAAA;
+    *( ( uint64_t * ) to_ptr( slab, ref4 ) ) = 0xBBBBBBBBBBBBBBBB;
+    *( ( uint64_t * ) to_ptr( slab, ref5 ) ) = 0xCCCCCCCCCCCCCCCC;
 
     fprintf( stdout, "Performing allocations in low space conditions...\n" );
     ref6 = rsmalloc( slab, sizeof( uint64_t ) * 64 );
-    ptr = get_ptr( ref6 );
+    ptr = to_ptr( slab, ref6 );
     if( ptr == NULL )
     {
         fprintf( stderr, "Failed, ref6 pointer is NULL\n" );
@@ -187,7 +179,7 @@ int main( void )
         ptr[i] = 0xDDDDDDDDDDDDDDDD;
 
     ref7 = rsmalloc( slab, sizeof( uint64_t ) * 7 );
-    ptr = get_ptr( ref7 );
+    ptr = to_ptr( slab, ref7 );
 
     if( ptr == NULL )
     {
@@ -201,7 +193,7 @@ int main( void )
     // New test case- making rsmalloc for low space applications
     ref8 = rsmalloc( slab, sizeof( uint64_t ) * 67 );
 
-    ptr = get_ptr( ref8 );
+    ptr = to_ptr( slab, ref8 );
     if( ptr == NULL )
     {
         fprintf( stderr, "Failed, ref8 pointer is NULL\n" );
@@ -216,7 +208,7 @@ int main( void )
     // We're going to ask for the remainder, but this /should/ cause a segment extension
     ref9 = rsmalloc( slab, sizeof( uint64_t ) * 26 );
 
-    ptr = get_ptr( ref9 );
+    ptr = to_ptr( slab, ref9 );
 
     if( ptr == NULL )
     {
@@ -229,7 +221,7 @@ int main( void )
 
     fprintf( stdout, "Testing initial writes after allocation tests...\n" );
     // Repeat of earlier tests, but certifies that the FSM didnt get muddied up
-    ptr = get_ptr( ref );
+    ptr = to_ptr( slab, ref );
     for( i = 0; i < TEST_SIZE; i++ )
     {
         if( ptr[i] != TEST_SIZE - i )
@@ -248,7 +240,7 @@ int main( void )
         }
     }
 
-    ptr = get_ptr( ref2 );
+    ptr = to_ptr( slab, ref2 );
     for( i = 0; i < ( TEST_SIZE * 4 ) + 2; i++ )
     {
         if( ptr[i] != TEST_SIZE + i + 1 )
@@ -272,10 +264,10 @@ int main( void )
     rsfree( slab, ref4 );
     rsfree( slab, ref5 );
     rsfree( slab, ref6 );
-    rsfree( slab, ref7 );
-    fprintf( stdout, "Freeing final element" );
+    // Save ref7 so the linked list has a node in it
+    //rsfree( slab, ref7 );
     rsfree( slab, ref8 );
-    
+
     fprintf( stdout, "Performing first reallocation test (no segment extension)...\n" );
     ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 1024 );
     if( ref_is_null( ref9 ) )
@@ -283,8 +275,9 @@ int main( void )
          fprintf( stderr, "Failed to reallocate.\n" );
          return 1;
     }
-
-    ptr = get_ptr( ref9 );
+    
+    //dump_context( slab );
+    ptr = to_ptr( slab, ref9 );
     if( ptr == NULL )
     {
         fprintf( stderr, "Failed - reallocated pointer is NULL\n" );
@@ -303,7 +296,7 @@ int main( void )
         return 1;
     }
 
-    ptr = get_ptr( ref9 );
+    ptr = to_ptr( slab, ref9 );
 
     if( ptr == NULL )
     {
@@ -333,39 +326,17 @@ int main( void )
         ptr[i] = 42;
 
 
-    fprintf( stdout, "Preparing for SMP test...\n" );
-    fprintf( stdout, "Allocating __ref storage for pass by reference...\n" );
-    slab2 = new_slab( "ref", sizeof( __ref )  );
-    slab_set_count_hint( slab2, 1 );
-    refref = rsmalloc( slab2, sizeof( __ref ) );
-    refptr = ( __ref * ) get_ptr( refref );
-    if( refptr == NULL )
-    {
-        fprintf( stderr, "Failed to setup __ref storage\n" );
-        return 1;
-    }
-
-    *refptr = ref9;
-
     fprintf( stdout, "Beginning SMP test...\n" );
     child = fork();
 
     if( child == 0 )
     {
-        child_routine( refref );
+        child_routine( ref9 );
         exit(0);
     }
 
     wait( NULL );
-    refptr = get_ptr( refref );
-    if( refptr == NULL )
-    {
-        fprintf( stderr, "Failed to dereference __ref *\n" );
-        return 1;
-    }
-
-    ref9 = *refptr;
-    ptr  = get_ptr( ref9 );
+    ptr = to_ptr( slab, ref9 ); // incase of realloc
 
     if( ptr == NULL )
     {
@@ -375,7 +346,7 @@ int main( void )
 
     /*
      * Here's the issue - the allocation gets moved by the child because it's large - but the ref remains absolute as an offset into the page.
-     * We'll need to offset off of that when allocs get relocated, possibly by wrapping get_ptr in slab.c, possibly by allocset index and offset?
+     * We'll need to offset off of that when allocs get relocated, possibly by wrapping to_ptr in slab.c, possibly by allocset index and offset?
      */
     fprintf( stdout, "Parent confirming child baseline writes...\n" );
     for( i = 0; i < 2048; i++ )
@@ -410,34 +381,25 @@ int main( void )
         }
     }
 
-    fprintf( stdout, "Freed all references, forcing canary checks...\n" );
+    fprintf( stdout, "SMP test passed.\nforcing canary checks...\n" );
     if( !force_canary_check( slab ) )
     {
         fprintf( stderr, "TEST slab failed canary check\n" );
         return 1;
     }
-
-    if( !force_canary_check( slab2 ) )
-    {
-        fprintf( stderr, "ref slab failed canary check\n" );
-        return 1;
-    }
-
+    
     fprintf( stdout, "Canary checks passed, destroying slabs...\n" );
     rsfree( slab, ref9 );
-    rsfree( slab2, refref );
+    rsfree( slab, ref7 );
     destroy_slab( slab );
-    destroy_slab( slab2 );
     fprintf( stdout, "Done.\n" );
     return 0;
 }
 
-static void child_routine( __ref refref )
+static void child_routine( ref_t ref )
 {
     context_t  slab   = INVALID_CONTEXT;
     uint64_t * ptr    = NULL;
-    __ref *    refptr = NULL;
-    __ref      ref    = get_null_ref();
     uint64_t   i      = 0;
 
     if( !slab_init() )
@@ -454,22 +416,7 @@ static void child_routine( __ref refref )
         return;
     }
 
-    if( slab == INVALID_CONTEXT )
-    {
-        fprintf( stderr, "Failed - child count not get ref context\n" );
-        return;
-    }
-
-    refptr = get_ptr( refref );
-
-    if( refptr == NULL )
-    {
-        fprintf( stderr, "Failed - child dereferenced NULL double ref\n" );
-        return;
-    }
-
-    ref = *refptr;
-    ptr = get_ptr( ref );
+    ptr = to_ptr( slab, ref );
 
     if( ptr == NULL )
     {
@@ -497,7 +444,7 @@ static void child_routine( __ref refref )
 
     fprintf( stdout, "Child extending slab...\n" );
     ref = rsrealloc( slab, ref, sizeof( uint64_t ) * 4096 );
-    ptr = get_ptr( ref );
+    ptr = to_ptr( slab, ref );
 
     if( ptr == NULL )
     {
@@ -529,7 +476,6 @@ static void child_routine( __ref refref )
         }
     }
 
-    *refptr = ref;
     __FENCE();
     return;
 }

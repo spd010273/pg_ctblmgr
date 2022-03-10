@@ -38,7 +38,7 @@
  *    hazards or ensure the safety of atomic operations).
  *  - Perform all the above as efficiently and transparently as possible
  *    with minimal processing and memory overhead.
- * 
+ *
  * UNDERLYING LIBRARIES:
  *  This library abstracts POSIX, mmap, and SystemV shared memory
  *  functionalities to provide a consistent, shared, file-backed memory
@@ -94,7 +94,7 @@
  *  - get_ptr() detects an inconsistency between the local state
  *    (__segment_lut[]) and global state (seg_header).
  *  This functionality is enabled with SHM_AUTO_MAP
- * 
+ *
  * Copyright (c) 2021-2022, MerchLogix Inc.
  *
  * IDENTIFICATION

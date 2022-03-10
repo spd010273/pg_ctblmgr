@@ -53,12 +53,14 @@
  * that can be reallocated (akin to a double pointer). This works well but
  * wastes a little space (both memory and source files).
  *
+ * This library provides additional abstraction of references that are safe to use
+ * when another process performs a reallocation on the same memory allocation.
+ * These references are generated with to_ref and to_ptr routines and revolve
+ * around the ref_t type
+ *
  * TODO:
- * - Convert allocset[] to a hashtable to avoid wasting memory
  * - Complete compactify functionality (release space back to kernel when
  *   segments shrink)
- * - Make realloc() safer and easier by tracking/deriving issued allocs and
- *   translating them when another process attempts to access a reallocated area
  * Copyright (c) 2021, MerchLogix Inc.
  *
  * IDENTIFICATION
@@ -69,7 +71,7 @@
 #ifndef _SLAB_H
 #define _SLAB_H
 
-#define SLAB_DEBUG 1
+//#define SLAB_DEBUG 1
 //#define SLAB_FSM_DEBUG 1
 
 // since we're wrapping shm.c, we can control whether map_all() is called
@@ -80,6 +82,7 @@
 // When the slab is initialized, we allocate for this many objects,
 // This can be overridden at runtime with slab_set_count_hint()
 #define SLAB_DEFAULT_ALLOCATION 32
+#define ALLOCSET_DEFAULT_ALLOC_BLOCK SLAB_DEFAULT_ALLOCATION
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -118,6 +121,11 @@
 #define _INVALID_CONTEXT ( ( uint64_t ) 0 - 1 )
 #define _ZERO_FILL_BYTE 0xEA // Sports. It's in the game.
 //#define _FORCE_SIGSEGV_ON_CANARY_FAILURE 1
+
+typedef uint32_t _as_ind_t;
+typedef _as_ind_t ref_t;
+#define ALLOCSET_ITEM_INVALID ( _as_ind_t ) ( UINT_MAX )
+#define NULLREF ( ref_t ) ALLOCSET_ITEM_INVALID
 
 #if defined( _SLAB_MAX_SLABS ) && ( _SLAB_MAX_SLABS <= UCHAR_MAX )
 typedef uint8_t header_iter;
@@ -200,7 +208,6 @@ typedef enum {
     COMPACT_NONE        // Do not compactify segments
 } compact_t;
 
-typedef uint32_t _as_ind_t;
 typedef struct allocset_t {
     __ref         set;
     volatile bool locked;
@@ -242,7 +249,6 @@ typedef struct slab_control {
     volatile bool locked;
 } slab_control;
 
-#define ALLOCSET_ITEM_INVALID ( UINT_MAX )
 typedef struct allocset_item_t {
     __ref         issued_ref;
     size_t        size;
@@ -264,15 +270,15 @@ extern void destroy_slab( context_t );
 // the updated __ref with other processes. This can be done by setting aside a separate slab
 // for __refs (similar to a double pointer). It's a little more boilerplate but works. Sorry :(
 // Extra malloc/realloc calls where # of objects requested are used
-extern __ref rscalloc_object_count( context_t, uint64_t );
-extern __ref rsmalloc_object_count( context_t, uint64_t );
-extern __ref rsrealloc_object_count( context_t, __ref, uint64_t );
+extern ref_t rscalloc_object_count( context_t, uint64_t );
+extern ref_t rsmalloc_object_count( context_t, uint64_t );
+extern ref_t rsrealloc_object_count( context_t, ref_t, uint64_t );
 
-// __ref returning malloc/calloc/realloc/free calls where bytes are specified
-extern __ref rscalloc( context_t, size_t, uint64_t );
-extern __ref rsmalloc( context_t, size_t );
-extern __ref rsrealloc( context_t, __ref, size_t );
-extern void rsfree( context_t, __ref );
+// ref_t returning malloc/calloc/realloc/free calls where bytes are specified
+extern ref_t rscalloc( context_t, size_t, uint64_t );
+extern ref_t rsmalloc( context_t, size_t );
+extern ref_t rsrealloc( context_t, ref_t, size_t );
+extern void rsfree( context_t, ref_t );
 
 // Extra malloc / realloc calls where the number of objects are used
 extern void * scalloc_object_count( context_t, uint64_t );
@@ -286,8 +292,8 @@ extern void * srealloc( context_t, void *, size_t );
 extern void sfree( context_t, void * );
 
 /* Utility functions for moving data between a local allocation and shm / slab managed shared memory allocation */
-extern void * move_to_local( context_t, __ref * ); // Both make changes to the 2nd argument in-place
-extern __ref move_to_shared( context_t, void **, size_t );
+extern void * move_to_local( context_t, ref_t * ); // Both make changes to the 2nd argument in-place
+extern ref_t move_to_shared( context_t, void **, size_t );
 
 // Debugging / testing functions
 extern void dump_context( context_t );
@@ -295,6 +301,12 @@ extern bool force_canary_check( context_t );
 extern slab_header * get_header_by_context( context_t );
 extern void print_fsm( slab_header * header );
 extern void dump_control( void );
+
+
+// Reference / dereference subsystem
+
+extern void * to_ptr( context_t, ref_t );
+extern ref_t to_ref( context_t, void * );
 
 typedef enum {
     LL_SLAB_ERROR,
