@@ -83,99 +83,6 @@ static INLINE void * _as_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
 static INLINE void * _allocs_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
 static INLINE void * _fsm_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
 
-static INLINE void * _as_ptr_cache( slab_header * header )
-{
-    #ifdef _SLAB_EXTRA_SANE
-    if( unlikely( header == NULL ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_as_ptr_cache: Header is NULL"
-        );
-        return NULL;
-    }
-
-    if( unlikely( header->self == INVALID_CONTEXT ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_as_ptr_cache: Invalid header context"
-        );
-        return NULL;
-    }
-    #endif // _SLAB_EXTRA_SANE
-    if( unlikely( __ptr_cache[header->self].as_size != ( header->allocset.max_allocset * sizeof( allocset_item_t ) ) ) )
-    {
-        __ptr_cache[header->self].as_size = ( header->allocset.max_allocset * sizeof( allocset_item_t ) );
-        __ptr_cache[header->self].as_base = get_ptr( header->allocset.set );
-        __FENCE();
-    }
-
-    return __ptr_cache[header->self].as_base;
-}
-
-static INLINE void * _allocs_ptr_cache( slab_header * header )
-{
-    #ifdef _SLAB_EXTRA_SANE
-    if( unlikely( header == NULL ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_as_ptr_cache: Header is NULL"
-        );
-        return NULL;
-    }
-
-    if( unlikely( header->self == INVALID_CONTEXT ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_as_ptr_cache: Invalid header context"
-        );
-        return NULL;
-    }
-    #endif // _SLAB_EXTRA_SANE
-    if( unlikely( __ptr_cache[header->self].allocs_size != ( header->max_allocations * header->object_size ) ) )
-    {
-        __ptr_cache[header->self].allocs_size = ( header->max_allocations * header->object_size );
-        __ptr_cache[header->self].allocs_base = get_ptr( header->allocs );
-        __FENCE();
-    }
-
-    return __ptr_cache[header->self].allocs_base;
-}
-
-static INLINE void * _fsm_ptr_cache( slab_header * header )
-{
-    #ifdef _SLAB_EXTRA_SANE
-    if( unlikely( header == NULL ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_as_ptr_cache: Header is NULL"
-        );
-        return NULL;
-    }
-
-    if( unlikely( header->self == INVALID_CONTEXT ) )
-    {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "_as_ptr_cache: Invalid header context"
-        );
-        return NULL;
-    }
-    #endif // _SLAB_EXTRA_SANE
-    if( unlikely( __ptr_cache[header->self].fsm_size != ( _get_fsm_length( header ) * sizeof( fsm_t ) ) ) )
-    {
-        __ptr_cache[header->self].fsm_size = ( _get_fsm_length( header ) * sizeof( fsm_t ) );
-        __ptr_cache[header->self].fsm_base = get_ptr( header->fsm );
-        __FENCE();
-    }
-
-    return __ptr_cache[header->self].fsm_base;
-}
-
 #ifdef SLAB_DEBUG
 // Debugging
 static void _dump_control( slab_control * );
@@ -961,7 +868,7 @@ static INLINE bool _realloc_internal(
 
     // allocs base stays static
     __ptr_cache[header->self].allocs_base = get_ptr( header->allocs );
-    __ptr_cache[header->self].allocs_size = ( header->object_size * header->max_allocations ); 
+    __ptr_cache[header->self].allocs_size = ( header->object_size * header->max_allocations );
     __ptr_cache[header->self].fsm_base    = fsm;
     __ptr_cache[header->self].fsm_size    = ( sizeof( fsm_t ) * _get_fsm_length( header ) );
     header->loc_c_fsmend   = get_ref( c_fsmend );
@@ -1664,7 +1571,7 @@ static INLINE ref_t _shmalloc(
 
         retref  = _get_alloc_element_by_index( header, index );
         userref = _get_allocset_item_by_index( header, index );
-        
+
         #ifdef SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
@@ -3563,6 +3470,10 @@ static INLINE bool check_context( context_t ctx )
     return true;
 }
 
+/*
+ *  Helper functions for moving memory between local (malloc/calloc/realloc/etc) context
+ *  and shared memory contexts en-masse
+ */
 ref_t move_to_shared( context_t ctx, void ** pointer, size_t size )
 {
     slab_header * header = NULL;
@@ -3790,6 +3701,7 @@ static void _print_fsm( slab_header * header )
     return;
 }
 
+// Pretty printing for binary numbers > 32 bits
 static void print_byte( uint8_t data )
 {
     fprintf( stdout, "%s%s", bits[data >> 4], bits[ data & 0x0F ] );
@@ -3810,6 +3722,11 @@ static void print_bin( uint64_t data )
     return;
 }
 
+/*
+ * _dump_header( header *, bool verbose )
+ * prints out a compactified form of the shared memory state and
+ * contents to the console
+ */
 static void _dump_header( slab_header * header, bool simple )
 {
     void *   ptr        = NULL;
@@ -4035,6 +3952,10 @@ static void _dump_control( slab_control * ctrl )
 }
 #endif // SLAB_DEBUG
 
+/*
+ * Debugging functions - dump either the control headers and associated short-form headers (dump_control)
+ * or the full context (same as _dump_header(header, false))
+ */
 void dump_control( void )
 {
     if( control == NULL )
@@ -4045,6 +3966,11 @@ void dump_control( void )
 
     #ifdef SLAB_DEBUG
     _dump_control( control );
+    #else
+    _slab_log(
+        LL_SLAB_ERROR,
+        "Cannot dump control header - SLAB_DEBUG not enabled"
+    );
     #endif // SLAB_DEBUG
     return;
 }
@@ -4054,10 +3980,16 @@ void dump_context( context_t ctx )
     #ifdef SLAB_DEBUG
     return _dump_context( ctx );
     #endif // SLAB_DEBUG
-    _slab_log( LL_SLAB_ERROR, "Cannot dump context - DEBUG not enabled" );
+    _slab_log(
+        LL_SLAB_ERROR,
+        "Cannot dump context - SLAB_DEBUG not enabled"
+    );
     return;
 }
 
+/*
+ *  printf-esque logging function for this CU
+ */
 static void _slab_log( slab_ll log_level, char * message, ... )
 {
     va_list        args          = {{0}};
@@ -4114,6 +4046,12 @@ static void _slab_log( slab_ll log_level, char * message, ... )
     return;
 }
 
+/*
+ * _get_random()
+ * returns a random uint64_t number
+ * This is by no means cryptographically secure (we don't check entropy sources
+ * or verify that the result has sufficient entropy
+ */
 static INLINE uint64_t _get_random( void )
 {
     uint64_t random_val = 0;
@@ -4167,4 +4105,107 @@ static INLINE uint64_t _get_random( void )
     #endif // _SLAB_HAS_RANDOM
 
     return random_val;
+}
+
+/* Cache access functions
+ *
+ *  These check the state of the cache (validating size on the fly)
+ *  and will update-and-return the appropriate base pointer.
+ *
+ *  These should be used in lieu of get_ptr_fast or get_ptr for __refs
+ *  that point to the FSM, allocset base, or allocs[]
+ *  so that common memory-related routines can be kept to a minimal
+ *  latency
+ */
+static INLINE void * _as_ptr_cache( slab_header * header )
+{
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Header is NULL"
+        );
+        return NULL;
+    }
+
+    if( unlikely( header->self == INVALID_CONTEXT ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Invalid header context"
+        );
+        return NULL;
+    }
+    #endif // _SLAB_EXTRA_SANE
+    if( unlikely( __ptr_cache[header->self].as_size != ( header->allocset.max_allocset * sizeof( allocset_item_t ) ) ) )
+    {
+        __ptr_cache[header->self].as_size = ( header->allocset.max_allocset * sizeof( allocset_item_t ) );
+        __ptr_cache[header->self].as_base = get_ptr( header->allocset.set );
+        __FENCE();
+    }
+
+    return __ptr_cache[header->self].as_base;
+}
+
+static INLINE void * _allocs_ptr_cache( slab_header * header )
+{
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Header is NULL"
+        );
+        return NULL;
+    }
+
+    if( unlikely( header->self == INVALID_CONTEXT ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Invalid header context"
+        );
+        return NULL;
+    }
+    #endif // _SLAB_EXTRA_SANE
+    if( unlikely( __ptr_cache[header->self].allocs_size != ( header->max_allocations * header->object_size ) ) )
+    {
+        __ptr_cache[header->self].allocs_size = ( header->max_allocations * header->object_size );
+        __ptr_cache[header->self].allocs_base = get_ptr( header->allocs );
+        __FENCE();
+    }
+
+    return __ptr_cache[header->self].allocs_base;
+}
+
+static INLINE void * _fsm_ptr_cache( slab_header * header )
+{
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Header is NULL"
+        );
+        return NULL;
+    }
+
+    if( unlikely( header->self == INVALID_CONTEXT ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "_as_ptr_cache: Invalid header context"
+        );
+        return NULL;
+    }
+    #endif // _SLAB_EXTRA_SANE
+    if( unlikely( __ptr_cache[header->self].fsm_size != ( _get_fsm_length( header ) * sizeof( fsm_t ) ) ) )
+    {
+        __ptr_cache[header->self].fsm_size = ( _get_fsm_length( header ) * sizeof( fsm_t ) );
+        __ptr_cache[header->self].fsm_base = get_ptr( header->fsm );
+        __FENCE();
+    }
+
+    return __ptr_cache[header->self].fsm_base;
 }
