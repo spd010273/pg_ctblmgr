@@ -2269,7 +2269,7 @@ static INLINE uint64_t __find_fsm_spot(
             ( ( fsm_length - 1 - fsm_i ) * sizeof( fsm_t ) )
         )); // Deref in outer loop
 
-        if( ( fsm_word & skip_mask ) == skip_mask )
+        if( ( fsm_word & skip_mask ) == skip_mask && !last_word )
         {
             // Mask out the fsm word, if it's filled we can jump ahead by the
             // full width
@@ -2373,8 +2373,8 @@ static INLINE uint64_t __find_fsm_spot(
                     );
                 }
 
-                bits_comp -= FSM_SHIFT_WIDTH;
                 last_word  = ( bits_comp <= FSM_SHIFT_WIDTH );
+                bits_comp -= FSM_SHIFT_WIDTH;
 
                 if( !compare_active )
                     compare_active = true;
@@ -2387,11 +2387,11 @@ static INLINE uint64_t __find_fsm_spot(
                 #ifdef SLAB_FSM_DEBUG
                 _slab_log( LL_SLAB_DEBUG, "No match - state reset." );
                 #endif // SLAB_FSM_DEBUG
-                if( compare_active )
-                { // reset counters and markers
+                //if( compare_active )
+                //{ // reset counters and markers
                     bits_comp = requested_length;
                     position  = iter;
-                }
+                //}
 
                 compare_active = false;
 
