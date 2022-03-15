@@ -37,7 +37,7 @@ static INLINE bool _fail_canary( void ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool _init_slab( slab_header *, bool );
 static INLINE context_t get_ctx_by_id( const char * ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool check_slab_header( header_iter ) ALWAYS_INLINE_FLATTEN;
-static INLINE bool check_context( context_t ) ALWAYS_INLINE_FLATTEN;
+static INLINE bool _check_context( context_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE bool _check_canaries( slab_header * ) ALWAYS_INLINE_FLATTEN;
 static INLINE __ref _get_alloc_element_by_index( slab_header *, uint64_t ) ALWAYS_INLINE_FLATTEN;
 static INLINE slab_header * _get_header_by_context( context_t ) ALWAYS_INLINE_FLATTEN;
@@ -119,7 +119,10 @@ void * to_ptr( context_t ctx, ref_t ref )
 
 static INLINE void * _to_ptr( slab_header * header, ref_t ref )
 {
-    void * ptr = NULL;
+    // Dereference a ref_t by getting the allocset's index (ref is the
+    // typedef'd index of the allocset). We can either take the allocset and deref the
+    // issued_ref (__ref) or index into allocs[]
+    register void * ptr = NULL;
 
     ptr = _PTR_ADD_OFFSET(
         ( _as_ptr_cache( header ) ),
@@ -131,12 +134,14 @@ static INLINE void * _to_ptr( slab_header * header, ref_t ref )
 
     ptr = get_ptr( ( ( allocset_item_t * ) ptr )->issued_ref );
 
+    #ifdef SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "Returning pointer %p for ref %lu",
         ptr,
         ( uint64_t ) ref
     );
+    #endif // SLAB_DEBUG
 
     return ptr;
 
@@ -2433,7 +2438,7 @@ void slab_set_count_hint( context_t ctx, size_t count_hint )
 {
     slab_header * header = NULL;
 
-    if( !check_context( ctx ) )
+    if( !_check_context( ctx ) )
         return;
 
     header = &(control->headers[ctx]);
@@ -2616,7 +2621,7 @@ bool force_canary_check( context_t ctx )
 {
     slab_header * header = NULL;
 
-    if( !check_context( ctx ) )
+    if( !_check_context( ctx ) )
         return false;
 
     header = &(control->headers[ctx]);
@@ -2631,7 +2636,7 @@ slab_header * get_header_by_context( context_t ctx )
 
 static INLINE slab_header * _get_header_by_context( context_t ctx )
 {
-    if( unlikely( !check_context( ctx ) ) )
+    if( unlikely( !_check_context( ctx ) ) )
         return NULL;
 
     return &(control->headers[ctx]);
@@ -3420,7 +3425,12 @@ static bool check_slab_header( header_iter index )
     return true;
 }
 
-static INLINE bool check_context( context_t ctx )
+bool check_context( context_t ctx )
+{
+    return _check_context( ctx );
+}
+
+static INLINE bool _check_context( context_t ctx )
 {
     if( unlikely( ctx == INVALID_CONTEXT ) ) // Sanity check the context
     {

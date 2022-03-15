@@ -1,200 +1,347 @@
+/*--------------------------------------------------------------------------
+ *
+ * slpq.c
+ *     single-linked priority queue
+ *
+ * Creates a singlei-linked priority queue. Integrates with buffer.c to provide
+ * a complete data structure for sorting WAL changes and feeding them into
+ * subprocesses for change extraction.
+ *
+ * Copyright (c) 2019-2022, MerchLogix, Inc.
+ *
+ * IDENTIFICATION
+ *          service/src/lib/slpq.c
+ *--------------------------------------------------------------------------
+ */
+
 #include "slpq.h"
-static void _dump_node( struct slpq_node * );
-static void _dump_slpq( struct slpq * );
+static void _dump_node( slpq_node_ref_t );
+static void _dump_slpq( slpq_ref_t );
+static context_t slpq_context;
+static context_t slpq_node_context;
 
-struct slpq * new_slpq( void )
+void set_slpq_context( context_t ctx )
 {
-    struct slpq * new = NULL;
-
-    new = ( struct slpq * ) _SLPQ_ALLOC( sizeof( struct slpq ) );
-
-    if( new == NULL )
-    {
-        return NULL;
-    }
-
-    new->size = 0;
-    new->head = NULL;
-    new->tail = NULL;
-    return new;
-}
-
-bool slpq_push( struct slpq * head, void * data )
-{
-    struct slpq_node * node = NULL;
-
-    if( head == NULL || data == NULL )
-        return false;
-
-    node = ( struct slpq_node * ) _SLPQ_ALLOC( sizeof( struct slpq_node ) );
-
-    if( node == NULL )
-        return false;
-
-    node->data = data;
-    node->next = NULL;
-
-    if( head->tail == NULL && head->head == NULL )
-    {
-        head->tail = node;
-        head->head = node;
-        head->size = 1;
-        return true;
-    }
-
-    head->tail->next = node;
-    head->tail       = node;
-    head->size++;
-    return true;
-}
-
-void * slpq_pop( struct slpq * head )
-{
-    void *             data = NULL;
-    struct slpq_node * temp = NULL;
-
-    _dump_slpq( head );
-    if( head == NULL )
-        return NULL;
-
-    temp = head->head;
-
-    if( temp == NULL )
-        return NULL;
-
-    data = temp->data;
-    head->head = temp->next;
-
-    if( head->size == 1 || head->head == NULL )
-    {
-        head->tail = NULL;
-        head->head = NULL;
-    }
-
-    _SLPQ_FREE( temp, sizeof( struct slpq_node ) );
-    head->size--;
-    return data;
-}
-
-void * slpq_unshift( struct slpq * head )
-{
-    void *             data = NULL;
-    struct slpq_node * temp = NULL;
-
-    if( head == NULL )
-        return NULL;
-
-    if( head->tail == NULL || head->head == NULL )
-        return NULL;
-
-    temp = head->head;
-
-    while( temp != NULL && temp->next != head->tail )
-    {
-        temp = temp->next;
-    }
-
-    // Lazy assert :|
-    if( temp->next != head->tail )
-        return NULL;
-
-    head->tail = temp;
-    temp       = temp->next;
-    data       = temp->data;
-    _SLPQ_FREE( temp, sizeof( struct slpq_node ) );
-    head->size--;
-    return data;
-}
-
-bool slpq_shift( struct slpq * head, void * data )
-{
-    struct slpq_node * node = NULL;
-
-    if( head == NULL || data == NULL )
-        return false;
-
-    node = ( struct slpq_node * ) _SLPQ_ALLOC( sizeof( struct slpq_node ) );
-
-    if( node == NULL )
-        return false;
-
-    node->data = data;
-    node->next = NULL;
-
-    if( head->head == NULL && head->tail == NULL )
-    {
-        head->tail = node;
-        head->head = node;
-        head->size = 1;
-        return true;
-    }
-
-    node->next = head->head;
-    head->head = node;
-    head->size++;
-    return true;
-}
-
-void slpq_free( struct slpq * head )
-{
-    struct slpq_node * node = NULL;
-    struct slpq_node * last = NULL;
-
-    if( head == NULL )
-       return;
-
-    node = head->head;
-
-    while( node != NULL )
-    {
-        last = node;
-        node = node->next;
-        _SLPQ_FREE( last, sizeof( struct slpq_node ) );
-    }
-
-    head->head = NULL;
-    head->size = 0;
-    head->tail = NULL;
-    _SLPQ_FREE( head, sizeof( struct slpq_node ) );
-
+    if( unlikely( !check_context( ctx ) ) )
+        return;
+    if( unlikely( ctx == slpq_node_context ) )
+        return;
+    slpq_context = ctx;
     return;
 }
 
-static void _dump_node( struct slpq_node * n )
+void set_slpq_node_context( context_t ctx )
 {
-    if( n == NULL )
+    if( unlikely( !check_context( ctx ) ) )
+        return;
+    if( unlikely( ctx = slpq_context ) )
+        return;
+    slpq_node_context = ctx;
+    return;
+}
+
+slpq_ref_t new_slpq( void )
+{
+    slpq_ref_t n = NULLREF;
+    struct slpq * new = NULL;
+
+    n = ( slpq_ref_t ) rsmalloc( slpq_context, sizeof( struct slpq ) );
+
+    if( unlikely( n == NULLREF ) )
+        return NULLREF;
+
+    new = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) n );
+
+    if( unlikely( new == NULL ) )
+        return NULLREF;
+
+    new->size = 0;
+    new->head = NULLREF;
+    new->tail = NULLREF;
+    return n;
+}
+
+bool slpq_push( slpq_ref_t head, ref_t data )
+{
+    struct slpq *      slpq_head = NULL;
+    struct slpq_node * node      = NULL;
+    slpq_node_ref_t    n         = NULLREF;
+
+    if( unlikely( ( head == NULLREF ) || ( data == NULLREF ) ) )
+        return false;
+
+    n = ( slpq_node_ref_t ) rsmalloc( slpq_node_context, sizeof( struct slpq_node ) );
+
+    if( unlikely( n == NULLREF ) )
+        return false;
+
+    node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) n );
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+
+    if( unlikely( node == NULL ) )
+        return false;
+
+    if( unlikely( slpq_head == NULL ) )
+        return false;
+
+    node->data = data;
+    node->next = NULLREF;
+
+    if( slpq_head->tail == NULLREF && slpq_head->head == NULLREF )
+    {
+        slpq_head->tail = n;
+        slpq_head->head = n;
+        slpq_head->size = 1;
+        return true;
+    }
+
+    node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) slpq_head->tail );
+
+    if( unlikely( node == NULL ) )
+        return false;
+
+    node->next = n;
+    slpq_head->tail = n;
+    slpq_head->size++;
+    return true;
+}
+
+ref_t slpq_pop( slpq_ref_t head )
+{
+    ref_t              data      = NULLREF;
+    slpq_node_ref_t    t         = NULLREF;
+    struct slpq_node * temp      = NULL;
+    struct slpq *      slpq_head = NULL;
+
+    _dump_slpq( head );
+    if( unlikely( head == NULLREF ) )
+        return NULLREF;
+
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+
+    if( unlikely( slpq_head == NULL ) )
+        return NULLREF;
+
+    t = slpq_head->head;
+
+    temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
+
+    if( unlikely( temp == NULL ) )
+        return NULLREF;
+
+    data            = temp->data;
+    slpq_head->head = temp->next;
+
+    if( slpq_head->size == 1 || slpq_head->head == NULLREF )
+    {
+        slpq_head->tail = NULLREF;
+        slpq_head->head = NULLREF;
+    }
+
+    rsfree( slpq_node_context, t );
+    slpq_head->size--;
+    return data;
+}
+
+ref_t slpq_unshift( slpq_ref_t head )
+{
+    ref_t              data      = NULLREF;
+    struct slpq *      slpq_head = NULL;
+    slpq_node_ref_t    t         = NULLREF;
+    struct slpq_node * temp      = NULL;
+
+    if( unlikely( head == NULLREF ) )
+        return NULLREF;
+
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+    if(
+        unlikely(
+            ( slpq_head == NULL )
+         || ( slpq_head->tail == NULLREF )
+         || ( slpq_head->head == NULLREF )
+        )
+      )
+        return NULLREF;
+
+    t = slpq_head->head;
+    temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
+    if( unlikely( temp == NULL ) )
+        return NULLREF;
+
+    // Iterate through the linked list because we need node n-1
+    while( temp != NULL && temp->next != slpq_head->tail )
+    {
+        t = temp->next;
+        temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
+    }
+
+    if( temp == NULL )
+        return NULLREF;
+    // Lazy assert :|
+    if( temp->next != slpq_head->tail )
+    {
+        // Ruh roh, we aren't at the tail?!?
+        return NULLREF;
+    }
+
+    // t / temp is node n-1 where node n is the tail,
+    // pull data from the tail and set t as the new tail
+    slpq_head->tail = t;
+    t               = temp->next;
+    temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
+
+    if( unlikely( temp == NULL ) )
+        return NULLREF;
+
+    data            = temp->data;
+    rsfree( slpq_node_context, t );
+    slpq_head->size--;
+    return data;
+}
+
+bool slpq_shift( slpq_ref_t head, ref_t data )
+{
+    struct slpq *      slpq_head = NULL;
+    slpq_node_ref_t    n         = NULLREF;
+    struct slpq_node * node      = NULL;
+
+    if( unlikely( head == NULLREF || data == NULLREF ) )
+        return false;
+
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+
+    if( unlikely( slpq_head == NULL ) )
+        return false;
+
+    n = ( slpq_node_ref_t ) rsmalloc( slpq_node_context, sizeof( struct slpq_node ) );
+
+    if( unlikely( n == ( slpq_node_ref_t ) NULLREF ) )
+        return false;
+
+    node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) n );
+
+    if( unlikely( node == NULL ) )
+        return false;
+
+    node->data = data;
+    node->next = NULLREF;
+
+    if( slpq_head->head == NULLREF && slpq_head->tail == NULLREF )
+    {
+        slpq_head->tail = n;
+        slpq_head->head = n;
+        slpq_head->size = 1;
+        return true;
+    }
+
+    node->next = slpq_head->head;
+    slpq_head->head = n;
+    slpq_head->size++;
+    return true;
+}
+
+void slpq_free( slpq_ref_t head )
+{
+    struct slpq * slpq_head = NULL;
+    struct slpq_node * node = NULL;
+    slpq_node_ref_t n = NULLREF;
+    slpq_node_ref_t l = NULLREF;
+
+    if( unlikely( head == NULLREF ) )
+       return;
+
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+
+    if( unlikely( slpq_head == NULL ) )
+        return;
+
+    n = slpq_head->head;
+
+    if( unlikely( n == NULLREF ) )
+        return;
+
+    node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) n );
+
+    while( node != NULL )
+    {
+        l = n;
+        n = node->next;
+        rsfree( slpq_node_context, l );
+        node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) n );
+    }
+
+    slpq_head->head = NULLREF;
+    slpq_head->size = 0;
+    slpq_head->tail = NULLREF;
+    rsfree( slpq_context, head );
+    return;
+}
+
+static void _dump_node( slpq_node_ref_t n )
+{
+    struct slpq_node * node = NULL;
+
+    if( unlikely( n == NULLREF ) )
     {
         _log( LOG_LEVEL_DEBUG, "null node" );
         return;
     }
 
-    _log( LOG_LEVEL_DEBUG, "Node %p, data: %p, next %p", n, n->data, n->next );
-    return;
-}
+    node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) n );
 
-static void _dump_slpq( struct slpq * head )
-{
-    struct slpq_node * n = NULL;
-
-    if( head == NULL )
+    if( unlikely( node == NULL ) )
     {
-        _log( LOG_LEVEL_DEBUG, "null slpq" );
+        _log( LOG_LEVEL_DEBUG, "null node" );
         return;
     }
 
     _log(
         LOG_LEVEL_DEBUG,
+        "Node %p, data_ref %lu, next %p",
+        node,
+        ( uint64_t ) node->data, // need the right context to deref the ptr
+        to_ptr( slpq_node_context, ( ref_t ) node->next )
+    );
+    return;
+}
+
+static void _dump_slpq( slpq_ref_t head )
+{
+    struct slpq *      slpq_head = NULL;
+    struct slpq_node * n         = NULL;
+    slpq_node_ref_t    node      = NULLREF;
+
+    if( unlikely( head == NULLREF ) )
+    {
+        _log( LOG_LEVEL_DEBUG, "null slpq" );
+        return;
+    }
+
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+
+    if( unlikely( slpq_head == NULL ) )
+    {
+        _log( LOG_LEVEL_DEBUG, "null slpq" );
+        return;
+    }
+
+    node = slpq_head->head;
+    n = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) node );
+    _log(
+        LOG_LEVEL_DEBUG,
         "SLPQ %p size %u, H: %p, T: %p",
-        head,
-        ( unsigned int ) head->size,
-        head->head,
-        head->tail
+        slpq_head,
+        ( uint32_t ) slpq_head->size,
+        n,
+        to_ptr( slpq_node_context, ( ref_t ) slpq_head->tail )
     );
 
-    n = head->head;
     while( n != NULL )
     {
-        _dump_node( n );
-        n = n->next;
+        _dump_node( node );
+        node = n->next;
+        n = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) node );
     }
+
+    return;
 }

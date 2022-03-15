@@ -1,10 +1,24 @@
+/*--------------------------------------------------------------------------
+ *
+ * barrier.c
+ *      Atomics and Barrier helpers
+ *
+ * Implementation of inline ASM, C, and intrinsic test-and-set, barrier, and
+ * mutex clearing functions. While the volatile keyword is dubious in compiler
+ * implementation, it's used here as a hint to the compiler and reader that
+ * the value is critically important to locking mechanisms in the including
+ * libraries.
+ *
+ * Copyright (c) 2019-2022, MerchLogix, Inc.
+ *
+ * IDENTIFICATION
+ *          service/src/lib/barrier.c
+ *--------------------------------------------------------------------------
+ */
 #include "barrier.h"
-// TODO: Read and understand https://www.kernel.org/doc/Documentation/memory-barriers.txt
-// Implement barriers to ensure that these are truely atomic in the case that stdatomic
-// is not available
 
 #if defined(__BUF_NO_ATOMICS__) || defined(__KERNEL_HAS_BARRIERS__)
-static __inline__ bool _test_and_set( volatile bool * ) __attribute__((always_inline, flatten));
+static INLINE bool _test_and_set( volatile bool * ) ALWAYS_INLINE_FLATTEN;
 
 bool _test_and_set_mutex( volatile bool * mutex )
 {
@@ -19,7 +33,7 @@ void _fence( void )
 }
 
 # ifdef __KERNEL_HAS_BARRIERS__
-static __inline__ bool _test_and_set( volatile bool * mutex )
+static INLINE bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = READ_ONCE( *mutex );
@@ -27,20 +41,20 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
     return initial;
 }
 
-__inline__ void _clear_mutex( volatile bool * mutex )
+INLINE void _clear_mutex( volatile bool * mutex )
 {
     WRITE_ONCE( *mutex, 0 );
     return;
 }
 # else
-__inline__ void _clear_mutex( volatile bool * mutex )
+INLINE void _clear_mutex( volatile bool * mutex )
 {
     *mutex = false;
     __asm__ __volatile__( "" : : : "memory" );
     return;
 }
 #  ifdef __x86_64__
-static __inline__ bool _test_and_set( volatile bool * mutex )
+static INLINE bool _test_and_set( volatile bool * mutex )
 {
     register bool _res = true;
 
@@ -54,7 +68,7 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
     return _res;
 }
 #  elif defined(__i386__)
-static __inline__ bool _test_and_set( volatile bool * mutex )
+static INLINE bool _test_and_set( volatile bool * mutex )
 {
     register bool _res = true;
 
@@ -73,7 +87,7 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
 }
 #  elif defined(__ppc__) || defined(__powerpc__) || defined(__ppc64__) || defined(__powerpc64__)
 // Note: we can probably leverage a better solution involving the PPC HTM (Hardware Transactional Memory)
-static __inline__ bool _test_and_set( volatile bool * mutex )
+static INLINE bool _test_and_set( volatile bool * mutex )
 {
     bool _t   = false;
     bool _res = false;
@@ -97,7 +111,7 @@ static __inline__ bool _test_and_set( volatile bool * mutex )
     return _res;
 }
 #  else
-static __inline__ bool _test_and_set( volatile bool * mutex )
+static INLINE bool _test_and_set( volatile bool * mutex )
 {
     register bool initial = true;
     initial = *mutex;

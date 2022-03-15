@@ -1,9 +1,23 @@
+/*--------------------------------------------------------------------------
+ *
+ * trie.c
+ *     Trie data structure
+ *
+ * Prefix tree for rapidly sorting WAL changes for relations
+ *
+ * Copyright (c) 2019-2022, MerchLogix, Inc.
+ *
+ * IDENTIFICATION
+ *          service/src/lib/trie.c
+ *--------------------------------------------------------------------------
+ */
+
 #include "trie.h"
 
-static bool _trie_has_children( struct trie * );
-static struct trie * _new_trie_node( void );
+static bool _trie_has_children( trie_ref_t );
+static trie_ref_t _new_trie_node( void );
 static bool _trie_string_safety_check( char * );
-static void _trie_free( struct trie * );
+static void _trie_free( trie_ref_t );
 
 /*
  * List of valid characters for a trie span, listed in order
@@ -15,45 +29,57 @@ static const char _trie_search_chars[TRIE_SIZE] = "\
 \\]^_`abcdefghijklmnopqrstuvwxy\
 z{|}~'";
 
-bool trie_insert( struct trie ** head, char * str, void * data )
+static context_t trie_context = 0;
+
+// Rely on external initialization of contexts
+void set_trie_context( context_t ctx )
+{
+    if( !check_context( ctx ) )
+        return;
+    trie_context = ctx;
+    return;
+}
+
+bool trie_insert( trie_ref_t * head, char * str, ref_t data )
 {
     struct trie * curr = NULL;
-    struct trie * temp = NULL;
+    trie_ref_t    temp = NULLREF;
 
-    if( str == NULL )
-    {
+    if( unlikely( str == NULL ) )
         return false;
-    }
 
-    if( !_trie_string_safety_check( str ) )
-    {
+    if( unlikely( !_trie_string_safety_check( str ) ) )
         return false;
-    }
 
-    if( *head == NULL )
+    if( *head == ( trie_ref_t ) NULLREF )
     {
-        *head = _new_trie_node();
+        *head = ( trie_ref_t )  _new_trie_node();
         trie_insert( head, str, data );
         return true;
     }
 
-    curr = *head;
+    curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) *head );
+
+    if( unlikely( curr == NULL ) )
+        return false;
 
     while( *str )
     {
-        if( curr->character[*str - ' '] == NULL )
+        if( curr->character[*str - ' '] == ( trie_ref_t ) NULLREF )
         {
             temp = _new_trie_node();
 
-            if( temp == NULL )
-            {
+            if( unlikely( temp == ( trie_ref_t ) NULLREF ) )
                 return false;
-            }
 
             curr->character[*str - ' '] = temp;
         }
 
-        curr = curr->character[*str - ' '];
+        curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) curr->character[*str - ' '] );
+
+        if( unlikely( curr == NULL ) )
+            return false;
+
         str++;
     }
 
@@ -62,104 +88,117 @@ bool trie_insert( struct trie ** head, char * str, void * data )
     return true;
 }
 
-void * trie_search( struct trie * head, char * str )
+ref_t trie_search( trie_ref_t head, char * str )
 {
     struct trie * curr = NULL;
 
-    if( head == NULL || str == NULL )
+    if( unlikely( head == ( trie_ref_t ) NULLREF || str == NULL ) )
     {
-        return NULL;
+        return NULLREF;
     }
 
-    curr = head;
+    curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) head );
+
+    if( unlikely( curr == NULL ) )
+        return NULLREF;
 
     while( *str )
     {
-        curr = curr->character[*str - ' '];
+        curr = to_ptr( trie_context, ( ref_t ) curr->character[*str - ' '] );
 
-        if( curr == NULL )
+        if( unlikely( curr == NULL ) )
         {
-            return NULL;
+            return NULLREF;
         }
 
         str++;
     }
 
-    if( curr->is_leaf )
+    if( likely( curr->is_leaf ) )
     {
-        return curr->data;
+        return ( ref_t ) curr->data;
     }
 
-    return NULL;
+    return NULLREF;
 }
 
-void * trie_delete( struct trie ** head, char * str )
+ref_t trie_delete( trie_ref_t * head, char * str )
 {
-    void * data = NULL;
+    ref_t         data = NULLREF;
+    struct trie * curr = NULL;
 
-    if( *head == NULL )
-    {
-        return NULL;
-    }
+    curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) *head );
+
+    if(
+        unlikely(
+            ( head == NULL )
+         || ( *head == ( trie_ref_t )  NULLREF )
+         || ( curr == NULL )
+        )
+      )
+        return NULLREF;
 
     if( *str )
     {
         if(
-               *head != NULL
-            && (*head)->character[*str - ' '] != NULL
-            && trie_delete( &((*head)->character[*str - ' '] ), str + 1 )
-            && !(*head)->is_leaf
+               *head != ( trie_ref_t ) NULLREF
+            && curr->character[*str - ' '] != ( trie_ref_t ) NULLREF
+            && trie_delete( &(curr->character[*str - ' '] ), str + 1 )
+            && !curr->is_leaf
           )
         {
             if( !_trie_has_children( *head ) )
             {
-                data = (*head)->data;
-                _TRIE_FREE( *head, sizeof( struct trie ) );
-                *head = NULL;
+                data = curr->data;
+                rsfree( trie_context, *head );
+                *head = ( trie_ref_t ) NULLREF;
                 return data;
             }
 
-            return NULL;
+            return NULLREF;
         }
     }
 
-    if( *str == '\0' && (*head)->is_leaf == false )
+    if( *str == '\0' && curr->is_leaf == false )
     {
         if( !_trie_has_children( *head ) )
         {
-            data = (*head)->data;
-            _TRIE_FREE( *head, sizeof( struct trie ) );
-            *head = NULL;
+            data = curr->data;
+            rsfree( trie_context, ( ref_t ) *head );
+            *head = ( trie_ref_t ) NULLREF;
             return data;
         }
 
-        (*head)->is_leaf = false;
-        return NULL;
+        curr->is_leaf = false;
+        return NULLREF;
     }
 
-    return NULL;
+    return NULLREF;
 }
 
-void trie_free( struct trie ** node )
+void trie_free( trie_ref_t * node )
 {
-    if( node == NULL || *node == NULL )
-    {
+    if( unlikely( ( node == NULL ) || ( *node == ( trie_ref_t ) NULLREF ) ) )
         return;
-    }
 
     _trie_free( *node );
-    _TRIE_FREE( *node, sizeof( struct trie ) );
-    *node = NULL;
+    rsfree( trie_context, ( ref_t ) *node );
+    *node = ( trie_ref_t ) NULLREF;
     return;
 }
 
-static bool _trie_has_children( struct trie * node )
+static bool _trie_has_children( trie_ref_t node )
 {
-    unsigned int i = 0;
+    uint32_t      i    = 0;
+    struct trie * curr = NULL;
+
+    curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) node );
+    if( curr == NULL )
+        return false;
 
     for( i = 0; i < TRIE_SIZE; i++ )
     {
-        if( node->character[i] )
+        if( curr->character[i] != NULLREF )
         {
             return true;
         }
@@ -168,23 +207,27 @@ static bool _trie_has_children( struct trie * node )
     return false;
 }
 
-static struct trie * _new_trie_node( void )
+static trie_ref_t _new_trie_node( void )
 {
-    struct trie * node = NULL;
+    trie_ref_t    node = ( trie_ref_t ) NULLREF;
+    struct trie * n    = NULL;
     unsigned int  i    = 0;
 
-    node = ( struct trie * ) _TRIE_ALLOC( sizeof( struct trie ) );
+    node = ( trie_ref_t ) rsmalloc( trie_context, sizeof( struct trie ) );
 
-    if( node == NULL )
-    {
-        return NULL;
-    }
+    if( unlikely( node == ( trie_ref_t ) NULLREF ) )
+        return NULLREF;
 
-    node->is_leaf = false;
+    n = ( struct trie * ) to_ptr( trie_context, ( ref_t ) node );
+
+    if( unlikely( n == NULL ) )
+        return NULLREF;
+
+    n->is_leaf = false;
 
     for( i = 0; i < TRIE_SIZE; i++ )
     {
-        node->character[i] = NULL;
+        n->character[i] = ( trie_ref_t ) NULLREF;
     }
 
     return node;
@@ -196,7 +239,7 @@ static bool _trie_string_safety_check( char * str )
 
     for( i = 0; i < strlen( str ); i++ )
     {
-        if( memchr( _trie_search_chars, str[i], TRIE_SIZE ) == NULL )
+        if( unlikely( memchr( _trie_search_chars, str[i], TRIE_SIZE ) == NULL ) )
         {
             return false;
         }
@@ -205,22 +248,26 @@ static bool _trie_string_safety_check( char * str )
     return true;
 }
 
-static void _trie_free( struct trie * node )
+static void _trie_free( trie_ref_t node )
 {
-    unsigned int i = 0;
+    uint32_t      i    = 0;
+    struct trie * curr = NULL;
 
-    if( node == NULL )
-    {
+    if( unlikely( node == ( trie_ref_t ) NULLREF ) )
         return;
-    }
+
+    curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) node );
+
+    if( unlikely( curr == NULL ) )
+        return;
 
     for( i = 0; i < TRIE_SIZE; i++ )
     {
-        if( node->character[i] != NULL )
+        if( curr->character[i] != ( trie_ref_t ) NULLREF )
         {
-            _trie_free( node->character[i] );
-            _TRIE_FREE( node->character[i], sizeof( struct trie * ) );
-            node->character[i] = NULL;
+            _trie_free( curr->character[i] );
+            rsfree( trie_context, ( ref_t ) curr->character[i] );
+            curr->character[i] = ( trie_ref_t ) NULLREF;
         }
     }
 

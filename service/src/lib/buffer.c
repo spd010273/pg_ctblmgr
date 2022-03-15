@@ -1,20 +1,83 @@
+/*--------------------------------------------------------------------------
+ *
+ * buffer.c
+ *     Internal WAL buffer data structure collection / control
+ *
+ * This library presents a shared memory backed data structure consisting of
+ * a trie which stores buffer pins by relation name. Each buffer pin contains
+ * the head of a single-linked priority queue containing WAL entries streamed
+ * over logical replication.
+ *
+ * The parent process is responsible for filling and maintaining the queues,
+ * while the child processes are responsible for dequeuing the SLPQs and
+ * processing the impact of each WAL change with respect to the table under
+ * their responsibility.
+ *
+ * Copyright (c) 2019-2022, MerchLogix, Inc.
+ *
+ * IDENTIFICATION
+ *          service/src/lib/buffer.c
+ *--------------------------------------------------------------------------
+ */
+
 #include "buffer.h"
 
-static struct buffer_pin * _new_buffer_pin( void );
-static struct buffer * _new_buffer( void );
+static buffer_pin_ref_t _new_buffer_pin( void );
+static buffer_ref_t _new_buffer( void );
+
+static context_t buffer_context = INVALID_CONTEXT;
+static context_t buffer_pin_context = INVALID_CONTEXT;
+static context_t slpq_context = INVALID_CONTEXT;
+
+bool initialize_contexts( void )
+{
+    context_t _slpq_context       = INVALID_CONTEXT;
+    context_t _slpq_node_context  = INVALID_CONTEXT;
+    context_t _buffer_context     = INVALID_CONTEXT;
+    context_t _buffer_pin_context = INVALID_CONTEXT;
+    context_t _trie_context       = INVALID_CONTEXT;
+
+    _slpq_context       = new_slab( SLPQ_CONTEXT_NAME, sizeof( struct slpq ) );
+    _slpq_node_context  = new_slab( SLPQ_NODE_CONTEXT_NAME, sizeof( struct slpq_node ) );
+    _buffer_context     = new_slab( BUFFER_CONTEXT_NAME, sizeof( struct buffer ) );
+    _buffer_pin_context = new_slab( BUFFER_PIN_CONTEXT_NAME, sizeof( struct buffer_pin ) );
+    _trie_context       = new_slab( TRIE_CONTEXT_NAME, sizeof( struct trie ) );
+    set_trie_context( _trie_context );
+
+    buffer_pin_context = _buffer_pin_context;
+    buffer_context     = _buffer_context;
+    slpq_context       = _slpq_context;
+    set_slpq_context( _slpq_context );
+    set_slpq_node_context( _slpq_node_context );
+
+    if(
+          _slpq_context == INVALID_CONTEXT
+       || _slpq_node_context == INVALID_CONTEXT
+       || _buffer_pin_context == INVALID_CONTEXT
+       || _buffer_context == INVALID_CONTEXT
+       || _trie_context == INVALID_CONTEXT
+      )
+    {
+        return false;
+    }
+
+    return true;
+}
 
 void buffer_populate_trie(
-    struct buffer ** b,
-    char **          qual_name,
-    unsigned int     n_quals
+    buffer_ref_t * b,
+    char **        qual_name,
+    unsigned int   n_quals
 )
 {
-    void *              data = NULL;
-    struct buffer_pin * bp   = NULL;
-    unsigned int        i    = 0;
+    ref_t               data = NULLREF;
+    buffer_pin_ref_t    bp   = NULLREF;
 
-    if( *b == NULL )
-        *b = ( struct buffer * ) _new_buffer();
+    //struct buffer_pin * bp   = NULL;
+    unsigned int        i    = 0;
+    struct buffer * buff     = NULL;
+    if( *b == NULLREF )
+        *b = _new_buffer();
 
     if( qual_name == NULL )
     {
@@ -22,52 +85,65 @@ void buffer_populate_trie(
         return;
     }
 
-    if( !__TNS_MUTEX( (&((*b)->in_use)) ) )
+    buff = ( struct buffer * ) to_ptr( buffer_context, ( ref_t ) *b );
+
+    if( buff == NULL )
     {
-        _log( LOG_LEVEL_DEBUG, "Failed to acquire mutex" );
+        _log( LOG_LEVEL_ERROR, "Buffer dereferenced to NULL" );
+        return;
+    }
+
+    if( !__TNS_MUTEX( (&(buff->in_use)) ) )
+    {
+        _log( LOG_LEVEL_ERROR, "Failed to acquire buffer mutex" );
         return;
     }
 
     for( i = 0; i < n_quals; i++ )
     {
-        data = trie_search( (*b)->trie, qual_name[i] );
+        data = trie_search( buff->trie, qual_name[i] );
 
-        if( data == NULL )
+        if( data == NULLREF )
         {
             bp = _new_buffer_pin();
 
-            if( bp == NULL )
+            if( bp == NULLREF )
             {
-                __C_MUTEX( (&((*b)->in_use)) );
-                _log( LOG_LEVEL_DEBUG, "Failed to retreive new pin" );
+                __C_MUTEX( &(buff->in_use) );
+                _log( LOG_LEVEL_ERROR, "Failed to retreive new pin" );
                 return;
             }
 
-            if( !trie_insert( &((*b)->trie), qual_name[i], ( void * ) bp ) )
+            if( !trie_insert( &(buff->trie), qual_name[i], ( ref_t ) bp ) )
             {
-                __C_MUTEX( (&((*b)->in_use)) );
+                __C_MUTEX( (&(buff->in_use)) );
                 _log( LOG_LEVEL_DEBUG, "Trie insert failed for qual %s", qual_name[i] );
                 return;
             }
         }
         else
         {
-            _log( LOG_LEVEL_DEBUG, "Trie position already exists at %s (%p)", qual_name[i], data );
+            _log(
+                LOG_LEVEL_DEBUG,
+                "Trie position already exists at %s (%p)",
+                qual_name[i],
+                to_ptr( buffer_pin_context, ( ref_t ) data )
+            );
         }
     }
 
-    __C_MUTEX( (&((*b)->in_use)) );
+    __C_MUTEX( (&(buff->in_use)) );
     return;
 }
 
-void new_buffer( struct buffer ** b, char * qual_name, void * wal_data )
+void new_buffer( buffer_ref_t * b, char * qual_name, ref_t wal_data )
 {
-    if( *b == NULL )
-        *b = ( struct buffer * ) _new_buffer();
+    if( *b == NULLREF )
+        *b = ( buffer_ref_t ) _new_buffer();
 
     if(
             qual_name != NULL
-         && wal_data != NULL
+         && wal_data != NULLREF
          && !buffer_add( *b, qual_name, wal_data )
       )
     {
@@ -77,214 +153,283 @@ void new_buffer( struct buffer ** b, char * qual_name, void * wal_data )
     return;
 }
 
-struct buffer_pin * buffer_get_pin_by_name(
-    struct buffer * b,
-    char *          qual_name
+buffer_pin_ref_t buffer_get_pin_by_name(
+    buffer_ref_t b,
+    char *       qual_name
 )
 {
-    struct buffer_pin * bp   = NULL;
-    void *              data = NULL;
+    buffer_pin_ref_t bp   = NULLREF;
+    ref_t            data = NULLREF;
+    struct buffer *  buff = NULL;
 
-    if( b == NULL || qual_name == NULL )
+    if( unlikely( b == NULLREF || qual_name == NULL ) )
     {
         _log( LOG_LEVEL_DEBUG, "buffer or qual is null" );
-        return NULL;
+        return NULLREF;
     }
 
-    if( !__TNS_MUTEX( (&(b->in_use)) ) )
+    buff = ( struct buffer * ) to_ptr( buffer_context, ( ref_t ) b );
+
+    if( unlikely( !__TNS_MUTEX( (&(buff->in_use)) ) ) )
     {
         _log( LOG_LEVEL_DEBUG, "failed to acquire lock" );
-        return NULL;
+        return NULLREF;
     }
 
-    data = trie_search( b->trie, qual_name );
-    __C_MUTEX( (&(b->in_use)) );
+    data = trie_search( buff->trie, qual_name );
+    __C_MUTEX( (&(buff->in_use)) );
 
-    if( data != NULL )
+    if( likely( data != NULLREF ) )
     {
-        bp = ( struct buffer_pin * ) data;
-        _log( LOG_LEVEL_DEBUG, "Got pin %p", bp );
+        bp = ( buffer_pin_ref_t ) data;
+        _log( LOG_LEVEL_DEBUG, "Got pin %lu", ( uint64_t ) bp );
         return bp;
     }
 
     _log( LOG_LEVEL_DEBUG, "No pin for qual %s", qual_name );
-    return NULL;
+    return NULLREF;
 }
 
-bool buffer_add( struct buffer * b, char * qual_name, void * wal_data )
+bool buffer_add( buffer_ref_t b, char * qual_name, ref_t wal_data )
 {
-    void *              data = NULL;
-    struct buffer_pin * bp   = NULL;
+    buffer_pin_ref_t    bp       = NULLREF;
+    struct buffer *     buff     = NULL;
+    ref_t               data     = NULLREF;
+    struct buffer_pin * buff_pin = NULL;
 
-    if( b == NULL || qual_name == NULL || wal_data == NULL )
+    if( b == NULLREF || qual_name == NULL || wal_data == NULLREF )
         return false;
 
-    if( !__TNS_MUTEX( (&(b->in_use)) ) )
+    buff = ( struct buffer * ) to_ptr( buffer_context, ( ref_t ) b );
+
+    if( buff == NULL )
         return false;
 
-    data = trie_search( b->trie, qual_name );
+    if( !__TNS_MUTEX( (&(buff->in_use)) ) )
+        return false;
 
-    if( data == NULL )
+    data = trie_search( buff->trie, qual_name );
+
+    if( data == NULLREF )
     {
         bp = _new_buffer_pin();
 
-        if( bp == NULL )
+        if( bp == NULLREF )
         {
-            __C_MUTEX( (&(b->in_use)) );
+            __C_MUTEX( (&(buff->in_use)) );
             return false;
         }
 
-        if( !trie_insert( &(b->trie), qual_name, ( void * ) bp ) )
+        if( !trie_insert( &(buff->trie), qual_name, ( ref_t ) bp ) )
         {
-            __C_MUTEX( (&(b->in_use)) );
+            __C_MUTEX( (&(buff->in_use)) );
             return false;
         }
 
-        b->entries++;
+        buff->entries++;
     }
     else
     {
-        bp = ( struct buffer_pin * ) data;
+        bp = ( buffer_pin_ref_t ) data;
     }
 
-    __C_MUTEX( (&(b->in_use)) );
+    buff_pin = ( struct buffer_pin * ) to_ptr( buffer_pin_context, ( ref_t ) bp );
+    __C_MUTEX( (&(buff->in_use)) );
 
-    if( !__TNS_MUTEX( (&(bp->in_use)) ) )
+    if( buff_pin == NULL )
         return false;
 
-    if( !slpq_push( bp->slpq, wal_data ) )
+    if( !__TNS_MUTEX( (&(buff_pin->in_use)) ) )
+        return false;
+
+    if( !slpq_push( buff_pin->slpq, wal_data ) )
     {
-        __C_MUTEX( (&(bp->in_use)) );
+        __C_MUTEX( (&(buff_pin->in_use)) );
         return false;
     }
 
-    __C_MUTEX( (&(bp->in_use)) );
+    __C_MUTEX( (&(buff_pin->in_use)) );
     return true;
 }
 
-void * buffer_pin_pop( struct buffer_pin * bp )
+ref_t buffer_pin_pop( buffer_pin_ref_t bp )
 {
-    void * data = NULL;
+    ref_t data = NULLREF;
+    struct buffer_pin * buff_pin = NULL;
 
-    if( bp == NULL )
-        return NULL;
+    if( bp == NULLREF )
+        return NULLREF;
 
-    if( !__TNS_MUTEX( (&(bp->in_use)) ) )
-        return NULL;
+    buff_pin = ( struct buffer_pin * ) to_ptr( buffer_pin_context, ( ref_t ) bp );
 
-    data = slpq_pop( bp->slpq );
-    __C_MUTEX( (&(bp->in_use)) );
+    if( buff_pin == NULL )
+        return NULLREF;
+
+    if( !__TNS_MUTEX( (&(buff_pin->in_use)) ) )
+        return NULLREF;
+
+    data = slpq_pop( buff_pin->slpq );
+    __C_MUTEX( (&(buff_pin->in_use)) );
     return data;
 }
 
-bool buffer_pin_push( struct buffer_pin * bp, void * data )
+bool buffer_pin_push( buffer_pin_ref_t bp, ref_t data )
 {
-    if( bp == NULL || data == NULL )
+    struct buffer_pin * buff_pin = NULL;
+    if( bp == NULLREF || data == NULLREF )
         return false;
 
-    if( !__TNS_MUTEX( (&(bp->in_use)) ) )
+    buff_pin = ( struct buffer_pin * ) to_ptr( buffer_pin_context, ( ref_t ) bp );
+
+    if( buff_pin == NULL )
         return false;
 
-    if( !slpq_push( bp->slpq, data ) )
+    if( !__TNS_MUTEX( (&(buff_pin->in_use)) ) )
+        return false;
+
+    if( !slpq_push( buff_pin->slpq, data ) )
     {
-        __C_MUTEX( (&(bp->in_use)) );
+        __C_MUTEX( (&(buff_pin->in_use)) );
         return false;
     }
 
-    __C_MUTEX( (&(bp->in_use)) );
+    __C_MUTEX( (&(buff_pin->in_use)) );
     return true;
 }
 
-bool remove_buffer_pin_by_name( struct buffer * b, char * qual_name )
+bool remove_buffer_pin_by_name( buffer_ref_t b, char * qual_name )
 {
-    struct buffer_pin * bp = NULL;
+    struct buffer *     buff     = NULL;
+    buffer_pin_ref_t    bp       = NULLREF;
+    struct buffer_pin * buff_pin = NULL;
+    struct slpq * slpq = NULL;
 
-    if( b == NULL || qual_name == NULL )
+    if( b == NULLREF || qual_name == NULL )
         return false;
 
-    if( !__TNS_MUTEX( (&(b->in_use)) ) )
+    buff = ( struct buffer * ) to_ptr( buffer_context, ( ref_t ) b );
+
+    if( buff == NULL )
         return false;
 
-    bp = ( struct buffer_pin * ) trie_search( b->trie, qual_name );
+    if( !__TNS_MUTEX( (&(buff->in_use)) ) )
+        return false;
 
-    if( bp == NULL )
+    bp = ( buffer_pin_ref_t ) trie_search( buff->trie, qual_name );
+
+    if( bp == NULLREF )
     {
-        __C_MUTEX( (&(b->in_use)) );
+        __C_MUTEX( (&(buff->in_use)) );
         return true;
     }
     else
     {
-        if( !__TNS_MUTEX( (&(bp->in_use)) ) )
+        buff_pin = ( struct buffer_pin * ) to_ptr( buffer_pin_context, ( ref_t ) bp );
+
+        if( buff_pin == NULL )
         {
-            __C_MUTEX( (&(b->in_use)) );
+            __C_MUTEX( &(buff->in_use ) );
             return false;
         }
 
-        if( bp->slpq->size != 0 )
+        if( !__TNS_MUTEX( (&(buff_pin->in_use)) ) )
         {
-            __C_MUTEX( (&(bp->in_use)) );
-            __C_MUTEX( (&(b->in_use)) );
+            __C_MUTEX( (&(buff->in_use)) );
             return false;
         }
 
-        bp = ( struct buffer_pin * ) trie_delete( &(b->trie), qual_name );
+        slpq = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) buff_pin->slpq );
 
-        if( bp != NULL )
-            _BUFFER_FREE( bp, sizeof( struct buffer_pin ) );
+        if( unlikely( slpq == NULL ) )
+        {
+            __C_MUTEX( &(buff_pin->in_use) );
+            __C_MUTEX( &(buff->in_use) );
+            return true;
+        }
 
-        b->entries--;
-        __C_MUTEX( (&(b->in_use)) );
+        if( slpq->size != 0 )
+        {
+            __C_MUTEX( (&(buff_pin->in_use)) );
+            __C_MUTEX( (&(buff->in_use)) );
+            return false;
+        }
+
+        bp = ( buffer_pin_ref_t ) trie_delete( ( trie_ref_t * ) &(buff->trie), qual_name );
+
+        if( bp != NULLREF )
+            rsfree( buffer_pin_context, ( ref_t ) bp );
+
+        buff->entries--;
+        __C_MUTEX( (&(buff->in_use)) );
         return true;
     }
 }
 
-void * buffer_pop( struct buffer * b, char * qual )
+ref_t buffer_pop( buffer_ref_t b, char * qual )
 {
-    struct buffer_pin * bp = NULL;
+    buffer_pin_ref_t bp = NULLREF;
+    struct buffer * buff = NULL;
 
-    if( b == NULL || qual == NULL )
-        return NULL;
+    if( unlikely( b == NULLREF || qual == NULL ) )
+        return NULLREF;
 
-    if( !__TNS_MUTEX( (&(b->in_use)) ) )
-        return NULL;
+    buff = ( struct buffer * ) to_ptr( buffer_context, ( ref_t ) b );
 
-    bp = ( struct buffer_pin * ) trie_search( b->trie, qual );
+    if( unlikely( buff == NULL ) )
+        return NULLREF;
 
-    if( bp != NULL )
+    if( unlikely( !__TNS_MUTEX( (&(buff->in_use)) ) ) )
+        return NULLREF;
+
+    bp = ( buffer_pin_ref_t ) trie_search( buff->trie, qual );
+
+    if( likely( bp != NULLREF ) )
     {
-        __C_MUTEX( (&(b->in_use)) );
+        __C_MUTEX( (&(buff->in_use)) );
         return buffer_pin_pop( bp );
     }
 
-    __C_MUTEX( (&(b->in_use)) );
-    return NULL;
+    __C_MUTEX( (&(buff->in_use)) );
+    return NULLREF;
 }
 
-static struct buffer_pin * _new_buffer_pin( void )
+static buffer_pin_ref_t _new_buffer_pin( void )
 {
-    struct buffer_pin * bp = NULL;
+    struct buffer_pin * buff_pin = NULL;
+    buffer_pin_ref_t bp = NULLREF;
 
-    bp = ( struct buffer_pin * ) _BUFFER_ALLOC( sizeof( struct buffer_pin ) );
+    bp = ( buffer_pin_ref_t ) rsmalloc( buffer_pin_context, sizeof( struct buffer_pin ) );
 
-    if( bp == NULL )
-        return NULL;
+    if( unlikely( bp == NULLREF ) )
+        return NULLREF;
 
-    bp->in_use = false;
-    bp->owner  = 0;
-    bp->slpq   = new_slpq();
+    buff_pin = ( struct buffer_pin * ) to_ptr( buffer_pin_context, ( ref_t ) bp );
+
+    if( buff_pin == NULL )
+        return NULLREF;
+
+    buff_pin->in_use = false;
+    buff_pin->owner  = 0;
+    buff_pin->slpq   = new_slpq();
+
     return bp;
 }
 
-static struct buffer * _new_buffer( void )
+static buffer_ref_t _new_buffer( void )
 {
-    struct buffer * b = NULL;
+    struct buffer * buff = NULL;
+    buffer_ref_t    b    = NULLREF;
 
-    b = ( struct buffer * ) _BUFFER_ALLOC( sizeof( struct buffer ) );
+    b = ( buffer_ref_t ) rsmalloc( buffer_context, sizeof( struct buffer ) );
 
-    if( b == NULL )
-        return NULL;
+    if( b == NULLREF )
+        return NULLREF;
 
-    b->entries = 0;
-    b->trie    = NULL;
+    buff = ( struct buffer * ) to_ptr( buffer_context, ( ref_t ) b );
+    if( buff == NULL )
+        return NULLREF;
+
+    buff->entries = 0;
+    buff->trie    = NULLREF;
     return b;
 }

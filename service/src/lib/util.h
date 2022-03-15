@@ -24,6 +24,7 @@
 #include <sys/time.h>
 #include <stdint.h>
 
+#include "slab.h"
 #include "buffer.h"
 
 #define LOG_LEVEL_DEBUG 1
@@ -84,7 +85,7 @@ struct worker {
     char **         my_argv;
     char *          pidfile;  // used by parent to remove pid file on term
     struct pgc_conf config;
-    struct buffer * buffer;
+    ref_t           buffer;
     uint64_t        last_lsn;
 };
 

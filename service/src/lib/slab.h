@@ -274,6 +274,7 @@ extern context_t new_slab_with_hint( const char *, size_t, uint64_t );
 extern void slab_set_count_hint( context_t, size_t );
 //extern void slab_set_compaction( context_t, compact_t );
 extern void destroy_slab( context_t );
+extern bool check_context( context_t );
 
 // Note for users: *realloc*() functions are dangerous, and you need a method to share
 // the updated __ref with other processes. This can be done by setting aside a separate slab

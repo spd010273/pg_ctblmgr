@@ -402,7 +402,7 @@ static void worker_entrypoint( void * data )
 {
     struct worker *      me      = NULL;
     PGresult *           result  = NULL;
-    struct buffer_pin ** pins    = NULL;
+    buffer_pin_ref_t   * pins    = NULL;
     unsigned int         i       = 0;
     uint64_t             lsn     = 0;
     uint64_t             max_lsn = 0;
@@ -533,7 +533,7 @@ static void worker_entrypoint( void * data )
     return;
 }
 
-static void get_worker_pins( struct worker * me, struct buffer_pin *** bp_array )
+static void get_worker_pins( struct worker * me, buffer_pin_ref_t ** bp_array )
 {
     unsigned int i = 0;
 
@@ -556,9 +556,9 @@ static void get_worker_pins( struct worker * me, struct buffer_pin *** bp_array 
     }
 
     _log( LOG_LEVEL_DEBUG, "worker allocating %u pins", me->config.num_tables );
-    *bp_array = ( struct buffer_pin ** ) calloc(
+    *bp_array = ( buffer_pin_ref_t ** ) calloc(
         me->config.num_tables,
-        sizeof( struct buffer_pin * )
+        sizeof( buffer_pin_ref_t * )
     );
 
     if( *bp_array == NULL )

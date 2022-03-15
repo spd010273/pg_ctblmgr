@@ -1,6 +1,7 @@
 #ifndef PG_CTBLMGR_H
 #define PG_CTBLMGR_H
 
+#include "lib/slab.h"
 #include "lib/util.h"
 #include "lib/query.h"
 #include "lib/strings.h"
