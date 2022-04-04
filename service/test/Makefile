@@ -13,7 +13,7 @@ STRICTURES		= -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-stron
 				  -fno-strict-aliasing -fwrapv -fexcess-precision=standard
 ARCHFLAGS		= -m64 -mtune=generic
 CFLAGS			= $(INCLUDE) $(LIBS) $(FLAGS) $(STRICTURES) $(ARCHFLAGS)
-T_CS_SRCS		= ../src/lib/xlog.c ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_changeset.c
+T_CS_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/xlog.c ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_changeset.c
 T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
 T_B_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/util.c ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
 T_B_OBJS		= $(T_B_SRCS:.c=.o)

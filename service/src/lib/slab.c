@@ -453,6 +453,15 @@ static INLINE context_t _new_slab(
 {
     context_t ret                    = INVALID_CONTEXT;
     char      ident[_SLAB_MAX_IDENT] = {0};
+    
+    if( unlikely( !_slab_init ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Slab is not initialized - call slab_init() first"
+        );
+        return INVALID_CONTEXT;
+    }
 
     snprintf(
         ident,

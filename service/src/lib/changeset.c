@@ -32,19 +32,19 @@ static context_t changeset_context        = INVALID_CONTEXT;
 static context_t changeset_string_context = INVALID_CONTEXT;
 static context_t changeset_array_context  = INVALID_CONTEXT;
 
-void initialize_changeset_context( void )
+bool initialize_changeset_context( void )
 {
     context_t _changeset_context        = INVALID_CONTEXT;
     context_t _changeset_string_context = INVALID_CONTEXT;
     context_t _changeset_array_context  = INVALID_CONTEXT;
 
-    _changeset_context = new_slab( CHANGESET_CONTEXT_NAME, sizeof( struct changeset ) );
+    _changeset_context        = new_slab( CHANGESET_CONTEXT_NAME, sizeof( struct changeset ) );
     _changeset_string_context = new_slab( CHANGESET_STRING_CONTEXT_NAME, sizeof( char ) );
-    _changeset_array_context = new_slab( CHANGESET_ARRAY_CONTEXT_NAME, sizeof( changeset_string_ref_t ) );
+    _changeset_array_context  = new_slab( CHANGESET_ARRAY_CONTEXT_NAME, sizeof( changeset_string_ref_t ) );
 
-    changeset_context = _changeset_context;
-    changeset_array_context = _changeset_array_context;
-    changeset_string_context = _changeset_string_context;
+    changeset_context         = _changeset_context;
+    changeset_array_context   = _changeset_array_context;
+    changeset_string_context  = _changeset_string_context;
 
     if(
           changeset_context        == INVALID_CONTEXT
@@ -53,10 +53,25 @@ void initialize_changeset_context( void )
       )
     {
         // error
-        return;
+        return false;
     }
 
-    return;
+    return true;
+}
+
+context_t get_changeset_array_context( void )
+{
+    return changeset_array_context;
+}
+
+context_t get_changeset_context( void )
+{
+    return changeset_context;
+}
+
+context_t get_changeset_string_context( void )
+{
+    return changeset_string_context;
 }
 
 changeset_ref_t json_to_changeset(

@@ -73,8 +73,8 @@ typedef enum {
 
 struct changeset {
     uint64_t               lsn;
-    changeset_array_ref_t  keys;
-    changeset_array_ref_t  vals;
+    changeset_array_ref_t  keys; // Array of changed keys
+    changeset_array_ref_t  vals; // Array of the changed values
     uint16_t               num_keys; // Postgres can only have 1600 columns
     changeset_array_ref_t  columns;
     changeset_array_ref_t  new_vals;
@@ -90,5 +90,9 @@ struct changeset {
 extern changeset_ref_t json_to_changeset( char *, pg_ctblmgr_wal_level );
 extern void free_changeset( changeset_ref_t );
 extern void dump_changeset( changeset_ref_t );
-extern void initialize_changeset_context( void );
+extern bool initialize_changeset_context( void );
+extern context_t get_changeset_array_context( void );
+extern context_t get_changeset_context( void );
+extern context_t get_changeset_string_context( void );
+
 #endif // CHANGESET_H
