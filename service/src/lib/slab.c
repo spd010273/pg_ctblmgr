@@ -31,6 +31,7 @@ static slab_control * control                      = NULL;
 static bool           _slab_init                   = false;
 static pid_t          p_pid                        = 0;
 static ptr_cache      __ptr_cache[_SLAB_MAX_SLABS] = {{0}};
+static bool           __no_test                    = true;
 
 // Check and boilerplate helpers
 static INLINE bool _fail_canary( void ) ALWAYS_INLINE_FLATTEN;
@@ -104,6 +105,13 @@ static const char * hexes[16] = {
     [12] = "C",   [13] = "D",   [14] = "E",   [15] = "F",
 };
 #endif // SLAB_DEBUG
+
+void __test_harness( void )
+{
+    // for testing - quiets some 'error' we intend to hit
+    __no_test = false;
+    return;
+}
 
 void * to_ptr( context_t ctx, ref_t ref )
 {
@@ -453,7 +461,7 @@ static INLINE context_t _new_slab(
 {
     context_t ret                    = INVALID_CONTEXT;
     char      ident[_SLAB_MAX_IDENT] = {0};
-    
+
     if( unlikely( !_slab_init ) )
     {
         _slab_log(
@@ -2359,23 +2367,15 @@ static INLINE uint64_t __find_fsm_spot(
 
                     if( requested_length > FSM_SHIFT_WIDTH )
                         temp = last_word_val;
-                    
+
                     mask = ( fsm_cmp_t ) FSM_LAST_WORD_MASK;
-                    _slab_log(
-                        LL_SLAB_DEBUG,
-                        "Attempting WIDE compactify from position %lu (ret: %lu)",
-                        position,
-                        header->max_allocations
-                      - ( position + requested_length )
-                      - pos_offset
-                    );
-                    
+
                     while( ( ~temp & mask ) != 0 )
                     {
                         if( temp == 0 )
                             break;
                         temp = temp << 1;
-                        position--;
+                        position++;
                     }
 
                     _slab_log(
@@ -3301,16 +3301,19 @@ static INLINE bool _check_canaries( slab_header * header )
     c_ptr = get_ptr_fast( header->loc_c_allocstart );
 
     if( unlikely( c_ptr == NULL ) )
-        return false;
+        return _fail_canary();
     if( unlikely( header->c_allocstart != *c_ptr ) )
     {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "Failed allocstart canary check: Got %x, expected %x as %p",
-            ( uint32_t ) *c_ptr,
-            ( uint32_t ) header->c_allocstart,
-            c_ptr
-        );
+        if( __no_test )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Failed allocstart canary check: Got %x, expected %x as %p",
+                ( uint32_t ) *c_ptr,
+                ( uint32_t ) header->c_allocstart,
+                c_ptr
+            );
+        }
         return _fail_canary();
     }
 
@@ -3318,16 +3321,19 @@ static INLINE bool _check_canaries( slab_header * header )
     c_ptr = get_ptr_fast( header->loc_c_fsmstart );
 
     if( unlikely( c_ptr == NULL ) )
-        return false;
+        return _fail_canary();
     if( unlikely( header->c_fsmstart != *c_ptr ) )
     {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "Failed fsmstart canary check: Got %x, expected %x at %p",
-            ( uint32_t ) *c_ptr,
-            ( uint32_t ) header->c_fsmstart,
-            c_ptr
-        );
+        if( __no_test )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Failed fsmstart canary check: Got %x, expected %x at %p",
+                ( uint32_t ) *c_ptr,
+                ( uint32_t ) header->c_fsmstart,
+                c_ptr
+            );
+        }
         return _fail_canary();
     }
 
@@ -3335,16 +3341,19 @@ static INLINE bool _check_canaries( slab_header * header )
     c_ptr = get_ptr_fast( header->loc_c_fsmend );
 
     if( unlikely( c_ptr == NULL ) )
-        return false;
+        return _fail_canary();
     if( unlikely( header->c_fsmend != *c_ptr ) )
     {
-        _slab_log(
-            LL_SLAB_ERROR,
-            "Failed fsmend canary check: Got %x, expected %x at %p",
-            ( uint32_t ) *c_ptr,
-            ( uint32_t ) header->c_fsmend,
-            c_ptr
-        );
+        if( __no_test )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Failed fsmend canary check: Got %x, expected %x at %p",
+                ( uint32_t ) *c_ptr,
+                ( uint32_t ) header->c_fsmend,
+                c_ptr
+            );
+        }
         return _fail_canary();
     }
 

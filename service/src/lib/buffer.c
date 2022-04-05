@@ -182,7 +182,7 @@ buffer_pin_ref_t buffer_get_pin_by_name(
     if( likely( data != NULLREF ) )
     {
         bp = ( buffer_pin_ref_t ) data;
-        _log( LOG_LEVEL_DEBUG, "Got pin %lu", ( uint64_t ) bp );
+        //_log( LOG_LEVEL_DEBUG, "Got pin %lu", ( uint64_t ) bp );
         return bp;
     }
 

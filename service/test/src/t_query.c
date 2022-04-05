@@ -15,17 +15,17 @@ int main( int argc, char ** argv )
     char *     ptr       = NULL;
     int        i         = 0;
 
-    _parse_args( argc, argv ); 
+    _parse_args( argc, argv );
 
     if( conninfo == NULL )
     {
-        printf( "Failed to parse conninfoi\n" );
+        printf( "FAILED: Failed to parse conninfoi\n" );
         return -1;
     }
 
     if( !parent_init( argc, argv ) )
     {
-        printf( "Failed to initialize parent pid slice\n" );
+        printf( "FAILED: Failed to initialize parent pid slice\n" );
         if( parent )
             remove( parent->pidfile );
         return -1;
@@ -33,35 +33,35 @@ int main( int argc, char ** argv )
 
     if( !db_connect( parent ) )
     {
-        printf( "Failed to connect to database\n" );
+        printf( "FAILED: Failed to connect to database\n" );
         remove( parent->pidfile );
         return -1;
     }
 
     if( !begin_transaction( parent ) )
     {
-        printf( "BEGIN failed\n" );
+        printf( "FAILED: BEGIN failed\n" );
         remove( parent->pidfile );
         return -1;
     }
-    
+
     if( !rollback_transaction( parent ) )
     {
-        printf( "ROLLBACK failed\n" );
+        printf( "FAILED: ROLLBACK failed\n" );
         remove( parent->pidfile );
         return -1;
     }
 
     if( commit_transaction( parent ) )
     {
-        printf( "COMMIT happened on unopen transaction\n" );
+        printf( "FAILED: COMMIT happened on unopen transaction\n" );
         remove( parent->pidfile );
         return -1;
     }
 
     if( !begin_transaction( parent ) )
     {
-        printf( "Second BEGIN failed\n" );
+        printf( "FAILED: Second BEGIN failed\n" );
         remove( parent->pidfile );
         return -1;
     }
@@ -70,14 +70,14 @@ int main( int argc, char ** argv )
 
     if( result == NULL )
     {
-        printf( "SELECT failed\n" );
+        printf( "FAILED: SELECT failed\n" );
         remove( parent->pidfile );
         return -1;
     }
 
     if( is_column_null( 0, result, "foo" ) )
     {
-        printf( "Unexpected NULL\n" );
+        printf( "FAILED: Unexpected NULL\n" );
         remove( parent->pidfile );
         return -1;
     }
@@ -86,14 +86,14 @@ int main( int argc, char ** argv )
 
     if( val == NULL || strncmp( val, "1", 1 ) != 0 )
     {
-        printf( "Unexpected result '%s'\n", val );
+        printf( "FAILED: Unexpected result '%s'\n", val );
         remove( parent->pidfile );
         return -1;
     }
 
     if( !commit_transaction( parent ) )
     {
-        printf( "COMMIT failed\n" );
+        printf( "FAILED: COMMIT failed\n" );
         remove( parent->pidfile );
         return -1;
     }
@@ -101,7 +101,7 @@ int main( int argc, char ** argv )
     PQclear( result );
     if( !begin_transaction( parent ) )
     {
-        printf( "Third BEGIN failed\n" );
+        printf( "FAILED: Third BEGIN failed\n" );
         remove( parent->pidfile );
         return -1;
     }
@@ -117,14 +117,14 @@ int main( int argc, char ** argv )
 
     if( result == NULL )
     {
-        printf( "Second SELECT failed\n" );
+        printf( "FAILED: Second SELECT failed\n" );
         remove( parent->pidfile );
         return -1;
     }
 
     if( PQntuples( result ) <= 0 )
     {
-        printf( "insufficient result tuples\n" );
+        printf( "FAILED: insufficient result tuples\n" );
         remove( parent->pidfile );
         return -1;
     }
@@ -135,14 +135,14 @@ int main( int argc, char ** argv )
 
         if( val == NULL )
         {
-            printf( "Unexpected null value\n" );
+            printf( "FAILED: Unexpected null value\n" );
             remove( parent->pidfile );
             return -1;
         }
 
         if( strtol( val, &ptr, 10 ) != i + 1 )
         {
-            printf( "Unexpected output for second query\n" );
+            printf( "FAILED: Unexpected output for second query\n" );
             remove( parent->pidfile );
             return -1;
         }
@@ -150,14 +150,14 @@ int main( int argc, char ** argv )
 
     if( !rollback_transaction( parent ) )
     {
-        printf( "ROLLBACK failed\n" );
+        printf( "FAILED: ROLLBACK failed\n" );
         remove( parent->pidfile );
         return -1;
     }
 
     if( remove( parent->pidfile ) != 0 )
     {
-        printf( "Failed to cleanup pidfile\n" );
+        printf( "FAILED: Failed to cleanup pidfile\n" );
         return -1;
     }
 

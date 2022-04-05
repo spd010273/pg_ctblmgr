@@ -31,16 +31,17 @@ int main( void )
     if( !slab_init() )
     {
         fprintf( stderr, "FAILED: Could not initialize slab\n" );
-        return 1;
+        return -1;
     }
 
+    __test_harness(); // quiet canary failure we're going to hit later
     slab = new_slab( "TEST", sizeof( uint64_t ) );
     slab_set_count_hint( slab, TEST_SIZE );
 
     if( slab == INVALID_CONTEXT )
     {
         fprintf( stderr, "FAILED: Could not initialize slab context\n" );
-        return 1;
+        return -1;
     }
 
     ref = rsmalloc( slab, sizeof( uint64_t ) * TEST_SIZE );
@@ -48,75 +49,61 @@ int main( void )
     if( ref == NULLREF )
     {
         fprintf( stderr, "FAILED: Could not allocate shared memory\n" );
-        return 1;
+        return -1;
     }
 
     ptr = ( uint64_t * ) to_ptr( slab, ref );
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed to dereference pointer to local\n" );
-        return 1;
+        fprintf( stderr, "FAILED: Failed to dereference pointer to local\n" );
+        return -1;
     }
 
     for( i = 0; i < TEST_SIZE; i++ )
         ptr[i] = TEST_SIZE - i;
 
-    fprintf( stdout, "Write check complete - running canary test\n" );
     // Canary check should pass as we've stayed within allocated bounds
     if( !force_canary_check( slab ) )
     {
-        fprintf( stderr, "Canary check failed after bounded write\n" );
-        return 1;
+        fprintf( stderr, "FAILED: Canary check failed after bounded write\n" );
+        return -1;
     }
     // Check setting flag - don't actually want to crash the test ;)
 #ifndef _FORCE_SIGSEGV_ON_CANARY_FAILURE
-    fprintf( stdout, "Making out-of-bounds write to %p (%lu)\n", &(ptr[i]), i );
     save_canary = ptr[i];
     ptr[i]=42;
 
     if( force_canary_check( slab ) )
     {
-        fprintf( stderr, "Canary check passed after unbounded write\n" );
-        return 1;
+        fprintf( stderr, "FAILED: Canary check passed after unbounded write\n" );
+        return -1;
     }
 
-    fprintf( stdout, "Canary OOB write test passed\n" );
     ptr[i] = save_canary;
-#else
-    fprintf(
-        stdout,
-        "WARNING: Compiled with _FORCE_SIGSEGV_ON_CANARY_FAILURE."
-        " Cannot test out-of-bounds write\n"
-    );
 #endif // _FORCE_SIGSEGV_ON_CANARY_FAILURE
 
-
-    fprintf( stdout, "Extending allocation...\n" );
     ref2 = rsmalloc( slab, sizeof( uint64_t ) * ( ( TEST_SIZE * 4 ) + 2 ));
 
     if( ref_is_null( ref2 ) )
     {
-        fprintf( stderr, "Failed to extend allocation\n" );
-        exit( 1 );
+        fprintf( stderr, "FAILED: Failed to extend allocation\n" );
+        return -1;
     }
 
-    fprintf( stdout, "Making second allocation...\n" );
     ptr = ( uint64_t * ) to_ptr( slab, ref2 );
 
     if( ptr == NULL )
     {
         fprintf(
             stderr,
-            "Failed to dereference pointer to local for second allocation\n"
+            "FAILED: Failed to dereference pointer to local for second allocation\n"
         );
-        return 1;
+        return -1;
     }
 
     for( i = 0; i < ( TEST_SIZE * 4 ) + 2; i++ )
         ptr[i] = TEST_SIZE + i + 1;
-
-    fprintf( stdout, "Performing readback test on both allocations...\n" );
 
     ptr = to_ptr( slab, ref );
     for( i = 0; i < TEST_SIZE; i++ )
@@ -125,7 +112,7 @@ int main( void )
         {
             fprintf(
                 stderr,
-                "Failed at index %lu of first allocation\n"
+                "FAILED: Failed at index %lu of first allocation\n"
                 "  got %lu (%x%x), expected %lu\n",
                 ( uint64_t ) i,
                 ptr[i],
@@ -133,7 +120,7 @@ int main( void )
                 ( uint32_t ) ptr[i],
                 TEST_SIZE - i
             );
-            return 1;
+            return -1;
         }
     }
 
@@ -144,7 +131,7 @@ int main( void )
         {
             fprintf(
                 stderr,
-                "Failed at index %lu of second allocation. Expected %lu, got %lu (%x%x)\n",
+                "FAILED: Failed at index %lu of second allocation. Expected %lu, got %lu (%x%x)\n",
                 ( uint64_t ) i,
                 TEST_SIZE + i + 1,
                 ptr[i],
@@ -152,11 +139,10 @@ int main( void )
                 ( uint32_t ) ptr[i]
 
             );
-            return 1;
+            return -1;
         }
     }
 
-    fprintf( stdout, "Performing single allocation tests...\n" );
     ref3 = rsmalloc( slab, sizeof( uint64_t ) );
     ref4 = rsmalloc( slab, sizeof( uint64_t ) );
     ref5 = rsmalloc( slab, sizeof( uint64_t ) );
@@ -166,13 +152,12 @@ int main( void )
     *( ( uint64_t * ) to_ptr( slab, ref4 ) ) = 0xBBBBBBBBBBBBBBBB;
     *( ( uint64_t * ) to_ptr( slab, ref5 ) ) = 0xCCCCCCCCCCCCCCCC;
 
-    fprintf( stdout, "Performing allocations in low space conditions...\n" );
     ref6 = rsmalloc( slab, sizeof( uint64_t ) * 64 );
     ptr = to_ptr( slab, ref6 );
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed, ref6 pointer is NULL\n" );
-        return 1;
+        fprintf( stderr, "FAILED: ref6 pointer is NULL\n" );
+        return -1;
     }
 
     for( i = 0; i < 64; i++ )
@@ -183,8 +168,8 @@ int main( void )
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed, ref7 pointer is NULL\n" );
-        return 1;
+        fprintf( stderr, "FAILED: ref7 pointer is NULL\n" );
+        return -1;
     }
 
     for( i = 0; i < 7; i++ )
@@ -196,14 +181,32 @@ int main( void )
     ptr = to_ptr( slab, ref8 );
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed, ref8 pointer is NULL\n" );
-        return 1;
+        fprintf( stderr, "FAILED ref8 pointer is NULL\n" );
+        return -1;
+    }
+
+    // Check ref3->ref5
+    if( *( ( uint64_t * ) to_ptr( slab, ref3 ) ) != 0xAAAAAAAAAAAAAAAA )
+    {
+        fprintf( stderr, "FAILED: ref3 corrupted\n" );
+        return -1;
+    }
+
+    if( *( ( uint64_t * ) to_ptr( slab, ref4 ) ) != 0xBBBBBBBBBBBBBBBB )
+    {
+        fprintf( stderr, "FAILED: ref4 corrupted\n" );
+        return -1;
+    }
+
+    if( *( ( uint64_t * ) to_ptr( slab, ref5 ) ) != 0xCCCCCCCCCCCCCCCC )
+    {
+        fprintf( stderr, "FAILED: ref5 corrupted\n" );
+        return -1;
     }
 
     for( i = 0; i < 67; i++ )
         ptr[i] = 0xFFFFFFFFFFFFFFFF;
 
-    fprintf( stdout, "Performing allocations in extension mode...\n" );
     // final fsm word should be 1111111111111111 1110000000000000 0000000000000000 0000000000000111
     // We're going to ask for the remainder, but this /should/ cause a segment extension
     ref9 = rsmalloc( slab, sizeof( uint64_t ) * 26 );
@@ -212,14 +215,13 @@ int main( void )
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed, ref9 pointer is NULL\n" );
-        return 1;
+        fprintf( stderr, "FAILED ref9 pointer is NULL\n" );
+        return -1;
     }
 
     for( i = 0; i < 26; i++ )
         ptr[i] = 0x9999999999999999;
 
-    fprintf( stdout, "Testing initial writes after allocation tests...\n" );
     // Repeat of earlier tests, but certifies that the FSM didnt get muddied up
     ptr = to_ptr( slab, ref );
     for( i = 0; i < TEST_SIZE; i++ )
@@ -228,7 +230,7 @@ int main( void )
         {
             fprintf(
                 stderr,
-                "Failed at index %lu of first allocation\n"
+                "FAILED: Failed at index %lu of first allocation\n"
                 "  got %lu (%x%x), expected %lu\n",
                 ( uint64_t ) i,
                 ptr[i],
@@ -236,7 +238,7 @@ int main( void )
                 ( uint32_t ) ( ptr[i] ),
                 TEST_SIZE - i
             );
-            return 1;
+            return -1;
         }
     }
 
@@ -247,17 +249,17 @@ int main( void )
         {
             fprintf(
                 stderr,
-                "Failed at index %lu of second allocation. Expected %lu, got %lu (%x%x)\n",
+                "FAILED: Failed at index %lu of second allocation. Expected %lu, got %lu (%x%x)\n",
                 ( uint64_t ) i,
                 TEST_SIZE + i + 1,
                 ptr[i],
                 ( uint32_t ) ( ptr[i] >> 32 ),
                 ( uint32_t ) ptr[i]
             );
-            return 1;
+            return -1;
         }
     }
-    fprintf( stdout, "Freeing allocations...\n" );
+
     rsfree( slab, ref );
     rsfree( slab, ref2 );
     rsfree( slab, ref3 );
@@ -268,40 +270,38 @@ int main( void )
     //rsfree( slab, ref7 );
     rsfree( slab, ref8 );
 
-    fprintf( stdout, "Performing first reallocation test (no segment extension)...\n" );
     ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 1024 );
     if( ref_is_null( ref9 ) )
     {
-         fprintf( stderr, "Failed to reallocate.\n" );
-         return 1;
+         fprintf( stderr, "FAILED: Failed to reallocate.\n" );
+         return -1;
     }
-    
+
     //dump_context( slab );
     ptr = to_ptr( slab, ref9 );
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed - reallocated pointer is NULL\n" );
-        return 1;
+        fprintf( stderr, "FAILED: reallocated pointer is NULL\n" );
+        return -1;
     }
 
     for( i = 0; i < 1024; i++ )
         ptr[i] = i * i;
 
-    fprintf( stdout, "Performing second reallocation test (realloc with segment extension)...\n" );
     ref9 = rsrealloc( slab, ref9, sizeof( uint64_t ) * 2048 );
 
     if( ref_is_null( ref9 ) )
     {
-        fprintf( stderr, "Failed to reallocate and extend segment\n" );
-        return 1;
+        fprintf( stderr, "FAILED: Failed to reallocate and extend segment\n" );
+        return -1;
     }
 
     ptr = to_ptr( slab, ref9 );
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed - reallocated pointer with extension is NULL\n" );
-        return 1;
+        fprintf( stderr, "FAILED: reallocated pointer with extension is NULL\n" );
+        return -1;
     }
 
     for( i = 0; i < 1024; i++ )
@@ -310,7 +310,7 @@ int main( void )
         {
             fprintf(
                 stderr,
-                "Failed: Readback of reallocated data returned mismatch at %lu. ptr[%lu] != %lu (got %lu, %x%x)\n",
+                "FAILED: Readback of reallocated data returned mismatch at %lu. ptr[%lu] != %lu (got %lu, %x%x)\n",
                 ( uint64_t ) i,
                 ( uint64_t ) i,
                 ( uint64_t ) ( i * i ),
@@ -318,7 +318,7 @@ int main( void )
                 ( uint32_t ) ( ptr[i] >> 32 ),
                 ( uint32_t ) ptr[i]
             );
-            return 1;
+            return -1;
         }
     }
 
@@ -326,7 +326,6 @@ int main( void )
         ptr[i] = 42;
 
 
-    fprintf( stdout, "Beginning SMP test...\n" );
     child = fork();
 
     if( child == 0 )
@@ -340,59 +339,55 @@ int main( void )
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed - parent returned NULL pointer after child exit\n" );
-        return 1;
+        fprintf( stderr, "FAILED: parent returned NULL pointer after child exit\n" );
+        return -1;
     }
 
     /*
      * Here's the issue - the allocation gets moved by the child because it's large - but the ref remains absolute as an offset into the page.
      * We'll need to offset off of that when allocs get relocated, possibly by wrapping to_ptr in slab.c, possibly by allocset index and offset?
      */
-    fprintf( stdout, "Parent confirming child baseline writes...\n" );
     for( i = 0; i < 2048; i++ )
     {
         if( ptr[i] != 42 + i )
         {
             fprintf(
                 stderr,
-                "Failed - child writes not visible to parent at index %lu, got %lu, expected %lu\n",
+                "FAILED: child writes not visible to parent at index %lu, got %lu, expected %lu\n",
                 ( uint64_t ) i,
                 ( uint64_t ) ptr[i],
                 ( uint64_t ) 42 + i
             );
-            return 1;
+            return -1;
         }
     }
 
-    fprintf( stdout, "Parent confirming child extended writes...\n" );
     for( i = 2048; i < 4096; i++ )
     {
         if( ptr[i] != 42 * i )
         {
             fprintf(
                 stderr,
-                "Failed - extended write not visible to parent at index %lu (%p), got %lu, expected %lu\n",
+                "FAILED: extended write not visible to parent at index %lu (%p), got %lu, expected %lu\n",
                 ( uint64_t ) i,
                 &( ptr[i] ),
                 ( uint64_t ) ptr[i],
                 ( uint64_t ) 42 * i
             );
-            return 1;
+            return -1;
         }
     }
 
-    fprintf( stdout, "SMP test passed.\nforcing canary checks...\n" );
     if( !force_canary_check( slab ) )
     {
-        fprintf( stderr, "TEST slab failed canary check\n" );
-        return 1;
+        fprintf( stderr, "FAILED: TEST slab failed canary check\n" );
+        return -1;
     }
-    
-    fprintf( stdout, "Canary checks passed, destroying slabs...\n" );
+
     rsfree( slab, ref9 );
     rsfree( slab, ref7 );
     destroy_slab( slab );
-    fprintf( stdout, "Done.\n" );
+    fprintf( stdout, "All tests passed\n" );
     return 0;
 }
 
@@ -404,7 +399,7 @@ static void child_routine( ref_t ref )
 
     if( !slab_init() )
     {
-        fprintf( stderr, "Failed - Child could not initialize slab\n" );
+        fprintf( stderr, "FAILED: Child could not initialize slab\n" );
         return;
     }
 
@@ -412,7 +407,7 @@ static void child_routine( ref_t ref )
 
     if( slab == INVALID_CONTEXT )
     {
-        fprintf( stderr, "Failed - child could not get TEST context\n" );
+        fprintf( stderr, "FAILED: child could not get TEST context\n" );
         return;
     }
 
@@ -420,18 +415,17 @@ static void child_routine( ref_t ref )
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed - child dereferenced NULL ref\n" );
+        fprintf( stderr, "FAILED: child dereferenced NULL ref\n" );
         return;
     }
 
-    fprintf( stdout, "Performing SMP read/write test...\n" );
     for( i = 0; i < 2048; i++ )
     {
         if( ptr[i] != 42 )
         {
             fprintf(
                 stderr,
-                "Failed - child read of index %lu did returned %lu, expected %lu\n",
+                "FAILED: child read of index %lu did returned %lu, expected %lu\n",
                 ( uint64_t ) i,
                 ( uint64_t ) ptr[i],
                 ( uint64_t ) 42
@@ -442,17 +436,15 @@ static void child_routine( ref_t ref )
         ptr[i] = 42 + i;
     }
 
-    fprintf( stdout, "Child extending slab...\n" );
     ref = rsrealloc( slab, ref, sizeof( uint64_t ) * 4096 );
     ptr = to_ptr( slab, ref );
 
     if( ptr == NULL )
     {
-        fprintf( stderr, "Failed - child could not extend segment.\n" );
+        fprintf( stderr, "FAILED: child could not extend segment.\n" );
         return;
     }
 
-    fprintf( stdout, "Child performing extended read/write test...\n" );
     for( i = 0; i < 4096; i++ )
     {
         //fprintf( stdout, "CHILD ADDRESS %p offset %lu\n", &( ptr[i] ), ( uint64_t ) i );
@@ -462,7 +454,7 @@ static void child_routine( ref_t ref )
             {
                 fprintf(
                     stderr,
-                    "Failed - old data corrupted at index %lu, got %lu, expected %lu\n",
+                    "FAILED: old data corrupted at index %lu, got %lu, expected %lu\n",
                     ( uint64_t ) i,
                     ( uint64_t ) ptr[i],
                     ( uint64_t ) i + 42

@@ -15,8 +15,10 @@
  */
 
 #include "slpq.h"
+#ifdef SLPQ_DEBUG
 static void _dump_node( slpq_node_ref_t );
 static void _dump_slpq( slpq_ref_t );
+#endif // SLPQ_DEBUG
 static context_t slpq_context;
 static context_t slpq_node_context;
 
@@ -113,7 +115,9 @@ ref_t slpq_pop( slpq_ref_t head )
     struct slpq_node * temp      = NULL;
     struct slpq *      slpq_head = NULL;
 
+    #ifdef SLPQ_DEBUG
     _dump_slpq( head );
+    #endif // SLPQ_DEBUG
     if( unlikely( head == NULLREF ) )
         return NULLREF;
 
@@ -277,6 +281,7 @@ void slpq_free( slpq_ref_t head )
     return;
 }
 
+#ifdef SLPQ_DEBUG
 static void _dump_node( slpq_node_ref_t n )
 {
     struct slpq_node * node = NULL;
@@ -345,3 +350,4 @@ static void _dump_slpq( slpq_ref_t head )
 
     return;
 }
+#endif // SLPQ_DEBUG

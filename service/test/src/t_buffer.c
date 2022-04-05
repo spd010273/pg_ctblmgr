@@ -195,7 +195,7 @@ int main( void )
     for( i = 0; i < NUM_TESTS; i++ )
     {
         bdata = rsmalloc( slab, sizeof( char * ) * strlen( data[i] ) );
-        test = ( char * ) to_ptr( slab, bdata ); 
+        test = ( char * ) to_ptr( slab, bdata );
 
         if( test == NULL || bdata == NULLREF )
         {

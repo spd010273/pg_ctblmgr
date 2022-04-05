@@ -38,6 +38,7 @@
 #include "slab.h"
 #include "util.h"
 
+//#define SLPQ_DEBUG 1
 #define SLPQ_CONTEXT_NAME "SLPQ"
 #define SLPQ_NODE_CONTEXT_NAME "SLPQ_NODE"
 

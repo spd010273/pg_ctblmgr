@@ -29,18 +29,16 @@ static void child_routine_refcheck( __ref );
 
 int main( void )
 {
-    pid_t child = 0;
-    __ref data = {0};
-    void * mapped_addr = NULL;
-    uint64_t * test = NULL;
+    pid_t      child       = 0;
+    __ref      data        = {0};
+    void *     mapped_addr = NULL;
+    uint64_t * test        = NULL;
 
     // Phase I - initialize, allocate a segment, blank and write the whole page
     // Phase II - fork(), have the child verify the page and blank the page
     // Phase III - parent and child test the __ref struct to verify that differential pointers work
 
-
     // Begin - Phase I
-    fprintf( stdout, "PHASE 1: Single process test\n" );
     shm_init();
     mapped_addr = new_segment( TEST_SIZE );
 
@@ -50,37 +48,25 @@ int main( void )
             stderr,
             "FAILED: Could not map new segment\n"
         );
-        exit( 1 );
+        return -1;
     }
     //print_block( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, "  Write test..." );
     fill_block( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Read test..." );
     check_block( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
     //print_block( mapped_addr, ( size_t ) TEST_SIZE );
     // Begin - Phase II
-    fprintf( stdout, "PHASE 2: SMP test\n" );
     data = get_ref( mapped_addr );
     child = fork();
 
     if( child == 0 ) // child
     {
         child_routine( data );
-        exit( 1 );
+        return -1;
     }
 
     wait( NULL );
-    fprintf( stdout, "  Read test (from child)..." );
     check_block( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Reference / dereference logic..." );
     check_ref_logic( mapped_addr, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-
-    fprintf( stdout, "PHASE 3: SMP reference checking\n" );
-    fprintf( stdout, "  Sending ref to child..." );
 
     test = ( uint64_t * ) mapped_addr + sizeof( uint64_t );
     *test = 0x12348765;
@@ -89,11 +75,11 @@ int main( void )
     if( child == 0  ) // child
     {
         child_routine_refcheck( data );
-        exit ( 1 );
+        return -1;
     }
 
     wait( NULL );
-    
+
     if( *test != 0x43215678 )
     {
         fprintf(
@@ -102,34 +88,26 @@ int main( void )
             ( void * ) *test,
             ( void * ) 0x43215678
         );
-        exit( 1 );
+        return -1;
     }
-    
-    fprintf( stdout, "Resizing segment\n" );
+
     if(
-        shm_resize_segment( 
+        !shm_resize_segment(
             ref_get_segment( data ),
             TEST_SIZE * 4
         )
       )
     {
-        fprintf( stdout, "Resize success\n" );
-    }
-    else
-    {
         fprintf( stderr, "FAILED: Resize failed\n" );
-        exit( 1 );
+        return -1;
     }
-    
+
     mapped_addr = get_ptr( data );
-    fprintf( stdout, "random fill: %p\n", mapped_addr );
     random_fill( mapped_addr, TEST_SIZE * 4 );
-    
-    fprintf( stdout, " Done.\n" );
 
     unmap_all();
 
-    fprintf( stdout, "All tests passed.\n" );
+    fprintf( stdout, "All tests passed\n" );
     return 0;
 }
 
@@ -160,8 +138,6 @@ static void child_routine_refcheck( __ref data )
         exit ( 1 );
     }
 
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Sending ref to parent..." );
     *test = 0x43215678;
     unmap_all();
     return;
@@ -204,28 +180,14 @@ static void child_routine( __ref data )
         exit( 1 );
     }
 
-    fprintf( stdout, "  Child read test (from parent)..." );
     check_block( mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Child write test..." );
     fill_block( mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
 
-    fprintf( stdout, "  Child read test..." );
     check_block( mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Child zero fill..." );
     zero_segment( ref_get_segment( data ) );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Child random fill..." );
     random_fill(mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Child write test (for parent)..." );
     fill_block( mapping, ( size_t ) TEST_SIZE );
-    fprintf( stdout, " Done.\n" );
-    fprintf( stdout, "  Child unmapping segment..." );
     unmap_all();
-    fprintf( stdout, " Done.\n" );
     return;
 }
 
@@ -260,7 +222,7 @@ static void fill_block( void * mapped_addr, size_t size )
 
     if( size % 8 != 0 )
     {
-        fprintf( stderr, "size needs to be a multiple of 8\n" );
+        fprintf( stderr, "FAILED: size needs to be a multiple of 8\n" );
         return;
     }
 
@@ -327,7 +289,7 @@ static void check_block( void * mapped_addr, size_t size )
 
     if( ( size % 8 ) != 0 )
     {
-        fprintf( stderr, "Size needs to be a multiple of 8\n" );
+        fprintf( stderr, "FAILED: Size needs to be a multiple of 8\n" );
         return;
     }
 
@@ -337,7 +299,7 @@ static void check_block( void * mapped_addr, size_t size )
     {
         if( *(ptr + i ) != data64 )
         {
-            fprintf( stderr, "Failed pattern " );
+            fprintf( stderr, "FAILED: pattern " );
             print_bin( data64 );
             fprintf( stderr, "Got " );
             print_bin( *( ptr + i ) );
@@ -357,7 +319,7 @@ static void check_block( void * mapped_addr, size_t size )
 
         if( *(ptr + i) != data64 )
         {
-            fprintf( stderr, "Failed pattern " );
+            fprintf( stderr, "FAILED: pattern " );
             print_bin( data64 );
             return;
         }
@@ -409,4 +371,3 @@ static void check_ref_logic( void * mapped_address, size_t size )
 
     return;
 }
-

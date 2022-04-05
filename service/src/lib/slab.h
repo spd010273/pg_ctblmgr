@@ -311,7 +311,7 @@ extern bool force_canary_check( context_t );
 extern slab_header * get_header_by_context( context_t );
 extern void print_fsm( slab_header * header );
 extern void dump_control( void );
-
+extern void __test_harness( void );
 
 // Reference / dereference subsystem
 
