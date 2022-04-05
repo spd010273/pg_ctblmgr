@@ -583,7 +583,7 @@ changeset_ref_t json_to_changeset(
             key_string,
             strlen( key_string )
         );
-        schema_name[strlen( key_string )] = '\0';
+        table_name[strlen( key_string )] = '\0';
     }
 
     // parse out subobjects using the saved token and index into tokens[]

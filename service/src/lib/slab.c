@@ -2357,16 +2357,19 @@ static INLINE uint64_t __find_fsm_spot(
                           - ( position + requested_length ) - pos_offset
                         );
 
+                    if( requested_length > FSM_SHIFT_WIDTH )
+                        temp = last_word_val;
+                    
                     mask = ( fsm_cmp_t ) FSM_LAST_WORD_MASK;
-                    temp = last_word_val;
                     _slab_log(
                         LL_SLAB_DEBUG,
-                        "Attempting to compactify from position %lu (ret: %lu)",
+                        "Attempting WIDE compactify from position %lu (ret: %lu)",
                         position,
                         header->max_allocations
                       - ( position + requested_length )
                       - pos_offset
                     );
+                    
                     while( ( ~temp & mask ) != 0 )
                     {
                         if( temp == 0 )
@@ -2375,6 +2378,12 @@ static INLINE uint64_t __find_fsm_spot(
                         position--;
                     }
 
+                    _slab_log(
+                        LL_SLAB_DEBUG,
+                        "Returning compactified position %lu (%lu)",
+                        position,
+                        header->max_allocations - ( position + requested_length ) - pos_offset
+                    );
                     return (
                         header->max_allocations
                       - ( position + requested_length )

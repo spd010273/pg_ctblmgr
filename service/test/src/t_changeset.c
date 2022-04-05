@@ -230,7 +230,7 @@ int main( void )
             if( t == NULL )
                 return -1;
 
-            for( j = 0; i < expect_keys_len[i]; j++ )
+            for( j = 0; j < expect_keys_len[i]; j++ )
             {
                 exp_temp = ( ( char ** ) &(expect_keys[i]) )[j];
                 t[j] = ( changeset_string_ref_t ) rsmalloc(
@@ -272,7 +272,7 @@ int main( void )
             if( t == NULL )
                 return -1;
 
-            for( j = 0; i < expect_vals_len[i]; j++ )
+            for( j = 0; j < expect_vals_len[i]; j++ )
             {
                 exp_temp = ( ( char ** ) &(expect_vals[i]) )[j];
                 t[j] = ( changeset_string_ref_t ) rsmalloc(
@@ -314,7 +314,7 @@ int main( void )
             if( t == NULL )
                 return -1;
 
-            for( j = 0; i < expect_columns_len[i]; j++ )
+            for( j = 0; j < expect_columns_len[i]; j++ )
             {
                 exp_temp = ( ( char ** ) &(expect_columns[i]) )[j];
                 t[j] = ( changeset_string_ref_t ) rsmalloc(
@@ -356,7 +356,7 @@ int main( void )
             if( t == NULL )
                 return -1;
 
-            for( j = 0; i < expect_new_len[i]; j++ )
+            for( j = 0; j < expect_new_len[i]; j++ )
             {
                 exp_temp = ( ( char ** ) &(expect_new[i]) )[j];
                 t[j] = ( changeset_string_ref_t ) rsmalloc(
@@ -398,7 +398,7 @@ int main( void )
             if( t == NULL )
                 return -1;
 
-            for( j = 0; i < expect_old_len[i]; j++ )
+            for( j = 0; j < expect_old_len[i]; j++ )
             {
                 t[j] = ( changeset_string_ref_t ) rsmalloc(
                     get_changeset_string_context(),
@@ -421,6 +421,28 @@ int main( void )
             }
         }
 
+        expects->schema_name = ( changeset_string_ref_t ) rsmalloc(
+            get_changeset_string_context(),
+            sizeof( expects_schema[i] ) + 1
+        );
+
+        exp_temp = ( char * ) to_ptr( get_changeset_string_context(), expects->schema_name );
+        if( exp_temp == NULL )
+            return -1;
+
+        strncpy( exp_temp, expects_schema[i], strlen( expects_schema[i] ) );
+        exp_temp[strlen(expects_schema[i])] = '\0';
+
+        expects->table_name = ( changeset_string_ref_t ) rsmalloc(
+            get_changeset_string_context(),
+            sizeof( expects_table[i] ) + 1
+        );
+        exp_temp = ( char * ) to_ptr( get_changeset_string_context(), expects->table_name );
+        if( exp_temp == NULL )
+            return -1;
+
+        strncpy( exp_temp, expects_table[i], strlen( expects_table[i] ) );
+        exp_temp[strlen(expects_table[i])] = '\0';
         input     = ( char * ) tests[i];
         wal_level = wal_levels[i];
         //print_expects( expects );
@@ -805,6 +827,16 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
         }
     }
 
+    if( ex->schema_name == NULLREF || cs->schema_name == NULLREF )
+    {
+        printf( "Schema_name seems to be unallocated\n" );
+        if( ex->schema_name == NULLREF )
+            printf( "Expect has null schema name\n" );
+        if( cs->schema_name == NULLREF )
+            printf( "Changeset has null schema name\n" );
+        return false;
+    }
+
     arr_elem_e = ( char * ) to_ptr( get_changeset_string_context(), ex->schema_name );
     arr_elem_c = ( char * ) to_ptr( get_changeset_string_context(), cs->schema_name );
 
@@ -822,7 +854,7 @@ static bool check_expects( struct changeset * ex, struct changeset * cs )
       )
     {
         printf(
-            "schema_name mismatch: Ex: %s, Cs: %s",
+            "schema_name mismatch: Ex: %s, Cs: %s\n",
             arr_elem_e,
             arr_elem_c
         );
