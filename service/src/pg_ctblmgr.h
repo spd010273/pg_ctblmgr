@@ -9,7 +9,9 @@
 #include "lib/changeset.h"
 #include "lib/xlog.h"
 
-#define QUAL_MAX 128
+#define REL_MAX_LEN 64
+#define SCHEMA_MAX_LEN 64
+#define QUAL_MAX ( REL_MAX_LEN + SCHEMA_MAX_LEN + 2 ) // 'schema.table\0'
 int main( int, char ** );
 
 static int start_workers( void );
@@ -24,7 +26,7 @@ static void get_filter_tables_by_channel(
     unsigned int *
 );
 static char * get_filter_tables_string( void );
-static void get_worker_pins( struct worker *, struct buffer_pin *** );
+static void get_worker_pins( struct worker *, buffer_pin_ref_t ** );
 static void parent_main_loop( void );
-static bool get_changeset_batch( char *, struct changeset ***, unsigned int *, char ** );
+static bool get_changeset_batch( char *, changeset_ref_t **, unsigned int *, char ** );
 #endif // PG_CTBLMGR_H

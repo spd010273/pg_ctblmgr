@@ -117,11 +117,16 @@ static void parent_main_loop( void )
     unsigned int        i              = 0;
     unsigned int        j              = 0;
     char                qual[QUAL_MAX] = {0};
+    changeset_ref_t     changeset      = NULLREF;
+    buffer_pin_ref_t    bufferpin      = NULLREF;
+    changeset_ref_t *   changeset_arr  = NULL;
     struct changeset *  cs             = NULL;
-    struct buffer_pin * bp             = NULL;
-    struct changeset ** cs_array       = NULL;
+    struct changeset *  cs_array       = NULL;
     unsigned int        num_cs_array   = 0;
     char *              commit_lsn     = NULL;
+    char *              schema_name    = NULL;
+    char *              table_name     = NULL;
+    bool                no_seek        = false;
 
     filter_tables = get_filter_tables_string();
 
@@ -132,7 +137,7 @@ static void parent_main_loop( void )
     // then turn around and mop up after they've been consumed.
     // The tough part here is not losing xlog changes. Especially in the case where >1 worker
     // relies on changes from one table and finish at different rates
-    while( true )
+_ML:while( true )
     {
         /*
          * Parent needs to:
@@ -144,7 +149,7 @@ static void parent_main_loop( void )
         if(
                 get_changeset_batch(
                     filter_tables,
-                    &cs_array,
+                    &changeset_arr,
                     &num_cs_array,
                     &commit_lsn
                 )
@@ -154,72 +159,132 @@ static void parent_main_loop( void )
             if( num_cs_array == 0 )
                 continue; // no committed changes
 
-            // XXX So uhhh the cs is not allocated in a shared space so access from the worker may
-            // SIGSEGV lol (maybe not though, they are allocated in the parent process and distributed
-            // to the children. if it's the case we can convert lib/changeset.c to use shm allocation
+            // Failure mode here is to get 'stuck'. We don't want to lose transactions if at all possible,
+            // so if we have trouble parsing a specific changeset, we'll wedge ourselves between the peek
+            // and failure point to avoid seeking that change out of the queue.
             for( i = 0; i < num_cs_array; i++ )
             {
-                cs = cs_array[i];
+                changeset = changeset_arr[i];
+                if( unlikely( changeset == NULLREF ) )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Bad changeset at index %u in changeset array %p",
+                        ( uint32_t ) i,
+                        cs_array
+                    );
+                    goto _ML;
+                }
+
+                cs = ( struct changeset * ) to_ptr( get_changeset_context(), changeset );
+
+                if( unlikely( cs == NULL ) )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Dereferenced changeset at ref_t %lu is NULL (index: %u)",
+                        ( uint64_t ) changeset,
+                        ( uint32_t ) i
+                    );
+                    goto _ML;
+                }
+
                 _log( LOG_LEVEL_DEBUG, "Got change LSN %s", offset_to_lsn( cs->lsn ) );
-                //dump_changeset( cs );
+                //dump_changeset( changeset );
                 _log( LOG_LEVEL_DEBUG, "Propogating changes to %d workers", num_workers );
+                schema_name = ( char * ) to_ptr( get_changeset_string_context(), cs->schema_name );
+                table_name  = ( char * ) to_ptr( get_changeset_string_context(), cs->table_name );
+
+                if( schema_name == NULL || table_name == NULL )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Invalid schema or table name %s.%s",
+                        schema_name == NULL ? "NULL" : schema_name,
+                        table_name == NULL ? "NULL" : table_name
+                    );
+                    goto _ML;
+                }
+
                 for( j = 0; j < num_workers; j++ )
                 {
-                    memset( qual, 0, QUAL_MAX );
-                    strncpy( qual, cs->schema_name, strlen( cs->schema_name ) );
+                    memset( qual, '\0', QUAL_MAX );
+                    strncpy( qual, schema_name, strlen( schema_name ) );
                     strncat( qual, ".", 1 );
-                    strncat( qual, cs->table_name, strlen( cs->table_name ) );
+                    strncat( qual, table_name, strlen( table_name ) );
 
                     _log( LOG_LEVEL_DEBUG, "Looking for a worker with qual %s", qual );
-                    bp = buffer_get_pin_by_name( (workers[j])->buffer, qual );
-                    _log( LOG_LEVEL_DEBUG, "Got pin pointer %p", bp );
-                    if( bp != NULL )
+
+                    bufferpin = buffer_get_pin_by_name( (workers[j])->buffer, qual );
+
+                    if( unlikely( bufferpin == NULLREF ) )
                     {
-                        if( !buffer_pin_push( bp, ( void * ) cs ) )
-                        {
-                            _log(
-                                LOG_LEVEL_ERROR,
-                                "Failed to push changeset for %s.%s to worker %d",
-                                cs->schema_name,
-                                cs->table_name,
-                                (workers[j])->pid
-                            );
-                        }
-                        else
-                        {
-                            _log(
-                                LOG_LEVEL_DEBUG,
-                                "Pushed changeset %p to bp %p",
-                                cs,
-                                bp
-                            );
-                        }
+                        _log(
+                            LOG_LEVEL_ERROR,
+                            "Got invalid bufferpin for worker %lu (pid: %lu)",
+                            ( uint64_t ) j,
+                            ( uint64_t ) (workers[j])->pid
+                        );
+                        no_seek = true;
+                        continue;
                     }
+
+                    if( !buffer_pin_push( bufferpin, ( ref_t ) changeset ) )
+                    {
+                        _log(
+                            LOG_LEVEL_ERROR,
+                            "Failed to push changeset for %s.%s to worker %d",
+                            schema_name,
+                            table_name,
+                            (workers[j])->pid
+                        );
+                        no_seek = true;
+                        continue;
+                    }
+                    else
+                    {
+                        _log(
+                            LOG_LEVEL_DEBUG,
+                            "Pushed changeset %p to bp %p",
+                            cs,
+                            to_ptr( get_buffer_pin_context(), bufferpin )
+                        );
+                    }
+
+                    schema_name = NULL;
+                    table_name  = NULL;
                 }
             }
 
             num_cs_array = 0;
-            params[0] = MAIN_CHANNEL;
-            params[1] = commit_lsn;
-            params[2] = "M";
-            params[3] = filter_tables;
-            result = execute_query(
-                parent,
-                ( char * ) replication_seek,
-                params,
-                4
-            );
-
-            if( result == NULL )
+            if( no_seek )
             {
-                _log(
-                    LOG_LEVEL_ERROR,
-                    "Failed to consume changes up to LSN %s",
-                    params[1]
-                );
-            }
+                params[0] = MAIN_CHANNEL;
+                params[1] = commit_lsn;
+                params[2] = "M";
+                params[3] = filter_tables;
 
-            _log( LOG_LEVEL_DEBUG, "Committed LSN is %s", commit_lsn );
+                result = execute_query(
+                    parent,
+                    ( char * ) replication_seek,
+                    params,
+                    4
+                );
+
+                if( result == NULL )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to consume changes up to LSN %s",
+                        params[1]
+                    );
+                }
+
+                _log( LOG_LEVEL_DEBUG, "Committed LSN is %s", commit_lsn );
+            }
+            // Need a reset mechanism for no_seek. We need to detect if the workers have miraculously
+            // caught up, though this mechanism is supposed to keep the bad changeset's isolated until
+            // a human can intervene
             free( commit_lsn );
             commit_lsn = NULL;
             free( cs_array );
@@ -400,15 +465,16 @@ static bool extension_installed( void )
 
 static void worker_entrypoint( void * data )
 {
-    struct worker *      me      = NULL;
-    PGresult *           result  = NULL;
-    buffer_pin_ref_t   * pins    = NULL;
-    unsigned int         i       = 0;
-    uint64_t             lsn     = 0;
-    uint64_t             max_lsn = 0;
-    struct changeset *   cs      = NULL;
-    char *               currlsn = NULL;
-    char *               lastlsn = NULL;
+    struct worker *      me        = NULL;
+    PGresult *           result    = NULL;
+    buffer_pin_ref_t   * pins      = NULL;
+    uint32_t             i         = 0;
+    uint64_t             lsn       = 0;
+    uint64_t             max_lsn   = 0;
+    struct changeset *   cs        = NULL;
+    changeset_ref_t      changeset = NULLREF;
+    char *               currlsn   = NULL;
+    char *               lastlsn   = NULL;
 
     if( data == NULL )
     {
@@ -467,7 +533,7 @@ static void worker_entrypoint( void * data )
 
     _log( LOG_LEVEL_DEBUG, "Pins: %p", pins );
 
-    while( 1 )
+_CL:while( 1 )
     {
         sleep( 1 );
         if( me->conn == NULL )
@@ -483,24 +549,36 @@ static void worker_entrypoint( void * data )
         _log( LOG_LEVEL_DEBUG, "Worker in main loop" );
         for( i = 0; i < me->config.num_tables; i++ )
         {
-            data = buffer_pin_pop( pins[i] );
-            _log( LOG_LEVEL_DEBUG, "Worker popped %p from pin %p", data, pins[i] );
-            if( data == NULL )
+            changeset = ( changeset_ref_t ) buffer_pin_pop( pins[i] );
+            _log( LOG_LEVEL_DEBUG, "Worker popped %lu from pin %lu", ( uint64_t ) data, ( uint64_t ) pins[i] );
+            if( changeset == NULLREF )
             {
                 _log(
                     LOG_LEVEL_DEBUG,
-                    "Buffer pin %p (%s) empty",
-                    pins[i],
+                    "Buffer pin %lu (%s) empty",
+                    ( uint64_t ) pins[i],
                     me->config.filter_tables[i]
                 );
+                goto _CL;
             }
             else
             {
                 // data is a valid changeset and we'll add it to our todo list
-                cs = ( struct changeset * ) data;
-                lsn          = cs->lsn;
+                cs = ( struct changeset * ) to_ptr( get_changeset_context(), changeset );
 
-                dump_changeset( cs );
+                if( unlikely( cs == NULL ) )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to dereference changeset ref %lu",
+                        ( uint64_t ) changeset
+                    );
+                    goto _CL;
+                }
+
+                lsn = cs->lsn;
+
+                dump_changeset( changeset );
                 // Sanity check to ensure we are consuming changes in order
                 if( cs->lsn <= me->last_lsn )
                 {
@@ -525,6 +603,8 @@ static void worker_entrypoint( void * data )
                     if( lsn > max_lsn )
                         max_lsn = lsn;
                 }
+
+                // Do stuff with the changeset
             }
         }
     }
@@ -535,7 +615,7 @@ static void worker_entrypoint( void * data )
 
 static void get_worker_pins( struct worker * me, buffer_pin_ref_t ** bp_array )
 {
-    unsigned int i = 0;
+    uint32_t i = 0;
 
     if( me == NULL || bp_array == NULL )
     {
@@ -556,9 +636,9 @@ static void get_worker_pins( struct worker * me, buffer_pin_ref_t ** bp_array )
     }
 
     _log( LOG_LEVEL_DEBUG, "worker allocating %u pins", me->config.num_tables );
-    *bp_array = ( buffer_pin_ref_t ** ) calloc(
+    *bp_array = ( buffer_pin_ref_t * ) calloc(
         me->config.num_tables,
-        sizeof( buffer_pin_ref_t * )
+        sizeof( buffer_pin_ref_t )
     );
 
     if( *bp_array == NULL )
@@ -636,7 +716,7 @@ static bool initialize_buffer( struct worker * me )
     if( me == NULL || me->type != WORKER_TYPE_PARENT )
         return false;
 
-    new_buffer( &(me->buffer), NULL, NULL );
+    new_buffer( &(me->buffer), NULL, NULLREF );
 
     get_filter_tables_by_channel(
         me,
@@ -767,7 +847,7 @@ static void get_filter_tables_by_channel(
  */
 static bool get_changeset_batch(
     char *               filter_tables,
-    struct changeset *** result,
+    changeset_ref_t   ** result,
     unsigned int *       num_results,
     char **              commit_lsn
 )
@@ -781,6 +861,7 @@ static bool get_changeset_batch(
     uint64_t           lsn         = 0;
     char *             lsn_str     = NULL;
     struct changeset * cs          = NULL;
+    changeset_ref_t    changeset   = NULLREF;
     bool               begin_found = false;
 
     if( result == NULL || num_results == NULL || commit_lsn == NULL )
@@ -809,13 +890,13 @@ static bool get_changeset_batch(
 
     for( i = 0; i < PQntuples( pgresult ); i++ )
     {
-        data    = get_column_value( i, pgresult, "data" );
-        xid     = xid_in( get_column_value( i, pgresult, "xid" ) );
-        lsn_str = get_column_value( i, pgresult, "lsn" );
-        lsn     = lsn_to_offset( lsn_str );
-        cs      = json_to_changeset( data, PGC_WAL_FULL );
+        data      = get_column_value( i, pgresult, "data" );
+        xid       = xid_in( get_column_value( i, pgresult, "xid" ) );
+        lsn_str   = get_column_value( i, pgresult, "lsn" );
+        lsn       = lsn_to_offset( lsn_str );
+        changeset = json_to_changeset( data, PGC_WAL_FULL );
 
-        if( cs == NULL )
+        if( changeset == NULLREF )
         {
             _log(
                 LOG_LEVEL_ERROR,
@@ -826,8 +907,22 @@ static bool get_changeset_batch(
             return false;
         }
 
+        cs = ( struct changeset * ) to_ptr( get_changeset_context(), changeset );
+
+        if( cs == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to dereference changeset at xid %u, LSN %s CS: %lu",
+                xid,
+                lsn_str,
+                ( uint64_t ) changeset
+            );
+        }
         if( begin_found )
         {
+            // XXX We assume that the results arrive in order IE: BEGIN DML DML .. COMMIT|ROLLBACK,
+            // ... might want to ensure that this happens
             if(
                    cs->type == PGC_DML_INSERT
                 || cs->type == PGC_DML_UPDATE
@@ -835,28 +930,29 @@ static bool get_changeset_batch(
               )
             {
                 cs->lsn = lsn;
-                (*result)[*num_results] = cs;
+                (*result)[*num_results] = changeset;
                 (*num_results)++;
             }
             else if( cs->type == PGC_DML_ROLLBACK )
             {
-                free_changeset( cs );
+                free_changeset( changeset );
 
                 for( j = 0; j < *num_results; j++ )
                 {
                     free_changeset( (*result)[j] );
-                    (*result)[j] = NULL;
+                    (*result)[j] = NULLREF;
                 }
 
                 free( *result );
                 (*num_results) = 0;
                 begin_found    = false;
                 cs             = NULL;
+                changeset      = NULLREF;
             }
             else if( cs->type == PGC_DML_COMMIT )
             {
                 // Save LSN of commit message
-                free_changeset( cs );
+                free_changeset( changeset );
                 begin_found = false;
                 cs          = NULL;
                 (*commit_lsn) = ( char * ) calloc(
@@ -878,12 +974,13 @@ static bool get_changeset_batch(
         else if( cs != NULL && cs->type == PGC_DML_BEGIN )
         {
             begin_found = true;
-            (*result)   = ( struct changeset ** ) calloc(
-                PQntuples( pgresult ) - 2,
-                sizeof( struct changeset * )
+            (*result)   = ( changeset_ref_t * ) calloc(
+                PQntuples( pgresult ) - 2, // exclude BEGIN & COMMIT/ROLLBACK
+                sizeof( changeset_ref_t )
             );
 
-            free_changeset( cs );
+            // Discard BEGIN changeset
+            free_changeset( changeset );
 
             if( (*result) == NULL )
             {

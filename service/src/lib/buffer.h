@@ -99,4 +99,6 @@ extern ref_t buffer_pin_pop( buffer_pin_ref_t );
 extern bool buffer_pin_push( buffer_pin_ref_t, ref_t );
 extern bool remove_buffer_pin_by_name( buffer_pin_ref_t, char * );
 extern ref_t buffer_pop( buffer_ref_t, char * );
+extern context_t get_buffer_pin_context( void );
+extern context_t get_buffer_context( void );
 #endif // _BUFFER_H

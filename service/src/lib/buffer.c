@@ -67,6 +67,16 @@ bool initialize_contexts( void )
     return true;
 }
 
+context_t get_buffer_pin_context( void )
+{
+    return buffer_pin_context;
+}
+
+context_t get_buffer_context( void )
+{
+    return buffer_context;
+}
+
 void buffer_populate_trie(
     buffer_ref_t * b,
     char **        qual_name,
