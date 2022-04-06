@@ -16,30 +16,60 @@
 
 #include "slpq.h"
 #ifdef SLPQ_DEBUG
-static void _dump_node( slpq_node_ref_t );
-static void _dump_slpq( slpq_ref_t );
+static void _dump_node( slpq_node_ref_t, context_t );
+static void _dump_slpq( slpq_ref_t, context_t );
 #endif // SLPQ_DEBUG
-static context_t slpq_context;
-static context_t slpq_node_context;
+static context_t slpq_context = INVALID_CONTEXT;
+static context_t slpq_node_context = INVALID_CONTEXT;
 
-void set_slpq_context( context_t ctx )
+bool set_slpq_context( context_t ctx )
 {
     if( unlikely( !check_context( ctx ) ) )
-        return;
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Context %lu failed checks",
+            ( uint64_t ) ctx
+        );
+        return false;
+    }
     if( unlikely( ctx == slpq_node_context ) )
-        return;
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Context %lu is identical to node context %lu",
+            ( uint64_t ) ctx,
+            ( uint64_t ) slpq_node_context
+        );
+        return false;
+    }
     slpq_context = ctx;
-    return;
+    return true;
 }
 
-void set_slpq_node_context( context_t ctx )
+bool set_slpq_node_context( context_t ctx )
 {
     if( unlikely( !check_context( ctx ) ) )
-        return;
-    if( unlikely( ctx = slpq_context ) )
-        return;
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Context %lu failed checks",
+            ( uint64_t ) ctx
+        );
+        return false;
+    }
+    if( unlikely( ctx == slpq_context ) )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Context %lu is identical to slpq context %lu",
+            ( uint64_t ) ctx,
+            ( uint64_t ) slpq_context
+        );
+        return false;
+    }
     slpq_node_context = ctx;
-    return;
+    return true;
 }
 
 slpq_ref_t new_slpq( void )
@@ -115,9 +145,6 @@ ref_t slpq_pop( slpq_ref_t head )
     struct slpq_node * temp      = NULL;
     struct slpq *      slpq_head = NULL;
 
-    #ifdef SLPQ_DEBUG
-    _dump_slpq( head );
-    #endif // SLPQ_DEBUG
     if( unlikely( head == NULLREF ) )
         return NULLREF;
 
@@ -158,6 +185,7 @@ ref_t slpq_unshift( slpq_ref_t head )
         return NULLREF;
 
     slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
+
     if(
         unlikely(
             ( slpq_head == NULL )
@@ -171,6 +199,17 @@ ref_t slpq_unshift( slpq_ref_t head )
     temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
     if( unlikely( temp == NULL ) )
         return NULLREF;
+
+    if( slpq_head->head == slpq_head->tail )
+    {
+        // unshift last item.
+        slpq_head->size--;
+        slpq_head->head = NULLREF;
+        slpq_head->tail = NULLREF;
+        data = temp->data;
+        rsfree( slpq_node_context, t );
+        return data;
+    }
 
     // Iterate through the linked list because we need node n-1
     while( temp != NULL && temp->next != slpq_head->tail )
@@ -282,7 +321,7 @@ void slpq_free( slpq_ref_t head )
 }
 
 #ifdef SLPQ_DEBUG
-static void _dump_node( slpq_node_ref_t n )
+static void _dump_node( slpq_node_ref_t n, context_t data_ctx )
 {
     struct slpq_node * node = NULL;
 
@@ -302,15 +341,16 @@ static void _dump_node( slpq_node_ref_t n )
 
     _log(
         LOG_LEVEL_DEBUG,
-        "Node %p, data_ref %lu, next %p",
+        "Node %p, data_ref %lu, next %p. DATA: %s",
         node,
         ( uint64_t ) node->data, // need the right context to deref the ptr
-        to_ptr( slpq_node_context, ( ref_t ) node->next )
+        to_ptr( slpq_node_context, ( ref_t ) node->next ),
+        ( char * ) to_ptr( data_ctx, node->data )
     );
     return;
 }
 
-static void _dump_slpq( slpq_ref_t head )
+static void _dump_slpq( slpq_ref_t head, context_t data_ctx )
 {
     struct slpq *      slpq_head = NULL;
     struct slpq_node * n         = NULL;
@@ -343,7 +383,7 @@ static void _dump_slpq( slpq_ref_t head )
 
     while( n != NULL )
     {
-        _dump_node( node );
+        _dump_node( node, data_ctx );
         node = n->next;
         n = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) node );
     }
@@ -351,3 +391,11 @@ static void _dump_slpq( slpq_ref_t head )
     return;
 }
 #endif // SLPQ_DEBUG
+
+void dump_slpq( slpq_ref_t head, context_t data_ctx )
+{
+    #ifdef SLPQ_DEBUG
+    _dump_slpq( head, data_ctx );
+    #endif // SLPQ_DEBUG
+    return;
+}

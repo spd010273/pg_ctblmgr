@@ -11,7 +11,9 @@ pg_ctblmgr is a PostgreSQL extension that impelments logical replications based 
 * Maintains statistics on each 'cache table' it maintains.
 * Runs a separate process per 'cache table'.
 
-Each 'cache table' is implemented as a real-life table, technically making it materialized.
+Each 'cache table' is implemented as a real-life table, rather than patching in a new subtype of materialized view.
+
+An asynchronous approach was taken because this allows the extension to be decoupled from the database primar(y|ies), moving processing overhead out-of-band. It also allows for the extension to function on vanilla, out-of-the-box PostgreSQL installations without the need to recompilation or patching. The caveat is that while the originating transaction is not delayed by maintenance overhead of the 'cache tables', there will be some measurable lag until the 'cache table' reflects the changes made to the base tables in said transaction. This is a function of the number of tuples modified in a given transaction and the complexity of the 'cache table's' definition.
 
 # Getting Started
 
@@ -20,7 +22,7 @@ Each 'cache table' is implemented as a real-life table, technically making it ma
 This extension requires the following:
 
 * PostgreSQL 9.4 or better
-* gcc, make, and PostgreSQL development libraries
+* git, gcc, make, and PostgreSQL development libraries
 
 ## Installing
 
@@ -47,3 +49,13 @@ For more information, see CHANGELOG.md
 # License
 
 pg_ctblmgr is released under the PostgreSQL license. For more details about this license, please see LICENSE
+
+# Thanks
+
+Thank you to my employer for alloting the time and resources to develop this project.
+
+Thank you to the PostgreSQL project for maintaining and documenting such well written, structured, and understandable code.
+
+ - Portions of the PostgreSQL code base were used as a model for the shm implementation, specifically the shims for system level shared memory interfaces.
+
+Thank you to the maintainers of JSMN for providing a fast, lightweight, and easy-to-use JSON parsing library.

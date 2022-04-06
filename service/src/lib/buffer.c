@@ -47,8 +47,11 @@ bool initialize_contexts( void )
     buffer_pin_context = _buffer_pin_context;
     buffer_context     = _buffer_context;
     slpq_context       = _slpq_context;
-    set_slpq_context( _slpq_context );
-    set_slpq_node_context( _slpq_node_context );
+
+    if( !set_slpq_context( _slpq_context ) )
+        return false;
+    if( !set_slpq_node_context( _slpq_node_context ) )
+        return false;
 
     if(
           _slpq_context == INVALID_CONTEXT

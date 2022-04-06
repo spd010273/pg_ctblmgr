@@ -13,6 +13,8 @@ STRICTURES		= -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-stron
 				  -fno-strict-aliasing -fwrapv -fexcess-precision=standard
 ARCHFLAGS		= -m64 -mtune=generic
 CFLAGS			= $(INCLUDE) $(LIBS) $(FLAGS) $(STRICTURES) $(ARCHFLAGS)
+LDFLAGS			= -lm -lpq -lrt
+## Test source files
 T_CS_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/xlog.c ../src/lib/changeset.c ../src/lib/util.c ../src/lib/jsmn.c src/t_changeset.c
 T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
 T_B_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/util.c ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
@@ -25,9 +27,10 @@ T_SLAB_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c src/t_sla
 T_SLAB_OBJS		= $(T_SLAB_SRCS:.c=.o)
 T_T_SRCS 		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/trie.c src/t_trie.c
 T_T_OBJS		= $(T_T_SRCS:.c=.o)
-LDFLAGS			= -lm -lpq -lrt
+T_SLPQ_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/util.c ../src/lib/slpq.c src/t_slpq.c
+T_SLPQ_OBJS		= $(T_SLPQ_SRCS:.c=.o)
 
-all: t_buffer t_changeset t_query t_shm t_slab t_trie
+all: t_buffer t_changeset t_query t_shm t_slab t_trie t_slpq
 
 t_changeset: $(T_CS_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
@@ -47,6 +50,9 @@ t_slab: $(T_SLAB_OBJS)
 t_trie: $(T_T_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
+t_slpq: $(T_SLPQ_OBJS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
+
 .PHONY: clean
 clean:
 	rm -f $(T_CS_OBJS)
@@ -55,4 +61,5 @@ clean:
 	rm -f $(T_SHM_OBJS)
 	rm -f $(T_SLAB_OBJS)
 	rm -f $(T_T_OBJS)
+	rm -f $(T_SLPQ_OBJS)
 	rm -f t_*

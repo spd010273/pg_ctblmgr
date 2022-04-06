@@ -320,8 +320,8 @@
 #endif // SHM_HEAP_GROWS_DOWNWARD
 // This should be agnostic of all archs
 
-#define _PTR_BOUND_CHECK(p,b,s) ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) )
-#define _PTR_BOUND_CHECK_NULL(p,b,s) ( ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p <= ((char *) b + (size_t) s)) ) ? p : NULL )
+#define _PTR_BOUND_CHECK(p,b,s) ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p < ((char *) b + (size_t) s)) )
+#define _PTR_BOUND_CHECK_NULL(p,b,s) ( ( (p!=NULL) && (b!=NULL) && ((char *) p >= (char *) b) && ((char *) p < ((char *) b + (size_t) s)) ) ? p : NULL )
 #define ZERO_BUFFER_SIZE DEFAULT_PAGE_SIZE
 
 #ifndef MAP_NOSYNC

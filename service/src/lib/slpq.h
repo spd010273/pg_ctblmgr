@@ -38,7 +38,7 @@
 #include "slab.h"
 #include "util.h"
 
-//#define SLPQ_DEBUG 1
+#define SLPQ_DEBUG 1
 #define SLPQ_CONTEXT_NAME "SLPQ"
 #define SLPQ_NODE_CONTEXT_NAME "SLPQ_NODE"
 
@@ -59,8 +59,8 @@ struct slpq
     volatile bool    locked;
 };
 
-extern void set_slpq_context( context_t );
-extern void set_slpq_node_context( context_t );
+extern bool set_slpq_context( context_t );
+extern bool set_slpq_node_context( context_t );
 
 extern slpq_ref_t new_slpq( void );
 extern bool slpq_push( slpq_ref_t, ref_t );
@@ -68,4 +68,5 @@ extern ref_t slpq_pop( slpq_ref_t );
 extern ref_t slpq_unshift( slpq_ref_t );
 extern bool slpq_shift( slpq_ref_t, ref_t );
 extern void slpq_free( slpq_ref_t );
+extern void dump_slpq( slpq_ref_t, context_t );
 #endif // _SLPQ_H

@@ -160,6 +160,7 @@ static INLINE ref_t _to_ref( slab_header * header, void * ptr )
     _as_ind_t         ind  = ALLOCSET_ITEM_INVALID;
     void *            base = NULL;
     allocset_item_t * item = NULL;
+    uint32_t          i    = 0; //XXX
 
     if( unlikely( header->allocset.head == ALLOCSET_ITEM_INVALID ) )
         return NULLREF;
@@ -178,11 +179,16 @@ static INLINE ref_t _to_ref( slab_header * header, void * ptr )
     if( unlikely( item == NULL ) )
         return NULLREF;
 
+    // Check allocset head prior to moving through linked list
     if( _PTR_BOUND_CHECK( ptr, get_ptr( item->issued_ref ), item->size ) )
+    {
+        //_slab_log( LL_SLAB_ERROR, "Returning ref to head, as ind %lu", ( uint64_t ) ind );
         return ( ref_t ) ind;
+    }
 
     while( item->next != ALLOCSET_ITEM_INVALID )
     {
+        i++;
         ind  = item->next;
         item = ( allocset_item_t * ) _PTR_ADD_OFFSET(
             base,
@@ -192,8 +198,12 @@ static INLINE ref_t _to_ref( slab_header * header, void * ptr )
         if( unlikely( item == NULL ) )
             return NULLREF;
 
+        //_slab_log( LL_SLAB_ERROR, "CMP %p to %p, size %zu", ptr, get_ptr( item->issued_ref ), item->size );
         if( _PTR_BOUND_CHECK( ptr, get_ptr( item->issued_ref ), item->size ) )
+        {
+            //_slab_log( LL_SLAB_ERROR, "returning ref to ith item (%u), size %zu, as_ind %lu", i, item->size, ( uint64_t ) ind );
             return ( ref_t ) ind;
+        }
     }
 
     return NULLREF;
