@@ -17,16 +17,16 @@ int main( int, char ** );
 static int start_workers( void );
 static bool extension_installed( void );
 static void worker_entrypoint( void * );
-static bool setup_replication_slot( struct worker * );
-static bool initialize_buffer( struct worker * );
+static bool setup_replication_slot( void );
+static bool initialize_buffer( void );
 static void get_filter_tables_by_channel(
     struct worker *,
     char *,
     char ***,
-    unsigned int *
+    uint16_t *
 );
 static char * get_filter_tables_string( void );
-static void get_worker_pins( struct worker *, buffer_pin_ref_t ** );
+static void get_worker_pins( buffer_pin_ref_t ** );
 static void parent_main_loop( void );
 static bool get_changeset_batch( char *, changeset_ref_t **, unsigned int *, char ** );
 #endif // PG_CTBLMGR_H

@@ -9,12 +9,12 @@ int main( int, char ** );
 
 int main( int argc, char ** argv )
 {
-    PGresult * result    = NULL;
-    char *     params[5] = {NULL};
-    char *     val       = NULL;
-    char *     ptr       = NULL;
-    int        i         = 0;
-
+    PGresult *      result    = NULL;
+    char *          params[5] = {NULL};
+    char *          val       = NULL;
+    char *          ptr       = NULL;
+    int             i         = 0;
+    struct worker * p         = NULL;
     _parse_args( argc, argv );
 
     if( conninfo == NULL )
@@ -26,59 +26,65 @@ int main( int argc, char ** argv )
     if( !parent_init( argc, argv ) )
     {
         printf( "FAILED: Failed to initialize parent pid slice\n" );
-        if( parent )
-            remove( parent->pidfile );
         return -1;
     }
 
-    if( !db_connect( parent ) )
+    p = get_parent_ptr( true );
+
+    if( p == NULL )
+    {
+        printf( "FAILED: Could not get parent worker slot" );
+        return -1;
+    }
+
+    if( !db_connect( p ) )
     {
         printf( "FAILED: Failed to connect to database\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    if( !begin_transaction( parent ) )
+    if( !begin_transaction( p ) )
     {
         printf( "FAILED: BEGIN failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    if( !rollback_transaction( parent ) )
+    if( !rollback_transaction( p ) )
     {
         printf( "FAILED: ROLLBACK failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    if( commit_transaction( parent ) )
+    if( commit_transaction( p ) )
     {
         printf( "FAILED: COMMIT happened on unopen transaction\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    if( !begin_transaction( parent ) )
+    if( !begin_transaction( p ) )
     {
         printf( "FAILED: Second BEGIN failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    result = execute_query( parent, "SELECT 1 AS foo", NULL, 0 );
+    result = execute_query( p, "SELECT 1 AS foo", NULL, 0 );
 
     if( result == NULL )
     {
         printf( "FAILED: SELECT failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
     if( is_column_null( 0, result, "foo" ) )
     {
         printf( "FAILED: Unexpected NULL\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
@@ -87,29 +93,29 @@ int main( int argc, char ** argv )
     if( val == NULL || strncmp( val, "1", 1 ) != 0 )
     {
         printf( "FAILED: Unexpected result '%s'\n", val );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    if( !commit_transaction( parent ) )
+    if( !commit_transaction( p ) )
     {
         printf( "FAILED: COMMIT failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
     PQclear( result );
-    if( !begin_transaction( parent ) )
+    if( !begin_transaction( p ) )
     {
         printf( "FAILED: Third BEGIN failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
     params[0] = "1";
     params[1] = "10";
     result    = execute_query(
-        parent,
+        p,
         "SELECT generate_series( $1::INTEGER, $2::INTEGER ) AS foo",
         params,
         2
@@ -118,14 +124,14 @@ int main( int argc, char ** argv )
     if( result == NULL )
     {
         printf( "FAILED: Second SELECT failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
     if( PQntuples( result ) <= 0 )
     {
         printf( "FAILED: insufficient result tuples\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
@@ -136,26 +142,26 @@ int main( int argc, char ** argv )
         if( val == NULL )
         {
             printf( "FAILED: Unexpected null value\n" );
-            remove( parent->pidfile );
+            remove( get_pid_file() );
             return -1;
         }
 
         if( strtol( val, &ptr, 10 ) != i + 1 )
         {
             printf( "FAILED: Unexpected output for second query\n" );
-            remove( parent->pidfile );
+            remove( get_pid_file() );
             return -1;
         }
     }
 
-    if( !rollback_transaction( parent ) )
+    if( !rollback_transaction( p ) )
     {
         printf( "FAILED: ROLLBACK failed\n" );
-        remove( parent->pidfile );
+        remove( get_pid_file() );
         return -1;
     }
 
-    if( remove( parent->pidfile ) != 0 )
+    if( remove( get_pid_file() ) != 0 )
     {
         printf( "FAILED: Failed to cleanup pidfile\n" );
         return -1;

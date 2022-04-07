@@ -14,7 +14,7 @@ int main( int argc, char ** argv )
         );
     }
 
-    if( !db_connect( parent ) )
+    if( !db_connect( NULL ) )
     {
         _log(
             LOG_LEVEL_FATAL,
@@ -30,7 +30,7 @@ int main( int argc, char ** argv )
         );
     }
 
-    if( !setup_replication_slot( parent ) )
+    if( !setup_replication_slot() )
     {
         _log(
             LOG_LEVEL_FATAL,
@@ -38,7 +38,7 @@ int main( int argc, char ** argv )
         );
     }
 
-    if( !initialize_buffer( parent ) )
+    if( !initialize_buffer() )
     {
         _log(
             LOG_LEVEL_FATAL,
@@ -64,14 +64,20 @@ int main( int argc, char ** argv )
 
 static char * get_filter_tables_string( void )
 {
-    char **      filter_tables = NULL;
-    char *       output        = NULL;
-    unsigned int num_tables    = 0;
-    unsigned int i             = 0;
-    unsigned int size          = 0;
+    char **         filter_tables = NULL;
+    char *          output        = NULL;
+    uint16_t        num_tables    = 0;
+    uint16_t        i             = 0;
+    uint32_t        size          = 0;
+    struct worker * p             = NULL;
+
+    p = get_parent_ptr( true );
+
+    if( p == NULL )
+        return NULL;
 
     get_filter_tables_by_channel(
-        parent,
+        p,
         NULL,
         &filter_tables,
         &num_tables
@@ -127,6 +133,12 @@ static void parent_main_loop( void )
     char *              schema_name    = NULL;
     char *              table_name     = NULL;
     bool                no_seek        = false;
+    struct worker *     p              = NULL;
+
+    p = get_parent_ptr( true );
+
+    if( p == NULL )
+        return;
 
     filter_tables = get_filter_tables_string();
 
@@ -141,7 +153,7 @@ _ML:while( true )
     {
         /*
          * Parent needs to:
-         *     - Verify workers are still running and alove
+         *     - Verify workers are still running and alive
          *     - Collect and maintain statistics
          *     - Consume translated WAL and insert into each child's SLPQ / trie
          */
@@ -191,7 +203,7 @@ _ML:while( true )
 
                 _log( LOG_LEVEL_DEBUG, "Got change LSN %s", offset_to_lsn( cs->lsn ) );
                 //dump_changeset( changeset );
-                _log( LOG_LEVEL_DEBUG, "Propogating changes to %d workers", num_workers );
+                _log( LOG_LEVEL_DEBUG, "Propogating changes to %d workers", get_worker_count() );
                 schema_name = ( char * ) to_ptr( get_changeset_string_context(), cs->schema_name );
                 table_name  = ( char * ) to_ptr( get_changeset_string_context(), cs->table_name );
 
@@ -206,58 +218,51 @@ _ML:while( true )
                     goto _ML;
                 }
 
-                for( j = 0; j < num_workers; j++ )
+                memset( qual, '\0', QUAL_MAX );
+                strncpy( qual, schema_name, strlen( schema_name ) );
+                strncat( qual, ".", 1 );
+                strncat( qual, table_name, strlen( table_name ) );
+
+                bufferpin = buffer_get_pin_by_name( p->buffer, qual );
+
+                if( unlikely( bufferpin == NULLREF ) )
                 {
-                    memset( qual, '\0', QUAL_MAX );
-                    strncpy( qual, schema_name, strlen( schema_name ) );
-                    strncat( qual, ".", 1 );
-                    strncat( qual, table_name, strlen( table_name ) );
-
-                    _log( LOG_LEVEL_DEBUG, "Looking for a worker with qual %s", qual );
-
-                    bufferpin = buffer_get_pin_by_name( (workers[j])->buffer, qual );
-
-                    if( unlikely( bufferpin == NULLREF ) )
-                    {
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "Got invalid bufferpin for worker %lu (pid: %lu)",
-                            ( uint64_t ) j,
-                            ( uint64_t ) (workers[j])->pid
-                        );
-                        no_seek = true;
-                        continue;
-                    }
-
-                    if( !buffer_pin_push( bufferpin, ( ref_t ) changeset ) )
-                    {
-                        _log(
-                            LOG_LEVEL_ERROR,
-                            "Failed to push changeset for %s.%s to worker %d",
-                            schema_name,
-                            table_name,
-                            (workers[j])->pid
-                        );
-                        no_seek = true;
-                        continue;
-                    }
-                    else
-                    {
-                        _log(
-                            LOG_LEVEL_DEBUG,
-                            "Pushed changeset %p to bp %p",
-                            cs,
-                            to_ptr( get_buffer_pin_context(), bufferpin )
-                        );
-                    }
-
-                    schema_name = NULL;
-                    table_name  = NULL;
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Got invalid bufferpin for worker %lu",
+                        ( uint64_t ) j
+                    );
+                    no_seek = true;
+                    continue;
                 }
+
+                if( !buffer_pin_push( bufferpin, ( ref_t ) changeset ) )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to push changeset for %s.%s to buffer",
+                        schema_name,
+                        table_name
+                    );
+                    no_seek = true;
+                    continue;
+                }
+                else
+                {
+                    _log(
+                        LOG_LEVEL_DEBUG,
+                        "Pushed changeset %p to bp %p",
+                        cs,
+                        to_ptr( get_buffer_pin_context(), bufferpin )
+                    );
+                }
+
+                schema_name = NULL;
+                table_name  = NULL;
             }
 
             num_cs_array = 0;
-            if( no_seek )
+            if( !no_seek )
             {
                 params[0] = MAIN_CHANNEL;
                 params[1] = commit_lsn;
@@ -265,7 +270,7 @@ _ML:while( true )
                 params[3] = filter_tables;
 
                 result = execute_query(
-                    parent,
+                    p,
                     ( char * ) replication_seek,
                     params,
                     4
@@ -317,20 +322,25 @@ _ML:while( true )
 static int start_workers( void )
 {
     PGresult *       result       = NULL;
-    struct worker ** temp         = NULL;
     char *           channel      = NULL;
     char **          filter       = NULL;
     char *           wal_level    = NULL;
-    unsigned int     i            = 0;
-    unsigned int     worker_count = 0;
-    unsigned int     num_tables   = 0;
+    uint16_t         i            = 0;
+    uint16_t         j            = 0;
+    uint16_t         worker_count = 0;
+    uint16_t         num_tables   = 0;
+    struct worker *  p            = NULL;
+    worker_ref_t *   w_arr        = NULL;
 
-    if( parent == NULL || parent->type != WORKER_TYPE_PARENT )
-    {
+    if( parent == NULLREF )
         return -1;
-    }
 
-    result = execute_query( parent, ( char * ) get_worker_list, NULL, 0 );
+    p = get_parent_ptr( true );
+
+    if( p == NULL )
+        return -1;
+
+    result = execute_query( p, ( char * ) get_worker_list, NULL, 0 );
 
     if( result == NULL || PQntuples( result ) <= 0 )
     {
@@ -349,81 +359,123 @@ static int start_workers( void )
         worker_count
     );
 
-    if( workers == NULL || num_workers == 0 || worker_count > num_workers )
+    if( workers == NULLREF )
     {
-        temp = create_shared_memory( sizeof( struct worker * ) * worker_count );
+        // Setup workers[] pid table
+        workers = ( workers_ref_t ) rsmalloc(
+            get_workers_context(),
+            sizeof( worker_ref_t ) * worker_count
+        );
 
-        if( temp == NULL )
+        if( workers == NULLREF )
         {
+            _log(
+                LOG_LEVEL_FATAL,
+                "Failed to initialize PID table"
+            );
             return -1;
         }
-    }
 
-    if( workers == NULL )
+        w_arr = ( worker_ref_t * ) to_ptr( get_workers_context(), workers );
+
+        if( w_arr == NULL )
+            return -1;
+        for( i = 0; i < worker_count; i++ )
+            w_arr[i] = NULLREF;
+    }
+    else if( worker_count > get_worker_max() )
     {
-        num_workers = worker_count;
+        workers = ( workers_ref_t ) rsrealloc(
+            get_workers_context(),
+            ( ref_t ) workers,
+            sizeof( worker_ref_t ) * worker_count
+        );
+
+        if( workers == NULLREF )
+        {
+            _log(
+                LOG_LEVEL_FATAL,
+                "Failed to resize PID table"
+            );
+            return -1;
+        }
+
+        w_arr = ( worker_ref_t * ) to_ptr( get_workers_context(), workers );
+
+        if( w_arr == NULL )
+            return -1;
+
+        for( i = get_worker_max() - 1; i < worker_count; i++ )
+            w_arr[i] = NULLREF;
+
+        p->max_workers = worker_count;
     }
     else
     {
-        memcpy( temp, workers, num_workers );
-        munmap( workers, num_workers * sizeof( struct worker * ) );
-        num_workers = worker_count;
+        w_arr = ( worker_ref_t * ) to_ptr( get_workers_context(), workers );
     }
 
-    workers = temp;
-    temp    = NULL;
-
-    for( i = 0; i < worker_count; i++ )
+    if( w_arr == NULL )
     {
-        channel   = get_column_value( (int) i, result, "maintenance_channel" );
-        wal_level = get_column_value( (int) i, result, "wal_level" );
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to dereference workers[] array"
+        );
+        return -1;
+    }
 
-        if( get_worker_by_channel( channel ) == NULL )
+    if( worker_count > get_worker_count() )
+    {
+        p->num_workers = worker_count;
+        for( i = 0; i < worker_count; i++ )
         {
-            for( i = 0; i < worker_count; i++ )
+            channel   = get_column_value( (int) i, result, "maintenance_channel" );
+            wal_level = get_column_value( (int) i, result, "wal_level" );
+
+            if( get_worker_by_channel( channel ) == NULLREF )
             {
-                if( workers[i] == NULL )
+                // worker for this channel isn't started
+                // need to look for an open worker slot
+                for( j = 0; j < worker_count; j++ )
                 {
-                    get_filter_tables_by_channel(
-                        parent,
-                        channel,
-                        &filter,
-                        &num_tables
-                    );
-
-                    if( num_tables == 0 )
+                    if( w_arr[j] == NULLREF )
                     {
-                        _log( LOG_LEVEL_DEBUG, "Cannot start worker: no tables" );
-                        return -1;
-                    }
+                        get_filter_tables_by_channel(
+                            p,
+                            channel,
+                            &filter,
+                            &num_tables
+                        );
 
-                    workers[i] = new_worker(
-                        WORKER_TYPE_CHILD,
-                        i,
-                        parent->my_argc,
-                        parent->my_argv,
-                        worker_entrypoint,
-                        NULL,
-                        channel,
-                        filter,
-                        num_tables,
-                        wal_level[0]
-                    );
+                        if( num_tables == 0 )
+                        {
+                            _log( LOG_LEVEL_DEBUG, "Cannot start worker: no tables" );
+                            return -1;
+                        }
 
-                    if( workers[i] == NULL )
-                    {
-                        return -1;
-                    }
+                        w_arr[j] = new_worker(
+                            WORKER_TYPE_CHILD,
+                            i,
+                            p->my_argc,
+                            p->my_argv,
+                            worker_entrypoint,
+                            NULLREF,
+                            channel,
+                            filter,
+                            num_tables,
+                            wal_level[0]
+                        );
 
-                    if( workers[i]->type != WORKER_TYPE_CHILD )
-                    {
-                        _log( LOG_LEVEL_FATAL, "Error creating new worker" );
+                        if( w_arr[i] == NULLREF )
+                        {
+                            return -1;
+                        }
                     }
                 }
             }
-        }
 
-        // Maybe check that this worker is running?
+            // Maybe check that this worker is running?
+        }
     }
 
     PQclear( result );
@@ -432,17 +484,17 @@ static int start_workers( void )
 
 static bool extension_installed( void )
 {
-    PGresult * result    = NULL;
-    char *     params[1] = {NULL};
+    PGresult *      result    = NULL;
+    char *          params[1] = {NULL};
+    struct worker * p         = NULL;
 
-    if( parent == NULL )
-    {
+    p = get_parent_ptr( true );
+    if( p == NULL )
         return false;
-    }
 
     params[0] = EXTENSION_NAME;
     result = execute_query(
-        parent,
+        p,
         ( char * ) extension_check_query,
         params,
         1
@@ -475,6 +527,8 @@ static void worker_entrypoint( void * data )
     changeset_ref_t      changeset = NULLREF;
     char *               currlsn   = NULL;
     char *               lastlsn   = NULL;
+    string_ref_t *       ft_arr    = NULL;
+    char *               ft_elem   = NULL;
 
     if( data == NULL )
     {
@@ -526,12 +580,19 @@ static void worker_entrypoint( void * data )
 
     while( pins == NULL )
     {
-        get_worker_pins( me, &pins );
+        get_worker_pins( &pins );
         sleep( 1 );
         _log( LOG_LEVEL_DEBUG, "Worker waiting on pins (%p)...", pins );
     }
 
     _log( LOG_LEVEL_DEBUG, "Pins: %p", pins );
+    ft_arr = ( string_ref_t * ) to_ptr( get_string_context(), me->config.filter_tables );
+
+    if( ft_arr == NULL )
+    {
+        _log( LOG_LEVEL_ERROR, "Failed to dereference filter tables[]" );
+        return;
+    }
 
 _CL:while( 1 )
     {
@@ -553,11 +614,12 @@ _CL:while( 1 )
             _log( LOG_LEVEL_DEBUG, "Worker popped %lu from pin %lu", ( uint64_t ) data, ( uint64_t ) pins[i] );
             if( changeset == NULLREF )
             {
+                ft_elem = ( char * ) to_ptr( get_string_context(), ft_arr[i] );
                 _log(
                     LOG_LEVEL_DEBUG,
                     "Buffer pin %lu (%s) empty",
                     ( uint64_t ) pins[i],
-                    me->config.filter_tables[i]
+                    ft_elem
                 );
                 goto _CL;
             }
@@ -613,9 +675,14 @@ _CL:while( 1 )
     return;
 }
 
-static void get_worker_pins( struct worker * me, buffer_pin_ref_t ** bp_array )
+static void get_worker_pins( buffer_pin_ref_t ** bp_array )
 {
-    uint32_t i = 0;
+    uint32_t        i       = 0;
+    struct worker * me      = NULL;
+    string_ref_t *  arr     = NULL;
+    char *          ft_elem = NULL;
+
+    me = get_worker_ptr_by_pid();
 
     if( me == NULL || bp_array == NULL )
     {
@@ -643,26 +710,40 @@ static void get_worker_pins( struct worker * me, buffer_pin_ref_t ** bp_array )
 
     if( *bp_array == NULL )
     {
-        _log( LOG_LEVEL_DEBUG, "Failed to allocate BP array" );
+        _log( LOG_LEVEL_ERROR, "Failed to allocate BP array" );
+        return;
+    }
+
+    arr = ( string_ref_t * ) to_ptr( get_array_context(), me->config.filter_tables );
+
+    if( arr == NULL )
+    {
+        _log( LOG_LEVEL_ERROR, "Failed to dereference filter_tables[]" );
         return;
     }
 
     for( i = 0; i < me->config.num_tables; i++ )
     {
-        _log( LOG_LEVEL_DEBUG, "Adding pin for table %s", me->config.filter_tables[i] );
+        ft_elem = ( char * ) to_ptr( get_string_context(), arr[i] );
+        _log( LOG_LEVEL_DEBUG, "Adding pin for table %s", ft_elem );
+        if( ft_elem == NULL )
+            continue;
         (*bp_array)[i] = buffer_get_pin_by_name(
             me->buffer,
-            me->config.filter_tables[i]
+            ft_elem
         );
     }
 
     return;
 }
 
-static bool setup_replication_slot( struct worker * me )
+static bool setup_replication_slot( void )
 {
     PGresult *      result    = NULL;
     char *          params[1] = {NULL};
+    struct worker * me        = NULL;
+
+    me = get_worker_ptr_by_pid();
 
     if( me == NULL || me->type != WORKER_TYPE_PARENT )
         return false;
@@ -707,13 +788,16 @@ static bool setup_replication_slot( struct worker * me )
  * as well as prepolulate the Trie section with the distinct
  * tables we will be using
  */
-static bool initialize_buffer( struct worker * me )
+static bool initialize_buffer( void )
 {
-    char **      filter_tables = NULL;
-    unsigned int num_tables    = 0;
-    unsigned int i             = 0;
+    struct worker * me            = NULL;
+    char **         filter_tables = NULL;
+    uint16_t        num_tables    = 0;
+    uint16_t        i             = 0;
 
-    if( me == NULL || me->type != WORKER_TYPE_PARENT )
+    me = get_parent_ptr( true );
+
+    if( me == NULL )
         return false;
 
     new_buffer( &(me->buffer), NULL, NULLREF );
@@ -753,11 +837,13 @@ static bool initialize_buffer( struct worker * me )
     return true;
 }
 
+
+// We have a possibility of caching these results rather than continuously querying the database
 static void get_filter_tables_by_channel(
     struct worker * me,
     char *          channel,
     char ***        filter,
-    unsigned int *  num_tables
+    uint16_t *      num_tables
 )
 {
     PGresult *   filter_result = NULL;
@@ -863,6 +949,12 @@ static bool get_changeset_batch(
     struct changeset * cs          = NULL;
     changeset_ref_t    changeset   = NULLREF;
     bool               begin_found = false;
+    struct worker *    p           = NULL;
+
+    p = get_parent_ptr( true );
+
+    if( p == NULL )
+        return false;
 
     if( result == NULL || num_results == NULL || commit_lsn == NULL )
         return false;
@@ -873,7 +965,7 @@ static bool get_changeset_batch(
     params[2] = filter_tables;
 
     pgresult = execute_query(
-        parent,
+        p,
         ( char * ) replication_peek,
         params,
         3

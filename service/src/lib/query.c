@@ -1,5 +1,4 @@
 #include "query.h"
-
 PGresult * execute_query( struct worker * me, char * query, char ** params, unsigned int param_count )
 {
     PGresult *   result              = NULL;
@@ -10,7 +9,10 @@ PGresult * execute_query( struct worker * me, char * query, char ** params, unsi
 
     if( me == NULL )
     {
-        return NULL;
+        me = get_worker_ptr_by_pid();
+
+        if( me == NULL )
+            return NULL;
     }
 
     if( me->conn == NULL )
@@ -190,6 +192,14 @@ bool db_connect( struct worker * me )
     unsigned short retry_counter     = 0;
     unsigned int   last_backoff_time = 0;
 
+    if( me == NULL )
+    {
+        me = get_worker_ptr_by_pid();
+
+        if( me == NULL )
+            return false;
+    }
+
     if( me->conn != NULL )
     {
         if( PQstatus( me->conn ) != CONNECTION_OK )
@@ -238,7 +248,10 @@ bool begin_transaction( struct worker * me )
 
     if( me == NULL )
     {
-        return false;
+        me = get_worker_ptr_by_pid();
+
+        if( me == NULL )
+            return false;
     }
 
     if( me->tx_in_progress )
@@ -284,7 +297,10 @@ bool commit_transaction( struct worker * me )
 
     if( me == NULL )
     {
-        return false;
+        me = get_worker_ptr_by_pid();
+
+        if( me == NULL )
+            return false;
     }
 
     if( !( me->tx_in_progress ) )
@@ -335,7 +351,10 @@ bool rollback_transaction( struct worker * me )
 
     if( me == NULL )
     {
-        return false;
+        me = get_worker_ptr_by_pid();
+
+        if( me == NULL )
+            return false;
     }
 
     if( !( me->tx_in_progress ) )

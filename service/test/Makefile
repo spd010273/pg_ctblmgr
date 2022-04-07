@@ -19,7 +19,7 @@ T_CS_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/
 T_CS_OBJS		= $(T_CS_SRCS:.c=.o)
 T_B_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/util.c ../src/lib/buffer.c ../src/lib/trie.c ../src/lib/slpq.c src/t_buffer.c
 T_B_OBJS		= $(T_B_SRCS:.c=.o)
-T_Q_SRCS		= ../src/lib/barrier.c ../src/lib/query.c ../src/lib/util.c src/t_query.c
+T_Q_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/query.c ../src/lib/util.c src/t_query.c
 T_Q_OBJS		= $(T_Q_SRCS:.c=.o)
 T_SHM_SRCS		= ../src/lib/shm.c ../src/lib/barrier.c src/t_shm.c
 T_SHM_OBJS		= $(T_SHM_SRCS:.c=.o)

@@ -5,9 +5,14 @@
 
 extern char ** environ; // declared in unistd.h
 
-struct worker ** workers       = NULL;
-struct worker *  parent        = NULL;
-unsigned int     num_workers   = 0;
+static context_t worker_context  = INVALID_CONTEXT;
+static context_t array_context   = INVALID_CONTEXT;
+static context_t workers_context = INVALID_CONTEXT;
+static context_t string_context  = INVALID_CONTEXT;
+
+workers_ref_t workers = NULLREF;
+worker_ref_t  parent  = NULLREF;
+
 char *           conninfo      = NULL;
 FILE *           log_file      = NULL;
 unsigned int     max_argv_size = 0;
@@ -28,6 +33,13 @@ Usage: pg_ctblmgr\n \
     -v VERSION\n \
     -l Log to stdout\n \
     -? HELP ]\n";
+
+
+void set_nolog( void )
+{
+    no_log = true;
+    return;
+}
 
 void _parse_args( int argc, char ** argv )
 {
@@ -251,28 +263,32 @@ void _log( unsigned short log_level, char * message, ... )
     return;
 }
 
-struct worker * new_worker(
-    unsigned short    type,
-    unsigned long int id,
-    int               my_argc,
+worker_ref_t new_worker(
+    uint8_t           type,
+    uint8_t           id,
+    int32_t           my_argc,
     char **           my_argv,
     void (*function)( void * ),
-    struct worker *   workerslot,
+    worker_ref_t      workerslot,
     char *            channel,
     char **           filter_tables,
-    unsigned int      num_tables,
+    uint16_t          num_tables,
     char              wal_level
 )
 {
-    struct worker * result      = NULL;
+    worker_ref_t    result      = NULLREF;
+    worker_ref_t *  worker_arr  = NULL;
+    struct worker * worker      = NULL;
     pid_t           pid         = 0;
     char *          worker_name = NULL;
     unsigned int    size        = 0;
     unsigned int    i           = 0;
+    struct worker * p           = NULL;
 
-    if( workerslot == NULL )
+    if( workerslot == NULLREF )
     {
-        result = ( struct worker * ) create_shared_memory(
+        result = rsmalloc(
+            worker_context,
             sizeof( struct worker )
         );
     }
@@ -281,22 +297,35 @@ struct worker * new_worker(
         result = workerslot;
     }
 
-    if( result == NULL )
+    if( result == NULLREF )
     {
         _log(
             LOG_LEVEL_ERROR,
             "Could not allocate shared memory for worker"
         );
-
-        return NULL;
+        return NULLREF;
     }
 
-    result->tx_in_progress = false;
-    result->pid            = getpid();
-    result->conn           = NULL;
-    result->my_argc        = my_argc;
-    result->my_argv        = my_argv;
-    result->type           = type;
+    worker = ( struct worker * ) to_ptr( worker_context, result );
+
+    if( worker == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Could not dereferences shared memory for worker"
+        );
+        return NULLREF;
+    }
+
+    worker->tx_in_progress = false;
+    worker->pid            = getpid();
+    worker->conn           = NULL;
+    worker->my_argc        = my_argc;
+    worker->my_argv        = my_argv;
+    worker->type           = type;
+
+    if( workerslot == NULLREF )
+        worker->config.filter_tables = NULLREF;
 
     worker_set_config(
         result,
@@ -322,12 +351,76 @@ struct worker * new_worker(
         return result;
     }
 
-    workers[id] = result;
+    if( parent == NULLREF )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "No parent process table entry to initialize with"
+        );
+        free_worker( result );
+        return NULLREF;
+    }
+
+    p = ( struct worker * ) to_ptr( worker_context, parent );
+
+    if( p == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to dereference parent's PID table entry"
+        );
+        free_worker( result );
+        return NULLREF;
+    }
+
+    if( workers == NULLREF )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "No PID table found"
+        );
+        return NULLREF;
+    }
+
+    worker_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
+
+    if( worker_arr == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Failed to dereference PID table array"
+        );
+    }
+
+    worker_arr[id] = result;
     pid = fork();
 
     if( pid == 0 ) // child
     {
-        result->pid = getpid();
+        if( !slab_init() )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to initialize slab post fork"
+            );
+            exit( 0 );
+        }
+
+        worker = ( struct worker * ) to_ptr( worker_context, result );
+        p      = ( struct worker * ) to_ptr( worker_context, parent );
+
+        if( worker == NULL || p == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to deref pid slices after fork()"
+            );
+            exit( 0 );
+        }
+
+        worker->pid = getpid();
+        worker->max_workers = p->max_workers;
+        worker->num_workers = p->max_workers;
         signal( SIGHUP, __sighup );
         signal( SIGTERM, __sigterm );
         signal( SIGINT, __sigint );
@@ -352,11 +445,11 @@ struct worker * new_worker(
 
         free( worker_name );
         worker_name = NULL;
-        result->status = WORKER_STATUS_STARTUP;
+        worker->status = WORKER_STATUS_STARTUP;
         _log(
             LOG_LEVEL_DEBUG,
             "Initialized worker with pid %d with filter_tables:",
-            result->pid
+            worker->pid
         );
 
         for( i = 0; i < num_tables; i++ )
@@ -368,95 +461,176 @@ struct worker * new_worker(
                 filter_tables[i]
             );
         }
-        result->buffer = parent->buffer;
-        function( ( void * ) workers[id] );
+        worker->buffer = p->buffer;
+        function( ( void * ) worker );
         exit( 0 );
     }
     else if( pid < 0 )
     {
-        return NULL;
+        return NULLREF;
     }
 
     return result;
 }
 
-void worker_set_config(
-    struct worker * worker,
+bool worker_set_config(
+    worker_ref_t    worker,
     char *          channel,
     char **         filter_tables,
-    unsigned int    num_tables,
+    uint16_t        num_tables,
     char            wal_level
 )
 {
-    unsigned int i = 0;
+    uint16_t        i       = 0;
+    uint16_t        j       = 0;
+    struct worker * w       = NULL;
+    char *          ft_elem = NULL;
+    string_ref_t *  arr     = NULL;
 
-    if( worker == NULL )
+    _log( LOG_LEVEL_DEBUG, "Worker set config startup" );
+    if( worker == NULLREF )
     {
-        _log( LOG_LEVEL_DEBUG, "Cannot set worker config, NULL slot" );
-        return;
+        _log(
+            LOG_LEVEL_ERROR,
+            "Cannot set worker config, NULL slot"
+        );
+        return false;
+    }
+
+    w = ( struct worker * ) to_ptr( worker_context, worker );
+
+    if( w == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Cailed to dereference worker slice"
+        );
+        return false;
     }
 
     if( wal_level != 'R' && wal_level != 'F' && wal_level != 'M' )
     {
-        _log( LOG_LEVEL_DEBUG, "invalid worker config WAL LEVEL: %c", wal_level );
-        return;
+        _log(
+            LOG_LEVEL_ERROR,
+            "invalid worker config WAL LEVEL: %c",
+            wal_level
+        );
+        return false;
     }
 
-    if( worker->config.filter_tables != NULL )
+    if( w->config.filter_tables != NULLREF )
     {
-        free( worker->config.filter_tables );
+        if( w->config.num_tables > 0 )
+        {
+            arr = ( string_ref_t * ) to_ptr( array_context, w->config.filter_tables );
+
+            if( arr != NULL )
+            {
+                for( i = 0; i < w->config.num_tables; i++ )
+                {
+                    rsfree( string_context, arr[i] );
+                }
+            }
+        }
+
+        rsfree( array_context, w->config.filter_tables );
     }
 
     if( channel != NULL )
     {
         strncpy(
-            worker->config.channel,
+            w->config.channel,
             channel,
             strnlen( channel, MAX_CHANNEL_LENGTH )
         );
 
-        worker->config.channel[MAX_CHANNEL_LENGTH - 1] = '\0';
+        w->config.channel[strnlen( channel, MAX_CHANNEL_LENGTH )] = '\0';
     }
 
     if( filter_tables != NULL )
     {
-        worker->config.num_tables = num_tables;
-        worker->config.filter_tables = ( char ** ) create_shared_memory(
-            num_tables * sizeof( char * )
+        w->config.num_tables    = num_tables;
+        w->config.filter_tables = ( array_ref_t ) rsmalloc(
+            array_context,
+            num_tables * sizeof( string_ref_t )
         );
 
-        if( worker->config.filter_tables == NULL )
+        if( w->config.filter_tables == NULLREF )
         {
-            _log( LOG_LEVEL_DEBUG, "Worker config memory allocation failed" );
-            return;
+            _log(
+                LOG_LEVEL_ERROR,
+                "Worker config memory allocation failed"
+            );
+            rsfree( array_context, w->config.filter_tables );
+            return false;
+        }
+
+        arr = ( string_ref_t * ) to_ptr( array_context, w->config.filter_tables );
+
+        if( arr == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to dereference filter_tables[] ref"
+            );
+            rsfree( array_context, w->config.filter_tables );
+            return false;
         }
 
         for( i = 0; i < num_tables; i++ )
         {
-            worker->config.filter_tables[i] = ( char * ) create_shared_memory(
+            arr[i] = rsmalloc(
+                string_context,
                 ( strlen( filter_tables[i] ) + 1 ) * sizeof( char )
             );
 
-            if( worker->config.filter_tables[i] == NULL )
+            if( arr[i] == NULLREF )
             {
-                _log( LOG_LEVEL_DEBUG, "worker config filter table slot allocation failed" );
-                return;
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "worker config filter table slot allocation failed"
+                );
+
+                for( j = 0; j < i; j++ )
+                {
+                    rsfree( string_context, arr[j] );
+                }
+                rsfree( array_context, w->config.filter_tables );
+                return false;
+            }
+
+            ft_elem = ( char * ) to_ptr( string_context, arr[i] );
+
+            if( ft_elem == NULL )
+            {
+                _log(
+                    LOG_LEVEL_ERROR,
+                    "Filter table element %u failed to dereference",
+                    ( uint32_t ) i
+                );
+
+                for( j = 0; j < i; j++ )
+                {
+                     rsfree( string_context, arr[j] );
+                }
+                rsfree( array_context, w->config.filter_tables );
+                return false;
             }
 
             strncpy(
-                worker->config.filter_tables[i],
+                ft_elem,
                 filter_tables[i],
                 strlen( filter_tables[i] )
             );
 
-            worker->config.filter_tables[i][strlen(filter_tables[i]) + 1] = '\0';
-            _log( LOG_LEVEL_DEBUG, "added filter_table[%u]: %s", i, worker->config.filter_tables[i] );
+            ft_elem[strlen(filter_tables[i])] = '\0';
+            _log( LOG_LEVEL_DEBUG, "added filter_table[%u]: %s", i, ft_elem );
         }
     }
 
-    worker->config.wal_level = wal_level;
+    w->config.wal_level = wal_level;
 
-    return;
+    return true;
 }
 
 bool parent_init( int argc, char ** argv )
@@ -483,6 +657,24 @@ bool parent_init( int argc, char ** argv )
         );
     }
 
+    if( !slab_init() )
+    {
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to initialize slab"
+        );
+        return false;
+    }
+
+    if( !initialize_util_contexts() )
+    {
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to initialize contexts"
+        );
+        return false;
+    }
+
     if( daemonize )
     {
         if( daemon( 1, 1 ) != 0 )
@@ -505,20 +697,22 @@ bool parent_init( int argc, char ** argv )
         argc,
         argv,
         NULL,
-        NULL,
+        NULLREF,
         MAIN_CHANNEL,
         NULL,
         0,
         'F'
     );
 
-    if( parent == NULL )
+    if( parent == NULLREF )
     {
+        _log( LOG_LEVEL_ERROR, "Failed to dispatch new_Worker() for parent" );
         return false;
     }
 
     if( !create_pid_file() )
     {
+        _log( LOG_LEVEL_ERROR, "Failed to create pid file" );
         return false;
     }
 
@@ -665,6 +859,7 @@ bool create_pid_file( void )
             "Failed to allocate memory for PID string"
         );
 
+        remove( pid_path );
         free( pid_path );
         return false;
     }
@@ -681,97 +876,89 @@ bool create_pid_file( void )
             pid_path
         );
 
+        remove( pid_path );
         free( pid_path );
         free( my_pid );
         return false;
     }
 
     fprintf( pfh, "%s", my_pid );
-    parent->pidfile = pid_path;
+    pid_file_name = pid_path;
     fclose( pfh );
     free( my_pid );
 
     return true;
 }
 
-void free_worker( struct worker * worker )
+void free_worker( worker_ref_t worker )
 {
-    if( worker == NULL )
+    struct worker * w     = NULL;
+    worker_ref_t *  w_arr = NULL;
+    uint16_t        i     = 0;
+    string_ref_t *  s_arr = NULL;
+
+    if( worker == NULLREF )
+        return;
+
+    w = ( struct worker * ) to_ptr( worker_context, worker );
+
+    if( w == NULL )
     {
+        rsfree( worker_context, worker );
         return;
     }
 
-    if( worker->conn != NULL && PQstatus( worker->conn ) == CONNECTION_OK )
+    if( w->conn != NULL && PQstatus( w->conn ) == CONNECTION_OK )
     {
-        if( worker->tx_in_progress )
+        if( w->tx_in_progress )
         {
-            PQexec( worker->conn, "ROLLBACK" );
-            worker->tx_in_progress = false;
+            PQexec( w->conn, "ROLLBACK" );
+            w->tx_in_progress = false;
         }
 
-        PQfinish( worker->conn );
-        worker->conn = NULL;
+        PQfinish( w->conn );
+        w->conn = NULL;
     }
 
-    free_shared_memory( worker, sizeof( struct worker ) );
-    worker = NULL;
-    return;
-}
+    w->status   = WORKER_STATUS_DEAD;
+    w->my_argc  = 0;
+    w->my_argv  = NULL;
+    w->buffer   = NULLREF;
+    w->last_lsn = 0;
 
-void free_shared_memory( void * data, size_t size )
-{
-    if( data == NULL || size == 0 )
-        return;
+    s_arr = ( string_ref_t * ) to_ptr( array_context, w->config.filter_tables );
 
-    munmap( data, size );
-    _log( LOG_LEVEL_DEBUG, "Free'd %p of size %lu", data, size );
-    data = NULL;
-    return;
-}
-
-void * create_shared_memory( size_t size )
-{
-    void * ptr        = NULL;
-    int    protection = 0;
-    int    visibility = 0;
-
-    protection = PROT_READ | PROT_WRITE;
-    visibility = MAP_ANONYMOUS | MAP_SHARED;
-
-    ptr = mmap( NULL, size, protection, visibility, -1, 0 );
-
-    if( ptr == MAP_FAILED )
+    if( s_arr != NULL )
     {
-        _log(
-            LOG_LEVEL_ERROR,
-            "Failed to allocate shared memory of size %lu: %s",
-            size,
-            strerror( errno )
-        );
-        return NULL;
+        for( i = 0; i < w->config.num_tables; i++ )
+        {
+            if( s_arr[i] != NULLREF )
+                rsfree( string_context, s_arr[i] );
+        }
     }
 
-    _log( LOG_LEVEL_DEBUG, "Shared memory created at %p of size %lu", ptr, size );
-    return ptr;
-}
+    if( w->config.filter_tables != NULLREF )
+        rsfree( array_context, w->config.filter_tables );
 
-void * resize_shared_memory( void * ptr, size_t old_size, size_t size )
-{
-    void * new = NULL;
+    w_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
 
-    if( size == 0 || ptr == NULL || old_size == 0 )
-        return NULL;
+    if( w_arr == NULL )
+    {
+        rsfree( worker_context, worker );
+        return;
+    }
 
-    new = create_shared_memory( size );
-    _log( LOG_LEVEL_DEBUG, "Resized %p to %p, new size %lu old size %lu", ptr, new, size, old_size );
+    for( i = 0; i < w->num_workers; i++ )
+    {
+        if( w_arr[i] == worker )
+        {
+            w_arr[i] = NULLREF;
+            break;
+        }
+    }
 
-    if( new == NULL )
-        return NULL;
-
-    memcpy( new, ptr, old_size );
-    free_shared_memory( ptr, old_size );
-    _log( LOG_LEVEL_DEBUG, "Resize: free'd %p of %lu", ptr, old_size );
-    return new;
+    rsfree( worker_context, worker );
+    return;
 }
 
 void _set_process_title(
@@ -833,24 +1020,128 @@ void __sighup( int sig )
     return;
 }
 
-struct worker * get_worker_by_channel( char * channel )
+uint16_t get_worker_count( void )
 {
-    struct worker * worker = NULL;
-    unsigned int    i      = 0;
+    struct worker * p = NULL;
 
-    if( channel == NULL || workers == NULL || num_workers == 0 )
-    {
-        return NULL;
-    }
+    if( parent == NULLREF )
+        return 0;
 
-    for( i = 0; i < num_workers; i++ )
+    p = ( struct worker * ) to_ptr( worker_context, parent );
+
+    if( p == NULL )
+        return 0;
+
+    return p->num_workers;
+}
+
+uint16_t get_worker_max( void )
+{
+    struct worker * p = NULL;
+
+    if( parent == NULLREF )
+        return 0;
+
+    p = ( struct worker * ) to_ptr( worker_context, parent );
+
+    if( p == NULL )
+        return 0;
+
+    return p->max_workers;
+}
+
+worker_ref_t get_worker_by_channel( char * channel )
+{
+    struct worker * worker      = NULL;
+    worker_ref_t *  workers_arr = NULL;
+    uint16_t        i           = 0;
+
+    if( channel == NULL || workers == NULLREF )
+        return NULLREF;
+
+    workers_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
+
+    if( workers_arr == NULL )
+        return NULLREF;
+
+    for( i = 0; i < get_worker_count(); i++ )
     {
-        worker = workers[i];
+        worker = ( struct worker * ) to_ptr( worker_context, workers_arr[i] );
 
         if( worker == NULL )
+            continue;
+
+        if(
+            strncmp(
+                worker->config.channel,
+                channel,
+                MIN(
+                    strnlen( worker->config.channel, MAX_CHANNEL_LENGTH ),
+                    strnlen( channel, MAX_CHANNEL_LENGTH )
+                )
+            ) == 0
+          )
         {
-            return NULL;
+            return workers_arr[i];
         }
+    }
+
+    return NULLREF;
+}
+
+worker_ref_t get_worker_by_pid( void )
+{
+    struct worker * worker      = NULL;
+    struct worker * p           = NULL;
+    uint16_t        i           = 0;
+    pid_t           pid         = 0;
+    worker_ref_t *  workers_arr = NULL;
+
+    pid = getpid();
+    p = get_parent_ptr( false );
+
+    if( p != NULL && p->pid == pid )
+        return parent;
+
+    if( workers == NULLREF )
+        return NULLREF;
+
+    workers_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
+
+    for( i = 0; i < get_worker_count(); i++ )
+    {
+        worker = ( struct worker * ) to_ptr( worker_context, workers_arr[i] );
+
+        if( worker == NULL )
+            continue;
+
+        if( worker->pid == pid )
+            return workers_arr[i];
+    }
+
+    return NULLREF;
+}
+
+struct worker * get_worker_ptr_by_channel( char * channel )
+{
+    struct worker * worker      = NULL;
+    worker_ref_t *  workers_arr = NULL;
+    uint16_t        i           = 0;
+
+    if( channel == NULL || workers == NULLREF )
+        return NULL;
+
+    workers_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
+
+    if( workers_arr == NULL )
+        return NULL;
+
+    for( i = 0; i < get_worker_count(); i++ )
+    {
+        worker = ( struct worker * ) to_ptr( worker_context, workers_arr[i] );
+
+        if( worker == NULL )
+            continue;
 
         if(
             strncmp(
@@ -870,32 +1161,49 @@ struct worker * get_worker_by_channel( char * channel )
     return NULL;
 }
 
-struct worker * get_worker_by_pid( void )
+struct worker * get_parent_ptr( bool must_be_parent )
 {
-    struct worker * worker = NULL;
-    unsigned int    i      = 0;
-    pid_t           pid    = 0;
+    struct worker * me = NULL;
+
+    me = ( struct worker * ) to_ptr( worker_context, parent );
+
+    if( me == NULL )
+        return NULL;
+
+    if( must_be_parent && me->type != WORKER_TYPE_PARENT && me->pid != getpid() )
+        return NULL;
+
+    return me;
+}
+
+struct worker * get_worker_ptr_by_pid( void )
+{
+    struct worker * worker      = NULL;
+    struct worker * p           = NULL;
+    uint16_t        i           = 0;
+    pid_t           pid         = 0;
+    worker_ref_t *  workers_arr = NULL;
 
     pid = getpid();
+    p = get_parent_ptr( false );
 
-    if( parent != NULL && parent->pid == pid )
-    {
-        return parent;
-    }
+    if( p != NULL && p->pid == pid )
+        return ( struct worker * ) to_ptr( worker_context, parent );
 
-    for( i = 0; i < num_workers; i++ )
+    if( workers == NULLREF )
+        return NULL;
+
+    workers_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
+
+    for( i = 0; i < get_worker_count(); i++ )
     {
-        worker = workers[i];
+        worker = ( struct worker * ) to_ptr( worker_context, workers_arr[i] );
 
         if( worker == NULL )
-        {
             continue;
-        }
 
         if( worker->pid == pid )
-        {
             return worker;
-        }
     }
 
     return NULL;
@@ -905,8 +1213,11 @@ void __term( void )
 {
     struct worker * me       = NULL;
     struct stat     filestat = {0};
+    //worker_ref_t    me_ref   = NULLREF;
 
-    me = get_worker_by_pid();
+    //me_ref = get_worker_by_pid();
+    //me = ( struct worker * ) to_ptr( worker_context, me_ref );
+    me = get_worker_ptr_by_pid();
 
     if( me == NULL )
         exit( 0 );
@@ -915,19 +1226,19 @@ void __term( void )
     {
         // Wait for children to shut down and purge WAL buffers if at
         // all possible, then cleanup
-        if( me->pidfile != NULL && stat( me->pidfile, &filestat ) >= 0 )
+        if( pid_file_name != NULL && stat( pid_file_name, &filestat ) >= 0 )
         {
-            if( remove( me->pidfile ) != 0 )
+            if( remove( pid_file_name) != 0 )
             {
                 _log(
                     LOG_LEVEL_ERROR,
                     "Failed to remove PID file '%s'",
-                    me->pidfile
+                    pid_file_name
                 );
             }
 
-            free( me->pidfile );
-            me->pidfile = NULL;
+            free( pid_file_name );
+            pid_file_name = NULL;
         }
 
         if( log_file != NULL && !no_log )
@@ -939,8 +1250,94 @@ void __term( void )
     }
     else
     {
-        // Clear out child resources
+        free_worker( get_worker_by_pid() );
     }
 
     exit( 0 );
+}
+
+bool initialize_util_contexts( void )
+{
+    if( worker_context == INVALID_CONTEXT )
+    {
+        worker_context = new_slab( WORKER_CONTEXT_NAME, sizeof( struct worker ) );
+
+        if( worker_context == INVALID_CONTEXT )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to initialize worker context"
+            );
+            return false;
+        }
+    }
+
+    if( array_context == INVALID_CONTEXT )
+    {
+        array_context = new_slab( ARRAY_CONTEXT_NAME, sizeof( string_ref_t ) );
+
+        if( array_context == INVALID_CONTEXT )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to initialize array context"
+            );
+            return false;
+        }
+    }
+
+    if( workers_context == INVALID_CONTEXT )
+    {
+        workers_context = new_slab( WORKERS_CONTEXT_NAME, sizeof( worker_ref_t ) );
+
+        if( workers_context == INVALID_CONTEXT )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed to initialize pid table context"
+            );
+            return false;
+        }
+    }
+
+    if( string_context == INVALID_CONTEXT )
+    {
+        string_context = new_slab( STRING_CONTEXT_NAME, sizeof( char ) );
+
+        if( string_context == INVALID_CONTEXT )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Failed ti initialize string context"
+            );
+            return false;
+        }
+    }
+
+    return true;
+}
+
+context_t get_worker_context( void )
+{
+    return worker_context;
+}
+
+context_t get_workers_context( void )
+{
+    return workers_context;
+}
+
+context_t get_array_context( void )
+{
+    return array_context;
+}
+
+context_t get_string_context( void )
+{
+    return string_context;
+}
+
+char * get_pid_file( void )
+{
+    return pid_file_name;
 }
