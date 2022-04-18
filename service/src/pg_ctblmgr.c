@@ -3,7 +3,7 @@
 int main( int argc, char ** argv )
 {
     int worker_count = 0;
-
+    set_nolog();
     _parse_args( argc, argv );
 
     if( !parent_init( argc, argv ) )
@@ -48,7 +48,7 @@ int main( int argc, char ** argv )
 
     worker_count = start_workers();
 
-    if( worker_count < 0 )
+    if( worker_count <= 0 )
     {
         _log(
             LOG_LEVEL_INFO,
@@ -342,7 +342,7 @@ static int start_workers( void )
 
     result = execute_query( p, ( char * ) get_worker_list, NULL, 0 );
 
-    if( result == NULL || PQntuples( result ) <= 0 )
+    if( result == NULL )
     {
         _log(
             LOG_LEVEL_ERROR,
@@ -352,6 +352,11 @@ static int start_workers( void )
         return -1;
     }
 
+    if( PQntuples( result ) <= 0 )
+    {
+        return 0;
+    }
+    
     worker_count = PQntuples( result );
     _log(
         LOG_LEVEL_DEBUG,
@@ -812,7 +817,7 @@ static bool initialize_buffer( void )
     if( num_tables == 0 )
     {
         _log( DEBUG, "No tables in channel" );
-        return false;
+        return true;
     }
 
     buffer_populate_trie(
