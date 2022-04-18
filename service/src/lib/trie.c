@@ -104,12 +104,13 @@ ref_t trie_search( trie_ref_t head, char * str )
 
     while( *str )
     {
+        if( unlikely( curr->character[*str - ' '] == NULLREF ) )
+            return NULLREF;
+
         curr = ( struct trie * ) to_ptr( trie_context, ( ref_t ) curr->character[*str - ' '] );
 
         if( unlikely( curr == NULL ) )
-        {
             return NULLREF;
-        }
 
         str++;
     }

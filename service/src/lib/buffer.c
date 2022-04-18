@@ -102,7 +102,7 @@ void buffer_populate_trie(
 
     if( buff == NULL )
     {
-        _log( LOG_LEVEL_ERROR, "Buffer dereferenced to NULL" );
+        _log( LOG_LEVEL_ERROR, "!!Buffer dereferenced to NULL" );
         return;
     }
 
@@ -154,6 +154,7 @@ void new_buffer( buffer_ref_t * b, char * qual_name, ref_t wal_data )
     if( *b == NULLREF )
         *b = ( buffer_ref_t ) _new_buffer();
 
+    _log( LOG_LEVEL_DEBUG, "Got buffer %lu", ( uint64_t ) *b );
     if(
             qual_name != NULL
          && wal_data != NULLREF

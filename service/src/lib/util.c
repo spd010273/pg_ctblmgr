@@ -323,6 +323,7 @@ worker_ref_t new_worker(
     worker->my_argc        = my_argc;
     worker->my_argv        = my_argv;
     worker->type           = type;
+    worker->buffer         = NULLREF;
 
     if( workerslot == NULLREF )
         worker->config.filter_tables = NULLREF;

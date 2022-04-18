@@ -14,6 +14,14 @@ int main( int argc, char ** argv )
         );
     }
 
+    if( !initialize_contexts() )
+    {
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to initialize shared memory contexts"
+        );
+    }
+
     if( !db_connect( NULL ) )
     {
         _log(
@@ -157,6 +165,12 @@ _ML:while( true )
          *     - Collect and maintain statistics
          *     - Consume translated WAL and insert into each child's SLPQ / trie
          */
+        if( got_sigterm )
+            __term();
+
+        if( got_sigint )
+            __term();
+
         sleep( 1.0 );
         if(
                 get_changeset_batch(
@@ -805,8 +819,7 @@ static bool initialize_buffer( void )
     if( me == NULL )
         return false;
 
-    new_buffer( &(me->buffer), NULL, NULLREF );
-
+    _log( LOG_LEVEL_DEBUG, "Parent got buffer %lu", ( uint64_t ) me->buffer );
     get_filter_tables_by_channel(
         me,
         NULL,
@@ -820,6 +833,7 @@ static bool initialize_buffer( void )
         return true;
     }
 
+    // This will initialize the buffer object by-reference
     buffer_populate_trie(
         &(me->buffer),
         filter_tables,
@@ -828,8 +842,9 @@ static bool initialize_buffer( void )
 
     _log(
         LOG_LEVEL_DEBUG,
-        "Populated trie with %u tables",
-        num_tables
+        "Populated trie with %u tables, reference given is %lu",
+        num_tables,
+        ( uint64_t ) me->buffer
     );
 
     for( i = 0; i < num_tables; i++ )

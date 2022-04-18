@@ -120,7 +120,10 @@ void * to_ptr( context_t ctx, ref_t ref )
     header = _get_header_by_context( ctx );
 
     if( unlikely( ( header == NULL ) || ( ref == NULLREF ) ) )
+    {
+        _slab_log( LL_SLAB_ERROR, "Header is NULL (%p) or ref is NULLREF (%lu)", header, ( uint64_t ) ref );
         return NULL;
+    }
 
     return _to_ptr( header, ref );
 }
