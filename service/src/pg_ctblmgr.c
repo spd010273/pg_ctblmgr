@@ -22,6 +22,14 @@ int main( int argc, char ** argv )
         );
     }
 
+    if( !initialize_changeset_context() )
+    {
+        _log(
+            LOG_LEVEL_FATAL,
+            "Failed to initialize changeset shared memory context"
+        );
+    }
+
     if( !db_connect( NULL ) )
     {
         _log(
@@ -183,7 +191,10 @@ _ML:while( true )
         {
             _log( LOG_LEVEL_DEBUG, "Got CS array %p, size: %u lsn %s", cs_array, num_cs_array, commit_lsn );
             if( num_cs_array == 0 )
+            {
+                _log( LOG_LEVEL_DEBUG, "No changes for our filter table(s)" );
                 continue; // no committed changes
+            }
 
             // Failure mode here is to get 'stuck'. We don't want to lose transactions if at all possible,
             // so if we have trouble parsing a specific changeset, we'll wedge ourselves between the peek
@@ -370,7 +381,7 @@ static int start_workers( void )
     {
         return 0;
     }
-    
+
     worker_count = PQntuples( result );
     _log(
         LOG_LEVEL_DEBUG,
@@ -398,7 +409,10 @@ static int start_workers( void )
         w_arr = ( worker_ref_t * ) to_ptr( get_workers_context(), workers );
 
         if( w_arr == NULL )
+        {
+            _log( LOG_LEVEL_ERROR, "Workers array dereferenced to NULL" );
             return -1;
+        }
         for( i = 0; i < worker_count; i++ )
             w_arr[i] = NULLREF;
     }
@@ -422,7 +436,13 @@ static int start_workers( void )
         w_arr = ( worker_ref_t * ) to_ptr( get_workers_context(), workers );
 
         if( w_arr == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "Workers array reallocation dereferenced to NULL"
+            );
             return -1;
+        }
 
         for( i = get_worker_max() - 1; i < worker_count; i++ )
             w_arr[i] = NULLREF;
@@ -446,6 +466,7 @@ static int start_workers( void )
     if( worker_count > get_worker_count() )
     {
         p->num_workers = worker_count;
+
         for( i = 0; i < worker_count; i++ )
         {
             channel   = get_column_value( (int) i, result, "maintenance_channel" );
@@ -472,6 +493,7 @@ static int start_workers( void )
                             return -1;
                         }
 
+                        _log( LOG_LEVEL_DEBUG, "Launching worker %u channel %s", ( uint32_t ) i, channel );
                         w_arr[j] = new_worker(
                             WORKER_TYPE_CHILD,
                             i,
@@ -549,6 +571,9 @@ static void worker_entrypoint( void * data )
     string_ref_t *       ft_arr    = NULL;
     char *               ft_elem   = NULL;
 
+    // TODO: Lets be clever about the sleep timer on a per-process basis - we can either get woken up by the parent
+    // when changes get pushed into our data structuer, or we can have a running-average type rate, and check based on that.
+
     if( data == NULL )
     {
         return;
@@ -605,7 +630,10 @@ static void worker_entrypoint( void * data )
     }
 
     _log( LOG_LEVEL_DEBUG, "Pins: %p", pins );
-    ft_arr = ( string_ref_t * ) to_ptr( get_string_context(), me->config.filter_tables );
+    ft_arr = ( string_ref_t * ) to_ptr(
+        get_array_context(),
+        me->config.filter_tables
+    );
 
     if( ft_arr == NULL )
     {
@@ -630,10 +658,18 @@ _CL:while( 1 )
         for( i = 0; i < me->config.num_tables; i++ )
         {
             changeset = ( changeset_ref_t ) buffer_pin_pop( pins[i] );
-            _log( LOG_LEVEL_DEBUG, "Worker popped %lu from pin %lu", ( uint64_t ) data, ( uint64_t ) pins[i] );
+            _log(
+                LOG_LEVEL_DEBUG,
+                "Worker popped %lu from pin %lu",
+                ( uint64_t ) data,
+                ( uint64_t ) pins[i]
+            );
             if( changeset == NULLREF )
             {
-                ft_elem = ( char * ) to_ptr( get_string_context(), ft_arr[i] );
+                ft_elem = ( char * ) to_ptr(
+                    get_string_context(),
+                    ( ref_t ) ft_arr[i]
+                );
                 _log(
                     LOG_LEVEL_DEBUG,
                     "Buffer pin %lu (%s) empty",
@@ -733,6 +769,15 @@ static void get_worker_pins( buffer_pin_ref_t ** bp_array )
         return;
     }
 
+    if( me->config.filter_tables == NULLREF )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Worker missing filter_tables array"
+        );
+        return;
+    }
+
     arr = ( string_ref_t * ) to_ptr( get_array_context(), me->config.filter_tables );
 
     if( arr == NULL )
@@ -743,10 +788,29 @@ static void get_worker_pins( buffer_pin_ref_t ** bp_array )
 
     for( i = 0; i < me->config.num_tables; i++ )
     {
-        ft_elem = ( char * ) to_ptr( get_string_context(), arr[i] );
-        _log( LOG_LEVEL_DEBUG, "Adding pin for table %s", ft_elem );
-        if( ft_elem == NULL )
+        if( arr[i] == NULLREF )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "NULLREF in filter_tables[%u]",
+                ( uint32_t ) i
+            );
             continue;
+        }
+
+        ft_elem = ( char * ) to_ptr( get_string_context(), arr[i] );
+
+        if( ft_elem == NULL )
+        {
+            _log(
+                LOG_LEVEL_ERROR,
+                "NULL dereference for filter_tables[%u]",
+                ( uint32_t ) i
+            );
+            continue;
+        }
+
+        _log( LOG_LEVEL_DEBUG, "Adding pin for table %s", ft_elem );
         (*bp_array)[i] = buffer_get_pin_by_name(
             me->buffer,
             ft_elem
@@ -1000,6 +1064,7 @@ static bool get_changeset_batch(
         return false;
     }
 
+    _log( LOG_LEVEL_DEBUG, "Got PQntuples %u", ( uint32_t ) PQntuples( pgresult ) );
     for( i = 0; i < PQntuples( pgresult ); i++ )
     {
         data      = get_column_value( i, pgresult, "data" );
@@ -1035,6 +1100,8 @@ static bool get_changeset_batch(
         {
             // XXX We assume that the results arrive in order IE: BEGIN DML DML .. COMMIT|ROLLBACK,
             // ... might want to ensure that this happens
+            // We can also get the situation where no changes happened that are relevent to us ie:
+            // BEGIN <no DML> COMMIT
             if(
                    cs->type == PGC_DML_INSERT
                 || cs->type == PGC_DML_UPDATE

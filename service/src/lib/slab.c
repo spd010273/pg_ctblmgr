@@ -140,8 +140,20 @@ static INLINE void * _to_ptr( slab_header * header, ref_t ref )
         ( sizeof( allocset_item_t ) * ( uint64_t ) ref )
     );
 
+    ptr = _PTR_BOUND_CHECK_NULL(
+        ptr,
+        _as_ptr_cache( header ),
+        header->allocset.max_allocset * sizeof( allocset_item_t )
+    );
     if( unlikely( ptr == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "PTR to ref %u is out of bounds",
+            ( uint32_t ) ref
+        );
         return NULL;
+    }
 
     ptr = get_ptr( ( ( allocset_item_t * ) ptr )->issued_ref );
 

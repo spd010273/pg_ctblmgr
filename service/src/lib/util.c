@@ -282,7 +282,6 @@ worker_ref_t new_worker(
     pid_t           pid         = 0;
     char *          worker_name = NULL;
     unsigned int    size        = 0;
-    unsigned int    i           = 0;
     struct worker * p           = NULL;
 
     if( workerslot == NULLREF )
@@ -447,21 +446,13 @@ worker_ref_t new_worker(
         free( worker_name );
         worker_name = NULL;
         worker->status = WORKER_STATUS_STARTUP;
-        _log(
-            LOG_LEVEL_DEBUG,
-            "Initialized worker with pid %d with filter_tables:",
-            worker->pid
-        );
 
-        for( i = 0; i < num_tables; i++ )
+        if( !worker_set_config( result, channel, filter_tables, num_tables, wal_level ) )
         {
-            _log(
-                LOG_LEVEL_DEBUG,
-                "filter_tables[%u]: %s",
-                i,
-                filter_tables[i]
-            );
+            _log( LOG_LEVEL_ERROR, "Worker failed to initialize config" );
+            exit( 0 );
         }
+
         worker->buffer = p->buffer;
         function( ( void * ) worker );
         exit( 0 );
@@ -519,8 +510,12 @@ bool worker_set_config(
         return false;
     }
 
-    if( w->config.filter_tables != NULLREF )
+    if( w->config.filter_tables != NULLREF && w->type == WORKER_TYPE_PARENT )
     {
+        _log(
+            LOG_LEVEL_DEBUG,
+            "Freeing non-clean filter tables in worker shm context"
+        );
         if( w->config.num_tables > 0 )
         {
             arr = ( string_ref_t * ) to_ptr( array_context, w->config.filter_tables );
@@ -535,6 +530,12 @@ bool worker_set_config(
         }
 
         rsfree( array_context, w->config.filter_tables );
+    }
+
+    if( w->config.filter_tables != NULLREF && w->type != WORKER_TYPE_PARENT )
+    {
+        // Clear (got copied in at fork), so that we can diverge our filter tables
+        w->config.filter_tables = NULLREF;
     }
 
     if( channel != NULL )
@@ -580,7 +581,7 @@ bool worker_set_config(
 
         for( i = 0; i < num_tables; i++ )
         {
-            arr[i] = rsmalloc(
+            arr[i] = ( string_ref_t ) rsmalloc(
                 string_context,
                 ( strlen( filter_tables[i] ) + 1 ) * sizeof( char )
             );
@@ -630,7 +631,7 @@ bool worker_set_config(
     }
 
     w->config.wal_level = wal_level;
-
+    __FENCE();
     return true;
 }
 
@@ -1063,10 +1064,19 @@ worker_ref_t get_worker_by_channel( char * channel )
     workers_arr = ( worker_ref_t * ) to_ptr( workers_context, workers );
 
     if( workers_arr == NULL )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Workers array dereferenced to NULL"
+        );
         return NULLREF;
+    }
 
     for( i = 0; i < get_worker_count(); i++ )
     {
+        if( workers_arr[i] == NULLREF )
+            continue;
+
         worker = ( struct worker * ) to_ptr( worker_context, workers_arr[i] );
 
         if( worker == NULL )

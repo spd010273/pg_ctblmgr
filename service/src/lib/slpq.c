@@ -155,6 +155,9 @@ ref_t slpq_pop( slpq_ref_t head )
 
     t = slpq_head->head;
 
+    if( unlikely( t == NULLREF ) )
+        return NULLREF;
+
     temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
 
     if( unlikely( temp == NULL ) )

@@ -1136,8 +1136,9 @@ static void _parse_data_record(
 
 static changeset_ref_t _new_changeset( void )
 {
-    changeset_ref_t changeset = NULLREF;
-    struct changeset * cs = NULL;
+    changeset_ref_t    changeset = NULLREF;
+    struct changeset * cs        = NULL;
+
     changeset = ( changeset_ref_t ) rsmalloc(
         changeset_context,
         sizeof( struct changeset )

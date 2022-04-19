@@ -268,21 +268,33 @@ bool buffer_add( buffer_ref_t b, char * qual_name, ref_t wal_data )
 
 ref_t buffer_pin_pop( buffer_pin_ref_t bp )
 {
-    ref_t data = NULLREF;
+    ref_t               data     = NULLREF;
     struct buffer_pin * buff_pin = NULL;
 
-    if( bp == NULLREF )
+    if( unlikely( bp == NULLREF ) )
+    {
+        _log( LOG_LEVEL_ERROR, "Cannot pop pin: Buffer pin is NULLREF" );
         return NULLREF;
+    }
 
     buff_pin = ( struct buffer_pin * ) to_ptr( buffer_pin_context, ( ref_t ) bp );
 
-    if( buff_pin == NULL )
+    if( unlikely( buff_pin == NULL ) )
+    {
+        _log( LOG_LEVEL_ERROR, "Cannot pop pin: Buffer pin dereferenced to NULL" );
         return NULLREF;
+    }
 
-    if( !__TNS_MUTEX( (&(buff_pin->in_use)) ) )
+    if( unlikely( !__TNS_MUTEX( (&(buff_pin->in_use)) ) ) )
+    {
+        _log( LOG_LEVEL_ERROR, "Cannot pop pin: Buffer pin is locked" );
         return NULLREF;
+    }
 
     data = slpq_pop( buff_pin->slpq );
+
+    if( unlikely( data == NULLREF ) )
+        _log( LOG_LEVEL_DEBUG, "Popped NULL from SLPQ" );
     __C_MUTEX( (&(buff_pin->in_use)) );
     return data;
 }
