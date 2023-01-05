@@ -56,6 +56,9 @@ bool initialize_changeset_context( void )
         return false;
     }
 
+    _log( LOG_LEVEL_DEBUG, "Changeset Context initialized to %u", ( uint32_t ) changeset_context );
+    _log( LOG_LEVEL_DEBUG, "Changeset Array Context initialized to %u", ( uint32_t ) changeset_array_context );
+    _log( LOG_LEVEL_DEBUG, "Changeset String Context initialized to %u", ( uint32_t ) changeset_string_context );
     return true;
 }
 
@@ -182,6 +185,17 @@ changeset_ref_t json_to_changeset(
     }
 
     changeset = _new_changeset();
+
+    if( changeset == NULLREF )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Changeset was not allocated by _new_changeset()"
+        );
+        free( tokens );
+        return NULLREF;
+    }
+
     cs = to_ptr( changeset_context, changeset );
 
     if( cs == NULL )

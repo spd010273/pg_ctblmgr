@@ -35,6 +35,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include "barrier.h"
 #include "slab.h"
 #include "util.h"
 

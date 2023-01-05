@@ -29,8 +29,10 @@ T_T_SRCS 		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/
 T_T_OBJS		= $(T_T_SRCS:.c=.o)
 T_SLPQ_SRCS		= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c ../src/lib/util.c ../src/lib/slpq.c src/t_slpq.c
 T_SLPQ_OBJS		= $(T_SLPQ_SRCS:.c=.o)
+T_SLAB2_SRCS	= ../src/lib/barrier.c ../src/lib/shm.c ../src/lib/slab.c src/t_slab_2.c
+T_SLAB2_OBJS 	= $(T_SLAB2_SRCS:.c=.o)
 
-all: t_buffer t_changeset t_query t_shm t_slab t_trie t_slpq
+all: t_buffer t_changeset t_query t_shm t_slab t_trie t_slpq t_slab_2
 
 t_changeset: $(T_CS_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
@@ -53,6 +55,9 @@ t_trie: $(T_T_OBJS)
 t_slpq: $(T_SLPQ_OBJS)
 	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
+t_slab_2: $(T_SLAB2_OBJS)
+	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
+
 .PHONY: clean
 clean:
 	rm -f $(T_CS_OBJS)
@@ -62,4 +67,5 @@ clean:
 	rm -f $(T_SLAB_OBJS)
 	rm -f $(T_T_OBJS)
 	rm -f $(T_SLPQ_OBJS)
+	rm -f $(T_SLAB2_OBJS)
 	rm -f t_*

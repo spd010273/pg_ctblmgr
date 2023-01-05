@@ -26,7 +26,9 @@
 #include "slab.h"
 
 static shm_handle     control_segment              = SEGMENT_HANDLE_INVALID;
+#ifdef _SLAB_CONTROL_IN_OWN_SEGMENT
 static __ref          control_segment_address      = {0};
+#endif // _SLAB_CONTROL_IN_OWN_SEGMENT
 static slab_control * control                      = NULL;
 static bool           _slab_init                   = false;
 static pid_t          p_pid                        = 0;
@@ -68,6 +70,7 @@ static INLINE void * _move_to_local( slab_header *, ref_t *, bool ) ALWAYS_INLIN
 static INLINE ref_t _move_to_shared( slab_header *, void **, size_t, bool ) ALWAYS_INLINE;
 static INLINE void _slab_log( slab_ll, char *, ... ) PRINTF;
 static INLINE uint64_t _get_random( void );
+static INLINE char * _get_context_name( slab_header * ) ALWAYS_INLINE;
 
 // Allocset tools
 static INLINE _as_ind_t _get_allocset_item_by_index( slab_header *, uint64_t index );
@@ -84,7 +87,10 @@ static INLINE void * _as_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
 static INLINE void * _allocs_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
 static INLINE void * _fsm_ptr_cache( slab_header * ) ALWAYS_INLINE_FLATTEN_HOT;
 
-#ifdef SLAB_DEBUG
+static INLINE bool _sync_slab( slab_header *, bool ) ALWAYS_INLINE_FLATTEN_HOT;
+static INLINE bool _sync_control( void ) ALWAYS_INLINE_FLATTEN_HOT;
+
+#ifdef _SLAB_DEBUG
 // Debugging
 static void _dump_control( slab_control * );
 static void _dump_header( slab_header *, bool );
@@ -92,19 +98,21 @@ static void _dump_context( context_t ); // calls dump_header()
 static void print_byte( uint8_t );
 static void print_bin( uint64_t );
 static void _print_fsm( slab_header * );
+
 static const char * bits[16] = {
     [ 0] = "0000", [ 1] = "0001", [ 2] = "0010", [ 3] = "0011",
     [ 4] = "0100", [ 5] = "0101", [ 6] = "0110", [ 7] = "0111",
     [ 8] = "1000", [ 9] = "1001", [10] = "1010", [11] = "1011",
     [12] = "1100", [13] = "1101", [14] = "1110", [15] = "1111",
 };
+
 static const char * hexes[16] = {
     [ 0] = "0",   [ 1] = "1",   [ 2] = "2",   [ 3] = "3",
     [ 4] = "4",   [ 5] = "5",   [ 6] = "6",   [ 7] = "7",
     [ 8] = "8",   [ 9] = "9",   [10] = "A",   [11] = "B",
     [12] = "C",   [13] = "D",   [14] = "E",   [15] = "F",
 };
-#endif // SLAB_DEBUG
+#endif // _SLAB_DEBUG
 
 void __test_harness( void )
 {
@@ -135,36 +143,49 @@ static INLINE void * _to_ptr( slab_header * header, ref_t ref )
     // issued_ref (__ref) or index into allocs[]
     register void * ptr = NULL;
 
+    if( unlikely( _as_ptr_cache( header ) == NULL ) )
+    {
+        // This slab has not been mapped!
+        #ifdef _SLAB_DEBUG
+        _slab_log( LL_SLAB_DEBUG, "Header %p may not be mapped", header );
+        _slab_log( LL_SLAB_DEBUG, "Header Magic: %x", header->magic );
+        _slab_log( LL_SLAB_DEBUG, "Header segment: %lu", ( uint64_t ) header->segment );
+        _slab_log( LL_SLAB_DEBUG, "Context name: %s", header->object_id );
+        #endif // _SLAB_DEBUG
+        map_segment( header->segment );
+
+    }
+
     ptr = _PTR_ADD_OFFSET(
         ( _as_ptr_cache( header ) ),
         ( sizeof( allocset_item_t ) * ( uint64_t ) ref )
     );
 
-    ptr = _PTR_BOUND_CHECK_NULL(
-        ptr,
-        _as_ptr_cache( header ),
-        header->allocset.max_allocset * sizeof( allocset_item_t )
-    );
-    if( unlikely( ptr == NULL ) )
+    if( unlikely( !_PTR_BOUND_CHECK( ptr, _as_ptr_cache( header ), header->allocset.max_allocset * sizeof( allocset_item_t ) ) ) )
     {
         _slab_log(
             LL_SLAB_ERROR,
-            "PTR to ref %u is out of bounds",
-            ( uint32_t ) ref
+            "REF %u does not appear to be allocated in context %u (%s) - BP: %p S: %zu. Got %p",
+            ( uint32_t ) ref,
+            ( uint32_t ) header->self,
+            _get_context_name( header ),
+            _as_ptr_cache( header ),
+            header->allocset.max_allocset * sizeof( allocset_item_t ),
+            ptr
         );
         return NULL;
     }
 
     ptr = get_ptr( ( ( allocset_item_t * ) ptr )->issued_ref );
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "Returning pointer %p for ref %lu",
         ptr,
         ( uint64_t ) ref
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
 
     return ptr;
 
@@ -240,6 +261,157 @@ ref_t to_ref( context_t ctx, void * ptr )
     return _to_ref( header, ptr );
 }
 
+bool sync_context( context_t ctx )
+{
+    slab_header * header = NULL;
+
+    header = get_header_by_context( ctx );
+
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Could not sync context %lu: header is NULL",
+            ( uint64_t ) ctx
+        );
+        return false;
+    }
+
+    if( !_sync_slab( header, false) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Could not sync context %lu",
+            ( uint64_t ) ctx
+        );
+        return false;
+    }
+
+    if( !_sync_control() )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Could not sync slab control header"
+        );
+
+        return false;
+    }
+
+    return true;
+}
+
+static INLINE bool _sync_control( void )
+{
+    ctrl_header * header     = NULL;
+    int32_t       save_errno = 0;
+
+    // Fetch the base address for the entire control page from shm lib
+    header = ( ctrl_header * ) get_control_header();
+
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Could not sync control header: header is NULL"
+        );
+
+        return false;
+    }
+
+    if( !__TNS_MUTEX( &(header->locked) ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to lock shm control header for sync"
+        );
+        return false;
+    }
+
+    save_errno = errno;
+
+    if(
+        msync(
+            ( void * ) header,
+            header->mapped_size,
+            __SHM_SYNC_FLAGS
+        )
+      )
+    {
+        __C_MUTEX( &(header->locked) );
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync shm control header: %s",
+            strerror( errno )
+        );
+        return false;
+    }
+
+    __C_MUTEX( &(header->locked) );
+    errno = save_errno;
+    return true;
+}
+
+static INLINE bool _sync_slab( slab_header * header, bool nolock )
+{
+    if( unlikely( header == NULL ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Could not sync slab header, header is NULL"
+        );
+
+        return false;
+    }
+
+    // Place lock in slab-visible lock
+    if( !nolock && !__TNS_MUTEX( &(header->locked) ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to lock segment header %p prior to sync",
+            header
+        );
+
+        return false;
+    }
+
+    if( !__SYNC( header->segment, false ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync header %p's segment %lu",
+            header,
+            ( uint64_t ) header->segment
+        );
+
+        if( !nolock )
+            __C_MUTEX( &(header->locked) );
+
+        return false;
+    }
+
+    if( !__SYNC( ref_get_segment( header->allocset.set ), false ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync header %p's allocset segment %lu",
+            header,
+            ( uint64_t ) header->allocset.set
+        );
+
+        if( !nolock )
+            __C_MUTEX( &(header->locked) );
+
+        return false;
+    }
+
+    if( !nolock )
+        __C_MUTEX( &(header->locked) );
+
+    return true;
+}
+
+
 /*
  * bool slab_init()
  *
@@ -310,16 +482,28 @@ bool slab_init( void )
                 ( size_t ) _SLAB_MAX_IDENT
             );
         }
+
+        __FENCE();
+
+        if( unlikely( !__SYNC_CONTROL_HEADER() ) )
+        {
+            _slab_log(
+                LL_SLAB_ERROR,
+                "Failed to sync control headers after initialization"
+            );
+        }
     }
     else if( likely( shm_is_init() || p_pid != getpid() ) )
     {
-        _slab_log( LL_SLAB_DEBUG, "Initializing slab in child context" );
         // child initialization sequence
+
+        #ifdef _SLAB_DEBUG
+        _slab_log( LL_SLAB_DEBUG, "Initializing slab in child context" );
+        #endif // _SLAB_DEBUG
         shm_child_init();
         #ifndef SLAB_LAZY_LOAD
         map_all();
         #endif // SLAB_LAZY_LOAD
-
         #ifndef _SLAB_CONTROL_IN_OWN_SEGMENT
         segment_address = get_control_data_section();
         #else
@@ -327,12 +511,13 @@ bool slab_init( void )
         #endif // _SLAB_CONTROL_IN_OWN_SEGMENT
         // segment address will be automatically mapped in when the __ref
         // is dereferenced
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Child has control segment %lu",
             ( uint64_t ) control_segment_address
         );
-
+        #endif // _SLAB_DEBUG
         if(
                 segment_address == NULL
              || control_segment == SEGMENT_HANDLE_INVALID
@@ -345,11 +530,13 @@ bool slab_init( void )
             return false;
         }
 
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Child got %p for control segment",
             segment_address
         );
+        #endif // _SLAB_DEBUG
 
         control = ( slab_control * ) segment_address;
 
@@ -377,6 +564,7 @@ bool slab_init( void )
                 );
                 return false;
             }
+            // XXX can setup pointer cache as we validate
         }
     }
 
@@ -452,6 +640,17 @@ void destroy_slab( context_t ctx )
     header->allocset.max_allocset   = 0;
     header->allocset.set            = get_null_ref();
 
+    #ifdef _SLAB_EXTRA_SANE
+    if( unlikely( !_sync_control() ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync control segment after destroying slab %lu",
+            ( uint64_t ) ctx
+        );
+    }
+    #endif // _SLAB_EXTRA_SANE
+
     __C_MUTEX( &(control->locked) );
     __C_MUTEX( &(header->locked) );
     __ptr_cache[ctx].as_base     = NULL;
@@ -503,12 +702,12 @@ static INLINE context_t _new_slab(
         tag
     );
 
+    // TODO Child -> parent alloc seems to be failing here
     ret = get_ctx_by_id( ident );
 
     if( ret == INVALID_CONTEXT )
     {
         // Allocate a new context
-
         // lock and inc next_header index and return as the new
         // context
         if( !__TNS_MUTEX( &(control->locked) ) )
@@ -525,7 +724,9 @@ static INLINE context_t _new_slab(
 
         __C_MUTEX( &(control->locked) );
 
+        #ifdef _SLAB_DEBUG
         _slab_log( LL_SLAB_DEBUG, "INITIALIZING SLAB %lu\n", ( uint64_t ) ret );
+        #endif // _SLAB_DEBUG
         // Setup our header to a semi-initialized state - we'll
         // handle setup of allocs[] and fsm[] later
         control->headers[ret].object_size      = object_size;
@@ -541,6 +742,48 @@ static INLINE context_t _new_slab(
             ident,
             _SLAB_MAX_IDENT
         );
+    }
+    else
+    {
+        // For child processes, verify that we have our headers setup and correct XXX
+        // So i've got a hunch the mapping is copied in but is not shared
+        slab_header * header = NULL;
+
+        header = _get_header_by_context( ret );
+        #ifdef _SLAB_DEBUG
+        _slab_log( LL_SLAB_DEBUG, "Child entry into _new_slab() %s, got header %p (%u)", ident, header, header->magic );
+        #endif // _SLAB_DEBUG
+        // TODO: So far, the parent enters here and sees that the segment is allocated (by child) but the pointer information is incorrect / NULL
+        if( __ptr_cache[ret].as_base != get_ptr( header->allocset.set ) )
+        {
+            __ptr_cache[ret].as_base = get_ptr( header->allocset.set );
+            __ptr_cache[ret].as_size = header->allocset.max_allocset;
+        }
+
+        if( __ptr_cache[ret].allocs_base != get_ptr( header->allocs ) )
+        {
+            __ptr_cache[ret].allocs_base = get_ptr( header->allocs );
+            __ptr_cache[ret].allocs_size = header->max_allocations * header->object_size;
+        }
+
+        if( __ptr_cache[ret].fsm_base != get_ptr( header->fsm ) )
+        {
+            __ptr_cache[ret].fsm_base = get_ptr( header->fsm );
+            __ptr_cache[ret].fsm_size = ( sizeof( fsm_t ) * _get_fsm_length( header ) );
+        }
+
+        #ifdef _SLAB_DEBUG
+        _slab_log(
+            LL_SLAB_ERROR,
+            "PTR_CACHE::\nAS_BASE:       %p\nAS_SIZE:      %zu\nALLOCS_BASE:   %p\nALLOCS_SIZE:    %zu\nFSM_BASE:      %p\nFSM_SIZE:      %zu",
+            __ptr_cache[ret].as_base,
+            __ptr_cache[ret].as_size,
+            __ptr_cache[ret].allocs_base,
+            __ptr_cache[ret].allocs_size,
+            __ptr_cache[ret].fsm_base,
+            __ptr_cache[ret].fsm_size
+        );
+        #endif // _SLAB_DEBUG
     }
 
     return ret;
@@ -953,20 +1196,22 @@ static INLINE bool _realloc_internal(
         __ptr_cache[header->self].as_base = get_ptr( header->allocset.set );
         __ptr_cache[header->self].as_size = header->allocset.max_allocset * sizeof( allocset_item_t );
 
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Resized allocset segment to hold %lu individual allocations",
             ( uint64_t ) header->allocset.max_allocset
         );
+        #endif // _SLAB_DEBUG
     }
 
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "FSM post-resize:"
     );
     _print_fsm( header );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
     #ifdef _SLAB_EXTRA_SANE
     return _check_canaries( header );
     #else
@@ -1209,10 +1454,10 @@ static INLINE bool __free_by_index( slab_header * header, uint64_t index, size_t
     if( unlikely( !nolock ) )
         __C_MUTEX( &(header->locked) );
 
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log( LL_SLAB_DEBUG, "FSM after free:" );
     _print_fsm( header );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
     return true;
 }
 
@@ -1234,14 +1479,14 @@ static INLINE ref_t _shrealloc(
     if( unlikely( header == NULL ) )
         return NULLREF;
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_shrealloc( %p, %lu ) entry",
         header,
         ( uint64_t ) count
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
     if( unlikely( !__TNS_MUTEX( &(header->locked) ) ) )
     {
         _slab_log(
@@ -1304,14 +1549,14 @@ static INLINE ref_t _shrealloc(
     old_size = item->size;
     old      = get_ptr( item->issued_ref );
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_shrealloc: resizing ref from %lu to %lu objects",
         ( uint64_t ) old_size,
         ( uint64_t ) count
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
 
     if( unlikely( count == old_size ) )
     {
@@ -1337,8 +1582,6 @@ static INLINE ref_t _shrealloc(
         item->size = count;
         _clear_fsm_elements_by_range( header, index, index + old_size );
         _set_fsm_elements_by_range( header, index, index + count );
-        __C_MUTEX( &(header->locked) );
-
         header->n_allocs = header->n_allocs - old_size + count;
     }
     else
@@ -1498,11 +1741,20 @@ static INLINE ref_t _shrealloc(
             );
             return NULLREF;
         }
-        __C_MUTEX( &(header->locked) );
-        __FENCE();
 
+        __FENCE();
     }
 
+    if( !_sync_slab( header, true ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync slab %p",
+            header
+        );
+    }
+
+    __C_MUTEX( &(header->locked) );
     return olduserref;
 }
 
@@ -1523,7 +1775,7 @@ static INLINE ref_t _shmalloc(
 
     num_objects = size / header->object_size;
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "Handling _shmalloc( %p, %zu, %s )",
@@ -1531,7 +1783,7 @@ static INLINE ref_t _shmalloc(
         size,
         zero_fill ? "T" : "F"
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
 
     if( size % header->object_size != 0 )
     {
@@ -1553,11 +1805,12 @@ static INLINE ref_t _shmalloc(
         )
       )
     {
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Initializing slab"
         );
-
+        #endif // _SLAB_DEBUG
         // Need to generate a context
         if( !_init_slab( header, false ) )
         {
@@ -1619,7 +1872,7 @@ static INLINE ref_t _shmalloc(
         retref  = _get_alloc_element_by_index( header, index );
         userref = _get_allocset_item_by_index( header, index );
 
-        #ifdef SLAB_DEBUG
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Returning ref to alloc[%lu] of %lu ( len %lu )",
@@ -1627,7 +1880,7 @@ static INLINE ref_t _shmalloc(
             ( uint64_t ) header->max_allocations,
             ( uint64_t ) header->max_allocations - index
         );
-        #endif // SLAB_DEBUG
+        #endif // _SLAB_DEBUG
         header->n_allocs += num_objects;
     }
     else
@@ -1643,11 +1896,12 @@ static INLINE ref_t _shmalloc(
         }
         else
         { // Exhaustive search
+            #ifdef _SLAB_DEBUG
             _slab_log(
                 LL_SLAB_DEBUG,
                 "_shmalloc: Performing exhaustive allocation search"
             );
-
+            #endif // _SLAB_DEBUG
             for(
                     index = 0;
                     index < ( FSM_WIDTH * _get_fsm_length( header ) );
@@ -1695,6 +1949,23 @@ static INLINE ref_t _shmalloc(
             ptr,
             ( unsigned char ) _ZERO_FILL_BYTE,
             ( header->object_size * num_objects )
+        );
+    }
+
+    if( !_sync_slab( header, true ) )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync slab %p",
+            header
+        );
+    }
+
+    if( !_sync_control() )
+    {
+        _slab_log(
+            LL_SLAB_ERROR,
+            "Failed to sync control header"
         );
     }
 
@@ -1779,7 +2050,7 @@ static INLINE void _set_fsm_elements_by_range(
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
     end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
 
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_set_fsm_elements_by_range:\n"
@@ -1796,7 +2067,7 @@ static INLINE void _set_fsm_elements_by_range(
         ( uint64_t ) fsm_end,
         ( uint64_t ) end_offset
     );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
 
     // shiftless, bulk setting optimization
     if( fsm_start != fsm_end )
@@ -1824,13 +2095,13 @@ static INLINE void _set_fsm_elements_by_range(
         {
             for( fsm_i = fsm_start + 1; fsm_i < fsm_end; fsm_i++ )
             {
-                #ifdef SLAB_FSM_DEBUG
+                #ifdef _SLAB_FSM_DEBUG
                 _slab_log(
                     LL_SLAB_DEBUG,
                     "_set_fsm_elements_by_range: Setting fsm word %lu en-masse",
                     ( uint64_t ) fsm_i
                 );
-                #endif // SLAB_FSM_DEBUG
+                #endif // _SLAB_FSM_DEBUG
                 fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
                     fsm,
                     ( fsm_i * sizeof( fsm_t ) )
@@ -1844,14 +2115,14 @@ static INLINE void _set_fsm_elements_by_range(
             ( fsm_start * sizeof( fsm_t ) )
         );
 
-        #ifdef SLAB_FSM_DEBUG
+        #ifdef _SLAB_FSM_DEBUG
         _slab_log( LL_SLAB_DEBUG, "start:" );
         print_bin( *fsm_word );
-        #endif // SLAB_FSM_DEBUG
+        #endif // _SLAB_FSM_DEBUG
         *fsm_word |= ( ( fsm_t ) ULONG_MAX ) << start_offset;
-        #ifdef SLAB_FSM_DEBUG
+        #ifdef _SLAB_FSM_DEBUG
         print_bin( *fsm_word );
-        #endif // SLAB_FSM_DEBUG
+        #endif // _SLAB_FSM_DEBUG
 
         fsm_word = ( fsm_t * ) _PTR_ADD_OFFSET(
             fsm,
@@ -1866,13 +2137,13 @@ static INLINE void _set_fsm_elements_by_range(
         {
             *fsm_word |= ~( ( ( fsm_t ) ULONG_MAX ) << ( end_offset + 1 ) );
         }
-        #ifdef SLAB_FSM_DEBUG
+        #ifdef _SLAB_FSM_DEBUG
         _slab_log( LL_SLAB_DEBUG, "start:" );
         print_bin( *fsm_word );
-        #endif // SLAB_FSM_DEBUG
-        #ifdef SLAB_FSM_DEBUG
+        #endif // _SLAB_FSM_DEBUG
+        #ifdef _SLAB_FSM_DEBUG
         print_bin( *fsm_word );
-        #endif // SLAB_FSM_DEBUG
+        #endif // _SLAB_FSM_DEBUG
     }
     else
     {
@@ -1989,7 +2260,7 @@ static INLINE void _clear_fsm_elements_by_range(
     fsm_end      = ( ( end - 1 ) / FSM_WIDTH );
     end_offset   = ( end - 1 ) - ( ( ( end - 1 ) / FSM_WIDTH ) * FSM_WIDTH );
 
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_clear_fsm_elements_by_range:\n"
@@ -2006,7 +2277,7 @@ static INLINE void _clear_fsm_elements_by_range(
         ( uint64_t ) fsm_end,
         ( uint64_t ) end_offset
     );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
 
     // shiftless, bulk setting optimization
     if( fsm_start != fsm_end )
@@ -2178,13 +2449,13 @@ static INLINE uint64_t _get_fsm_slot_by_width(
         return 0;
     }
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "ISSUING ALLOCATION FOR INDEX %lu",
         ( uint64_t ) bit_position
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
 
     _set_fsm_elements_by_range( header, bit_position, bit_position + width );
     // We need to track how large the allocation is for
@@ -2209,7 +2480,7 @@ static INLINE uint64_t _get_fsm_slot_by_width(
             return 0;
         }
     }
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_get_fsm_slot_by_width( %p, %lu ) POST RUN FSM SNAPSHOT",
@@ -2217,7 +2488,7 @@ static INLINE uint64_t _get_fsm_slot_by_width(
         width
     );
     _print_fsm( header );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
 
     return bit_position;
 }
@@ -2285,14 +2556,14 @@ static INLINE uint64_t __find_fsm_spot(
     // Note that the position / iter expressed in these statements is inverted
     // (directionally) prior to return to caller, instead of the 0th element
     // being the LSB of the 0th word, it's the MSB of the nth word.
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "__find_fsm_spot( %p, %lu ) startup",
         header,
         requested_length
     );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
 
     if( requested_length <= FSM_SHIFT_WIDTH )
     {
@@ -2320,13 +2591,13 @@ static INLINE uint64_t __find_fsm_spot(
             // Reset counter in case we were mid compare
             bits_comp      = requested_length;
             compare_active = false;
-            #ifdef SLAB_FSM_DEBUG
+            #ifdef _SLAB_FSM_DEBUG
             _slab_log(
                 LL_SLAB_DEBUG,
                 "Fast skipped to iter %lu",
                 ( uint64_t ) iter
             );
-            #endif // SLAB_FSM_DEBUG
+            #endif // _SLAB_FSM_DEBUG
             continue;
         }
 
@@ -2343,7 +2614,7 @@ static INLINE uint64_t __find_fsm_spot(
                 fsm_word >> ( ( fsm_word_i ) * FSM_SHIFT_WIDTH )
             );
 
-            #ifdef SLAB_FSM_DEBUG
+            #ifdef _SLAB_FSM_DEBUG
             _slab_log(
                 LL_SLAB_DEBUG,
                 " fsm_i: %lu,"
@@ -2369,7 +2640,7 @@ static INLINE uint64_t __find_fsm_spot(
             print_bin( ( uint64_t ) temp );
             _slab_log( LL_SLAB_DEBUG, "Mask:" );
             print_bin( ( uint64_t ) mask );
-            #endif // SLAB_FSM_DEBUG
+            #endif // _SLAB_FSM_DEBUG
 
             if( ( ~(temp) & mask ) == mask )
             {
@@ -2377,13 +2648,13 @@ static INLINE uint64_t __find_fsm_spot(
                 {
                     // Prep for return & attempt to compactify past word
                     // boundaries
-                    #ifdef SLAB_FSM_DEBUG
+                    #ifdef _SLAB_FSM_DEBUG
                     _slab_log(
                         LL_SLAB_DEBUG,
                         "Early exit triggered for position %lu",
                         ( uint64_t ) position
                     );
-                    #endif // SLAB_FSM_DEBUG
+                    #endif // _SLAB_FSM_DEBUG
                     if( ( last_word_val & FSM_LAST_WORD_MASK ) > 0 )
                         return (
                             header->max_allocations
@@ -2403,12 +2674,14 @@ static INLINE uint64_t __find_fsm_spot(
                         position++;
                     }
 
+                    #ifdef _SLAB_FSM_DEBUG
                     _slab_log(
                         LL_SLAB_DEBUG,
                         "Returning compactified position %lu (%lu)",
                         position,
                         header->max_allocations - ( position + requested_length ) - pos_offset
                     );
+                    #endif // _SLAB_FSM_DEBUG
                     return (
                         header->max_allocations
                       - ( position + requested_length )
@@ -2427,9 +2700,9 @@ static INLINE uint64_t __find_fsm_spot(
             }
             else
             {   // No match
-                #ifdef SLAB_FSM_DEBUG
+                #ifdef _SLAB_FSM_DEBUG
                 _slab_log( LL_SLAB_DEBUG, "No match - state reset." );
-                #endif // SLAB_FSM_DEBUG
+                #endif // _SLAB_FSM_DEBUG
                 //if( compare_active )
                 //{ // reset counters and markers
                     bits_comp = requested_length;
@@ -2456,9 +2729,9 @@ static INLINE uint64_t __find_fsm_spot(
         }
     }
 
-    #ifdef SLAB_FSM_DEBUG
+    #ifdef _SLAB_FSM_DEBUG
     _slab_log( LL_SLAB_DEBUG, "FSM Search exhausted" );
-    #endif // SLAB_FSM_DEBUG
+    #endif // _SLAB_FSM_DEBUG
     return ULONG_MAX;
 }
 
@@ -2529,11 +2802,13 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
 
     count_hint = header->count_hint;
 
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_init_slab: Header count hint is %lu",
         ( uint64_t ) count_hint
     );
+    #endif // _SLAB_DEBUG
 
     if( count_hint == 0 )
         count_hint = SLAB_DEFAULT_ALLOCATION;
@@ -2568,12 +2843,15 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
     header->c_allocstart  = ( canary_t ) _get_random();
     header->c_fsmstart    = ( canary_t ) _get_random();
     header->c_fsmend      = ( canary_t ) _get_random();
+
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "Initialized allocset at segment %lu, max_allocset %lu",
         ( uint64_t ) ref_get_segment( header->allocset.set ),
         ( uint64_t ) header->allocset.max_allocset
     );
+    #endif // _SLAB_DEBUG
     // Layout setup - we'll calculate locally for readability,
     // then convert to __ref
     c_allocstart = mapped_address;
@@ -2601,7 +2879,7 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
     __ptr_cache[header->self].fsm_base    = fsm;
     __ptr_cache[header->self].fsm_size    = ( sizeof( fsm_t ) * _get_fsm_length( header ) );
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "Layout:\n"
@@ -2616,7 +2894,7 @@ static INLINE bool _init_slab( slab_header * header, bool zero_fill )
         fsm,
         c_fsmend
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
 
     // Write out canaries
     *( ( canary_t * ) c_allocstart ) = header->c_allocstart;
@@ -2685,6 +2963,33 @@ static INLINE slab_header * _get_header_by_context( context_t ctx )
     return &(control->headers[ctx]);
 }
 
+void dump_headers( void )
+{
+    uint64_t i = 0;
+    slab_header * header = NULL;
+
+    if( control == NULL )
+        return;
+
+    fprintf( stdout, "CONTROL HEADER: %p, segment %u\n", control, ( uint32_t ) control_segment );
+    for( i = 0; i < _SLAB_MAX_SLABS; i++ )
+    {
+        header = &(control->headers[i]);
+        fprintf( stdout, "  HEADER %p, (%u)\n", header, (uint32_t) i );
+        fprintf(
+            stdout,
+            "    allocs: %s\n    fsm: %s\n    allocset.set: %s\n    CONTEXT: %u\n    obj_size: %zu\n    object_id: %s\n",
+            ref_is_null( header->allocs ) ? "NULL" : "set",
+            ref_is_null( header->fsm ) ? "NULL" : "set",
+            ref_is_null( header->allocset.set ) ? "NULL" : "set",
+            ( uint32_t ) header->self,
+            header->object_size,
+            header->object_id == NULL ? "NULL" : header->object_id
+        );
+    }
+
+    return;
+}
 static INLINE bool _clear_allocset_item_by_index( slab_header * header, uint64_t index )
 {
     _as_ind_t         ind  = 0;
@@ -2859,7 +3164,7 @@ static INLINE bool _set_allocset_item_by_index(
     allocset_item_t * new     = NULL;
     allocset_item_t * prev    = NULL;
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _slab_log(
         LL_SLAB_DEBUG,
         "_set_allocset_item_by_index( %p, %lu, __ref, %zu, %lu ) entry",
@@ -2868,7 +3173,7 @@ static INLINE bool _set_allocset_item_by_index(
         ( size_t ) size,
         ( uint64_t ) useind
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
 
     if( unlikely( header == NULL ) )
     {
@@ -2892,7 +3197,9 @@ static INLINE bool _set_allocset_item_by_index(
 
     if( useind == ALLOCSET_ITEM_INVALID )
     {
+        #ifdef _SLAB_DEBUG
         _slab_log( LL_SLAB_DEBUG, "Handling insertion case of index %lu, size %zu", ( uint64_t ) index, ( size_t ) size );
+        #endif // _SLAB_DEBUG
         // Insertion case
         newind = _get_available_allocset_item( header );
 
@@ -2964,11 +3271,13 @@ static INLINE bool _set_allocset_item_by_index(
     if( unlikely( header->allocset.head == ALLOCSET_ITEM_INVALID ) )
     {
         // Initialization case
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Inserted new index %lu as head of list (initialized)",
             ( uint64_t ) index
         );
+        #endif // _SLAB_DEBUG
         header->allocset.head = newind;
         header->allocset.tail = newind;
         __C_MUTEX( &(header->allocset.locked) );
@@ -3522,10 +3831,12 @@ static INLINE bool _check_context( context_t ctx )
 
     if( unlikely( control->headers[ctx].self != ctx ) )
     {
+        #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
             "Context check failed: context not initialized"
         );
+        #endif // _SLAB_DEBUG
         return false;
     }
 
@@ -3728,15 +4039,15 @@ static INLINE void * _move_to_local(
     return target;
 }
 
+#ifdef _SLAB_DEBUG
 void print_fsm( slab_header * header )
 {
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _print_fsm( header );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
     return;
 }
 
-#ifdef SLAB_DEBUG
 static void _print_fsm( slab_header * header )
 {
     uint64_t i = 0;
@@ -3867,7 +4178,7 @@ static void _dump_header( slab_header * header, bool simple )
         ( uint64_t ) header->allocset.head,
         ( uint64_t ) header->allocset.tail
     );
-
+    fflush( stdout );
     if( simple )
         return;
     fprintf( stdout, "---- HEADER DATA DETAIL:\n-- FSM:\n" );
@@ -4012,7 +4323,7 @@ static void _dump_control( slab_control * ctrl )
         _dump_header( &(ctrl->headers[i]), true );
     }
 }
-#endif // SLAB_DEBUG
+#endif // _SLAB_DEBUG
 
 /*
  * Debugging functions - dump either the control headers and associated short-form headers (dump_control)
@@ -4026,22 +4337,22 @@ void dump_control( void )
         return;
     }
 
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     _dump_control( control );
     #else
     _slab_log(
         LL_SLAB_ERROR,
         "Cannot dump control header - SLAB_DEBUG not enabled"
     );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
     return;
 }
 
 void dump_context( context_t ctx )
 {
-    #ifdef SLAB_DEBUG
+    #ifdef _SLAB_DEBUG
     return _dump_context( ctx );
-    #endif // SLAB_DEBUG
+    #endif // _SLAB_DEBUG
     _slab_log(
         LL_SLAB_ERROR,
         "Cannot dump context - SLAB_DEBUG not enabled"
@@ -4063,10 +4374,10 @@ static void _slab_log( slab_ll log_level, char * message, ... )
     if( unlikely( message == NULL ) )
         return;
 
-    #ifndef SLAB_DEBUG
+    #if !defined( _SLAB_DEBUG ) && !defined( _SLAB_FSM_DEBUG )
     if( log_level == LL_SLAB_DEBUG )
         return;
-    #endif // !SLAB_DEBUG
+    #endif // !_SLAB_DEBUG && !_SLAB_FSM_DEBUG
 
      gettimeofday( &tv, NULL );
 
@@ -4085,10 +4396,11 @@ static void _slab_log( slab_ll log_level, char * message, ... )
 
     fprintf(
         output_handle,
-        "%s.%05d [%d] %s: ",
+        "%s.%05d [%d] (%s) %s: ",
         buff_time,
         ( int ) ( tv.tv_usec / 1000 ),
         getpid(),
+        "SLAB.C",
         log_level == LL_SLAB_DEBUG ?
             "DEBUG" : log_level == LL_SLAB_ERROR ?
             "ERROR" : "INFO"
@@ -4169,6 +4481,14 @@ static INLINE uint64_t _get_random( void )
     return random_val;
 }
 
+static INLINE char * _get_context_name( slab_header * header )
+{
+    if( header == NULL )
+        return NULL;
+
+    return header->object_id;
+}
+
 /* Cache access functions
  *
  *  These check the state of the cache (validating size on the fly)
@@ -4199,12 +4519,19 @@ static INLINE void * _as_ptr_cache( slab_header * header )
         );
         return NULL;
     }
+
     #endif // _SLAB_EXTRA_SANE
-    if( unlikely( __ptr_cache[header->self].as_size != ( header->allocset.max_allocset * sizeof( allocset_item_t ) ) ) )
+    if(
+        unlikely(
+            ( __ptr_cache[header->self].as_size != ( header->allocset.max_allocset * sizeof( allocset_item_t ) ) )
+         || ( __ptr_cache[header->self].as_base == NULL ) // may not be needed
+        )
+      )
     {
         __ptr_cache[header->self].as_size = ( header->allocset.max_allocset * sizeof( allocset_item_t ) );
         __ptr_cache[header->self].as_base = get_ptr( header->allocset.set );
         __FENCE();
+        return __ptr_cache[header->self].as_base;
     }
 
     return __ptr_cache[header->self].as_base;

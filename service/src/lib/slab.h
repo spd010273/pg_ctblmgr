@@ -71,8 +71,15 @@
 #ifndef _SLAB_H
 #define _SLAB_H
 
-//#define SLAB_DEBUG 1
-//#define SLAB_FSM_DEBUG 1
+#define SLAB_DEBUG 0
+#define SLAB_FSM_DEBUG 0
+
+#if defined( SLAB_DEBUG ) && SLAB_DEBUG >= 1
+ #define _SLAB_DEBUG
+#endif // SLAB_DEBUG
+#if defined( SLAB_FSM_DEBUG ) && SLAB_FSM_DEBUG >= 1
+ #define _SLAB_FSM_DEBUG
+#endif // SLAB_FSM_DEBUG
 
 // since we're wrapping shm.c, we can control whether map_all() is called
 // by a forkee upon initialization. By lazy loading - we defer loading in
@@ -114,7 +121,7 @@
 #endif // _SLAB_MAX_SLABS check
 
 #define _SLAB_MAX_IDENT 64
-#define _SLAB_EXTRA_SANE 1 // Enable extra sanity checks
+#define _SLAB_EXTRA_SANE SHM_EXTRA_SANE // Enable extra sanity checks
 #define _SLAB_REALLOC_MULTIPLE 2 // unused: IFF a slab realloc occurs-  how aggressively do we overallocate?
 #undef  _SLAB_CONTROL_IN_OWN_SEGMENT
 #define _SLAB_CONTROL_MAGIC 0xF0042069
@@ -275,6 +282,7 @@ extern void slab_set_count_hint( context_t, size_t );
 //extern void slab_set_compaction( context_t, compact_t );
 extern void destroy_slab( context_t );
 extern bool check_context( context_t );
+extern bool sync_context( context_t );
 
 // Note for users: *realloc*() functions are dangerous, and you need a method to share
 // the updated __ref with other processes. This can be done by setting aside a separate slab
@@ -315,6 +323,7 @@ extern void __test_harness( void );
 
 // Reference / dereference subsystem
 
+extern void dump_headers( void );
 extern void * to_ptr( context_t, ref_t );
 extern ref_t to_ref( context_t, void * );
 

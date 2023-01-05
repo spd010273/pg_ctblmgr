@@ -406,6 +406,7 @@ worker_ref_t new_worker(
             exit( 0 );
         }
 
+        setvbuf( stdout, NULL, _IONBF, 0 );
         worker = ( struct worker * ) to_ptr( worker_context, result );
         p      = ( struct worker * ) to_ptr( worker_context, parent );
 
@@ -637,6 +638,7 @@ bool worker_set_config(
 
 bool parent_init( int argc, char ** argv )
 {
+    setvbuf( stdout, NULL, _IONBF, 0 );
     if( !no_log )
     {
         log_file = fopen( LOG_FILE_NAME, "a" );

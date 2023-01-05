@@ -53,7 +53,7 @@
  *
  *  Local state is stored in the shm_segment struct, along with static
  *  variables in the top of shm.c:
- *   seg_header __segment_lut[]
+ *   seg_header _slt[]
  *  These serve to indicate if, and where, each segment is mapped in our
  *  local processes' memory map.
  *
@@ -92,7 +92,7 @@
  *  done automatically by get_ptr() when:
  *  - A __ref for an unmapped segment is resolved to a local pointer.
  *  - get_ptr() detects an inconsistency between the local state
- *    (__segment_lut[]) and global state (seg_header).
+ *    (_slt[]) and global state (seg_header).
  *  This functionality is enabled with SHM_AUTO_MAP
  *
  * Copyright (c) 2021-2022, MerchLogix Inc.
@@ -106,8 +106,11 @@
 #define _SHM_H
 
 //#define __TESTING__ // code coverage
-//#define SHM_DEBUG 1
+#define SHM_DEBUG 0 
 
+#if defined( SHM_DEBUG ) && SHM_DEBUG >= 1
+ #define _SHM_DEBUG
+#endif // SHM_DEBUG
 #ifdef __TESTING__
  #include <unistd.h>
  #define SHM_USE_SYSV
@@ -191,6 +194,9 @@
  *     fulfill requests to allocate large segments. For typical x86
  *     applications, this can be 2MB, and up to 1GB iff PDPE1GB is supported.
  *     I hope to include PSE support as well
+ *   SHM_FORCE_SYNC: Force msync() based synchronization to file backing with
+ *     page invalidation after major writes. Only works on POSIX / mmap based
+ *     implementations.
  */
 // TODO: control_handle[segment] seems not being set appropriately - can be located by changing how _ref_get_segment words in extra sane mode
 #define SHM_EXTRA_SANE 1
@@ -199,7 +205,9 @@
 #define SHM_MAX_SEGMENTS 255
 #define SHM_SEGMENT_MAX_SIZE 256 // In pages
 #define SHM_AUTO_MAP 1
+#define SHM_CONSERVATIVE 1 // Force conservative syncing and madvise to avoid desync between mappings
 //#define SHM_ENABLE_HUGETLB
+//#define SHM_FORCE_SYNC
 
 /* likely/unlikely are branch hints, we may be using an older Cxx without atomic primitives or branch hinting */
 #ifdef __builtin_expect
@@ -342,6 +350,17 @@
 
 #define SHM_ID_NAME_SIZE 64
 
+#ifdef SHM_CONSERVATIVE
+ #define __SHM_NOFORK
+ #ifdef SHM_ENABLE_HUGETLB
+  #define __SHM_MADV_FLAGS ( MADV_DONTFORK | MADV_HUGEPAGE )
+ #else
+  #define __SHM_MADV_FLAGS MADV_DONTFORK
+ #endif // SHM_ENABLE_HUGETLB
+#endif // SHM_CONSERVATIVE
+#define __SHM_SYNC !defined( SHM_USE_SYSV ) && ( defined( SHM_FORCE_SYNC ) || ( defined( MAP_NOSYNC ) && MAP_NOSYNC == 1 ) )
+#define __SHM_SYNC_FLAGS MS_INVALIDATE
+
 // typedef our handles and iterator into the smallest possible size to fit them
 // This may allow the handle and offset to be packed into a single uint
 #if defined( SHM_MAX_SEGMENTS ) && ( SHM_MAX_SEGMENTS > 0 ) && ( SHM_MAX_SEGMENTS <= UCHAR_MAX )
@@ -418,6 +437,7 @@ typedef enum {
     SHM_ATTACH,
     SHM_DETACH
 } shm_op;
+
 // TODO: Need to remove stale segments/control if found on startup
 //  - These are easily discovered but we'll need to load them in and kill(0) the PID
 //  to see if it's valid
@@ -438,6 +458,10 @@ extern void zero_segment( shm_handle );
 extern bool shm_resize_segment( shm_handle, size_t );
 extern size_t get_segment_size( shm_handle ); // Returns the size available to the user
                                               // IE: mapped_size - sizeof( seg_header )
+extern bool __SYNC( shm_handle, bool );
+extern bool __FENCE_AND_SYNC( shm_handle, bool );
+extern bool __SYNC_CONTROL_HEADER( void );
+
 /* * * Local mapping of shared objects * * */
 /*
  * We need to create local allocations to track the base addresses of objects
@@ -471,6 +495,7 @@ typedef struct ctrl_header {
     volatile bool locked;          // Indicates a PID is modifying accounting info (this is SHM_EXCLUSIVE)
     handle_iter   entry_count;     // # Allocated segments
     handle_iter   max_entries;     // SHM_MAX_SEGMENTS
+    size_t        mapped_size;
     shm_handle    segments[SHM_MAX_SEGMENTS]; // shm_handles, indexed as 0-SHM_MAX_SEGMENTS,
                                            // with entry_count indexing into the next available
     size_t        sizes[SHM_MAX_SEGMENTS];
@@ -515,11 +540,11 @@ typedef struct seg_header {
  *   from the segment, we can get the locally mapped address ( base address )
  *   and from that, we add the offset and get the absolute, locally mapped
  *   address
- * __segment_lut[]:
+ * _slt[]:
  *   This array stores shm_segment structs, locally defined, which map a segment id
  *   to a base address.
  * get_ptr():
- *   Given a __ref and a populated __segment_lut[], we can resolve an absolute
+ *   Given a __ref and a populated _slt[], we can resolve an absolute
  *   local address from a base address / segment_id and offset
  */
 #ifdef _SHM_PACK_STRUCT
@@ -590,6 +615,7 @@ extern bool release_lock( shm_handle, shm_lock );
 
 typedef enum {
     LL_SHM_ERROR, // Critical error
+    LL_SHM_WARNING, // Warning but may not be critical
     LL_SHM_DEBUG  // Only enabled iff SHM_DEBUG is defined
 } shm_ll;
 

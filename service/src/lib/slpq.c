@@ -101,20 +101,27 @@ bool slpq_push( slpq_ref_t head, ref_t data )
 
     if( unlikely( ( head == NULLREF ) || ( data == NULLREF ) ) )
         return false;
+    
+    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
 
     n = ( slpq_node_ref_t ) rsmalloc( slpq_node_context, sizeof( struct slpq_node ) );
+    
+    if( unlikely( slpq_head == NULL ) )
+        return false;
+
+    if( unlikely( !__TNS_MUTEX( &(slpq_head->locked) ) ) )
+        return false;
 
     if( unlikely( n == NULLREF ) )
         return false;
 
     node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) n );
-    slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
 
     if( unlikely( node == NULL ) )
+    {
+        __C_MUTEX( &(slpq_head->locked) );
         return false;
-
-    if( unlikely( slpq_head == NULL ) )
-        return false;
+    }
 
     node->data = data;
     node->next = NULLREF;
@@ -124,17 +131,29 @@ bool slpq_push( slpq_ref_t head, ref_t data )
         slpq_head->tail = n;
         slpq_head->head = n;
         slpq_head->size = 1;
+        _log( LOG_LEVEL_DEBUG, "Pushed ref %u in node %u to SLPQ head %u", ( uint32_t ) data, ( uint32_t ) n, ( uint32_t ) head );
+        __C_MUTEX( &(slpq_head->locked) );
         return true;
+    }
+
+    if( slpq_head->tail == NULLREF )
+    {
+        __C_MUTEX( &(slpq_head->locked) );
+        return false;
     }
 
     node = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) slpq_head->tail );
 
     if( unlikely( node == NULL ) )
+    {
+        __C_MUTEX( &(slpq_head->locked) );
         return false;
+    }
 
     node->next = n;
     slpq_head->tail = n;
     slpq_head->size++;
+    __C_MUTEX( &(slpq_head->locked) );
     return true;
 }
 
@@ -146,22 +165,46 @@ ref_t slpq_pop( slpq_ref_t head )
     struct slpq *      slpq_head = NULL;
 
     if( unlikely( head == NULLREF ) )
+    {
+        _log( LOG_LEVEL_ERROR, "SLPQ head is a NULLREF" );
         return NULLREF;
+    }
 
     slpq_head = ( struct slpq * ) to_ptr( slpq_context, ( ref_t ) head );
 
     if( unlikely( slpq_head == NULL ) )
+    {
+        _log( LOG_LEVEL_ERROR, "SLPQ head dereferenced to NULL" );
+        return NULLREF;
+    }
+
+    if( unlikely( !__TNS_MUTEX( &(slpq_head->locked) ) ) )
         return NULLREF;
 
     t = slpq_head->head;
 
     if( unlikely( t == NULLREF ) )
+    {
+        _log(
+            LOG_LEVEL_DEBUG,
+            "SLPQ %u is empty",
+            ( uint32_t ) head
+        );
+        __C_MUTEX( &(slpq_head->locked) );
         return NULLREF;
+    }
 
     temp = ( struct slpq_node * ) to_ptr( slpq_node_context, ( ref_t ) t );
 
     if( unlikely( temp == NULL ) )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Node from head dereferenced to NULL"
+        );
+        __C_MUTEX( &(slpq_head->locked) );
         return NULLREF;
+    }
 
     data            = temp->data;
     slpq_head->head = temp->next;
@@ -174,6 +217,7 @@ ref_t slpq_pop( slpq_ref_t head )
 
     rsfree( slpq_node_context, t );
     slpq_head->size--;
+    __C_MUTEX( &(slpq_head->locked) );
     return data;
 }
 

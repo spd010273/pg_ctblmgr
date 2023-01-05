@@ -189,10 +189,40 @@ _ML:while( true )
                 )
           )
         {
-            _log( LOG_LEVEL_DEBUG, "Got CS array %p, size: %u lsn %s", cs_array, num_cs_array, commit_lsn );
+            _log( LOG_LEVEL_DEBUG, "Got CS array %p, size: %u lsn %s", changeset_arr, num_cs_array, commit_lsn );
             if( num_cs_array == 0 )
             {
                 _log( LOG_LEVEL_DEBUG, "No changes for our filter table(s)" );
+                // If num_cs_array == 0 && commit_lsn != NULL && get_changeset_batch() returned true, we can
+                // assume it's safe to seek to that LSN. Could have been a DDL change and we're just seeing:
+                // BEGIN
+                // < DDL that isn't sent in the logical replication slot >
+                // COMMIT
+                _log( LOG_LEVEL_DEBUG, "Parent seeking to change %s", commit_lsn );
+                params[0] = MAIN_CHANNEL;
+                params[1] = commit_lsn;
+                params[2] = "M";
+                params[3] = filter_tables;
+
+                result = execute_query(
+                    p,
+                    ( char * ) replication_seek,
+                    params,
+                    4
+                );
+
+                if( result == NULL )
+                {
+                    _log(
+                        LOG_LEVEL_ERROR,
+                        "Failed to consume changes up to LSN %s",
+                        params[1]
+                    );
+                }
+
+                _log( LOG_LEVEL_DEBUG, "Committed LSN is %s", commit_lsn );
+                free( commit_lsn );
+                commit_lsn = NULL;
                 continue; // no committed changes
             }
 
@@ -276,9 +306,10 @@ _ML:while( true )
                 {
                     _log(
                         LOG_LEVEL_DEBUG,
-                        "Pushed changeset %p to bp %p",
+                        "Pushed changeset %p to bp %p for qual %s",
                         cs,
-                        to_ptr( get_buffer_pin_context(), bufferpin )
+                        to_ptr( get_buffer_pin_context(), bufferpin ),
+                        qual
                     );
                 }
 
@@ -287,6 +318,7 @@ _ML:while( true )
             }
 
             num_cs_array = 0;
+            /* for testing - disable seek of records
             if( !no_seek )
             {
                 params[0] = MAIN_CHANNEL;
@@ -312,6 +344,7 @@ _ML:while( true )
 
                 _log( LOG_LEVEL_DEBUG, "Committed LSN is %s", commit_lsn );
             }
+            */
             // Need a reset mechanism for no_seek. We need to detect if the workers have miraculously
             // caught up, though this mechanism is supposed to keep the bad changeset's isolated until
             // a human can intervene
@@ -579,6 +612,24 @@ static void worker_entrypoint( void * data )
         return;
     }
 
+    if( !initialize_contexts() )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Worker failed to initialize buffer contexts"
+        );
+        return;
+    }
+
+    if( !initialize_changeset_context() )
+    {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Worker failed to initialize changeset context"
+        );
+        return;
+    }
+
     me = ( struct worker * ) data;
 
     _log(
@@ -643,7 +694,7 @@ static void worker_entrypoint( void * data )
 
 _CL:while( 1 )
     {
-        sleep( 1 );
+        sleep( 2 );
         if( me->conn == NULL )
         {
             db_connect( me );
@@ -676,7 +727,8 @@ _CL:while( 1 )
                     ( uint64_t ) pins[i],
                     ft_elem
                 );
-                goto _CL;
+                continue;
+                //goto _CL;
             }
             else
             {
@@ -1065,12 +1117,16 @@ static bool get_changeset_batch(
     }
 
     _log( LOG_LEVEL_DEBUG, "Got PQntuples %u", ( uint32_t ) PQntuples( pgresult ) );
+    if( PQntuples( pgresult ) == 0 )
+        return true;
+
     for( i = 0; i < PQntuples( pgresult ); i++ )
     {
         data      = get_column_value( i, pgresult, "data" );
         xid       = xid_in( get_column_value( i, pgresult, "xid" ) );
         lsn_str   = get_column_value( i, pgresult, "lsn" );
         lsn       = lsn_to_offset( lsn_str );
+        _log( LOG_LEVEL_DEBUG, "Entering changeset parse for xid %s", get_column_value( i, pgresult, "xid" ) );
         changeset = json_to_changeset( data, PGC_WAL_FULL );
 
         if( changeset == NULLREF )
@@ -1102,6 +1158,7 @@ static bool get_changeset_batch(
             // ... might want to ensure that this happens
             // We can also get the situation where no changes happened that are relevent to us ie:
             // BEGIN <no DML> COMMIT
+            _log( LOG_LEVEL_DEBUG, "BEGIN located, parsing changes" );
             if(
                    cs->type == PGC_DML_INSERT
                 || cs->type == PGC_DML_UPDATE
@@ -1111,9 +1168,19 @@ static bool get_changeset_batch(
                 cs->lsn = lsn;
                 (*result)[*num_results] = changeset;
                 (*num_results)++;
+                _log(
+                    LOG_LEVEL_DEBUG,
+                    "Stored change in LSN %s, index %u, OP %s",
+                    lsn_str, 
+                    (*num_results) - 1,
+                    cs->type == PGC_DML_INSERT ? "INSERT" :
+                    cs->type == PGC_DML_UPDATE ? "UPDATE" :
+                    cs->type == PGC_DML_DELETE ? "DELETE" : "UNKNOWN"
+                );
             }
             else if( cs->type == PGC_DML_ROLLBACK )
             {
+                _log( LOG_LEVEL_DEBUG, "ROLLBACK located, cleaning up..." );
                 free_changeset( changeset );
 
                 for( j = 0; j < *num_results; j++ )
@@ -1131,6 +1198,7 @@ static bool get_changeset_batch(
             else if( cs->type == PGC_DML_COMMIT )
             {
                 // Save LSN of commit message
+                _log( LOG_LEVEL_DEBUG, "COMMIT record found for LSN %s", lsn_str );
                 free_changeset( changeset );
                 begin_found = false;
                 cs          = NULL;
@@ -1158,11 +1226,17 @@ static bool get_changeset_batch(
                 sizeof( changeset_ref_t )
             );
 
+            _log(
+                LOG_LEVEL_DEBUG,
+                "Located BEGIN record, allocating changeset array size %u",
+                ( uint32_t ) ( PQntuples( pgresult ) - 2 )
+            );
             // Discard BEGIN changeset
             free_changeset( changeset );
 
             if( (*result) == NULL )
             {
+                _log( LOG_LEVEL_ERROR, "Allocation for local changeset array failed" );
                 PQclear( pgresult );
                 return false;
             }

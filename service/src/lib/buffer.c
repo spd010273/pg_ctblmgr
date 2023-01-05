@@ -64,6 +64,11 @@ bool initialize_contexts( void )
         return false;
     }
 
+    _log( LOG_LEVEL_DEBUG, "SLPQ Context initialized to %u", ( uint32_t ) slpq_context );
+    _log( LOG_LEVEL_DEBUG, "SLPQ Node Context initialized to %u", ( uint32_t ) _slpq_node_context );
+    _log( LOG_LEVEL_DEBUG, "Trie Context initialized to %u", ( uint32_t ) _trie_context );
+    _log( LOG_LEVEL_DEBUG, "Buffer Pin Context initialized to %u", ( uint32_t ) buffer_pin_context );
+    _log( LOG_LEVEL_DEBUG, "Buffer Context initialized to %u", ( uint32_t ) buffer_context );
     return true;
 }
 
