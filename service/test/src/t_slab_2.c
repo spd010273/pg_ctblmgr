@@ -8,6 +8,11 @@
 #include "../src/lib/slab.h"
 #define MAGIC 0xdeadbeef
 
+/*
+ * Objective is to do the following:
+ *  Allocate memory as parent, see if both child/parent have write/read visibility
+ *  Allocate memory as child, see if both child/parent have write/read visibility
+ */
 int main( void );
 void child_process( ref_t );
 
@@ -28,7 +33,7 @@ int main( void )
     }
 
     slab_1 = new_slab( "TEST", sizeof( uint64_t ) );
-    
+
     if( slab_1 == INVALID_CONTEXT )
     {
         fprintf( stderr, "FAILED: Could not initialize slab context\n" );
@@ -91,7 +96,7 @@ int main( void )
     {
         fprintf( stderr, "FAILED: Second test dereferenced to NULL\n" );
         sleep( 60 );
-        return -1;    
+        return -1;
     }
 
     if( *ptr != MAGIC )
@@ -101,7 +106,7 @@ int main( void )
     }
 
     *ptr = 0;
-    
+
     wait( NULL );
     fprintf( stdout, "All tests passed.\n" );
     return 0;
@@ -129,7 +134,7 @@ void child_process( ref_t r )
     }
 
     ptr = ( uint64_t * ) to_ptr( slab_1, r );
-    
+
     if( ptr == NULL )
     {
         fprintf( stderr, "FAILED: Dereferenced passed ref to NULL\n" );
@@ -139,7 +144,7 @@ void child_process( ref_t r )
 
     while( 1 )
     {
-        sleep(1 );
+        sleep( 1 );
         ptr[1]++;
         cnt++;
         //fprintf( stdout, "CHILD: v: %lu v2: %lu\n", ptr[0], ptr[1] );

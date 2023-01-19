@@ -508,9 +508,6 @@ bool slab_init( void )
         segment_address = get_control_data_section();
         #else
         segment_address = get_ptr( control_segment_address );
-        #endif // _SLAB_CONTROL_IN_OWN_SEGMENT
-        // segment address will be automatically mapped in when the __ref
-        // is dereferenced
         #ifdef _SLAB_DEBUG
         _slab_log(
             LL_SLAB_DEBUG,
@@ -518,6 +515,9 @@ bool slab_init( void )
             ( uint64_t ) control_segment_address
         );
         #endif // _SLAB_DEBUG
+        #endif // _SLAB_CONTROL_IN_OWN_SEGMENT
+        // segment address will be automatically mapped in when the __ref
+        // is dereferenced
         if(
                 segment_address == NULL
              || control_segment == SEGMENT_HANDLE_INVALID
@@ -564,7 +564,16 @@ bool slab_init( void )
                 );
                 return false;
             }
+
             // XXX can setup pointer cache as we validate
+            // For now we empty out the pointer cache and figure things
+            // out from scratch when things are dereferenced
+            __ptr_cache[i].as_base = NULL;
+            __ptr_cache[i].as_size = 0;
+            __ptr_cache[i].allocs_base = NULL;
+            __ptr_cache[i].allocs_size = 0;
+            __ptr_cache[i].fsm_base = NULL;
+            __ptr_cache[i].fsm_size = 0;
         }
     }
 

@@ -106,7 +106,7 @@
 #define _SHM_H
 
 //#define __TESTING__ // code coverage
-#define SHM_DEBUG 0 
+#define SHM_DEBUG 1 
 
 #if defined( SHM_DEBUG ) && SHM_DEBUG >= 1
  #define _SHM_DEBUG
@@ -358,7 +358,7 @@
   #define __SHM_MADV_FLAGS MADV_DONTFORK
  #endif // SHM_ENABLE_HUGETLB
 #endif // SHM_CONSERVATIVE
-#define __SHM_SYNC !defined( SHM_USE_SYSV ) && ( defined( SHM_FORCE_SYNC ) || ( defined( MAP_NOSYNC ) && MAP_NOSYNC == 1 ) )
+#define __SHM_SYNC !defined( SHM_USE_SYSV ) && ( defined( SHM_FORCE_SYNC ) || ( defined( MAP_NOSYNC ) && MAP_NOSYNC >= 1 ) )
 #define __SHM_SYNC_FLAGS MS_INVALIDATE
 
 // typedef our handles and iterator into the smallest possible size to fit them

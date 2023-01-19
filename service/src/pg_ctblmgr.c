@@ -563,6 +563,7 @@ static bool extension_installed( void )
     struct worker * p         = NULL;
 
     p = get_parent_ptr( true );
+
     if( p == NULL )
         return false;
 
@@ -609,6 +610,10 @@ static void worker_entrypoint( void * data )
 
     if( data == NULL )
     {
+        _log(
+            LOG_LEVEL_ERROR,
+            "Worker received NULL data struct"
+        );
         return;
     }
 

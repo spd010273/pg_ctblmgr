@@ -1958,7 +1958,7 @@ static INLINE bool _release_lock( shm_handle segment, shm_lock locktype )
 // Replace the segment with a new segment of the given size,
 // copying the old data into the new segment
 bool shm_resize_segment( shm_handle segment, size_t new_size )
-{ // XXX -- untested
+{
     size_t       old_size       = 0;
     void *       temp           = NULL;
     void *       mapped_address = NULL;

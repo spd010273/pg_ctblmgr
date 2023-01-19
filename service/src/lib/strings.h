@@ -79,4 +79,17 @@ INNER JOIN pg_catalog.pg_namespace n \
         ON n.oid = e.extnamespace \
      WHERE e.extname = $1";
 
+const char * ct_existence_check = "\
+    SELECT \
+      FROM pg_catalog.pg_class c \
+INNER JOIN pg_catalog.pg_namespace n \
+        ON n.oid = c.relnamespace \
+INNER JOIN " EXTENSION_SCHEMA ".tb_maintenance_object mo \
+        ON mo.name = c.relname::VARCHAR \
+       AND mo.namespace = c.nspname::VARCHAR \
+INNER JOIN " EXTENSION_SCHEMA ".tb_driver d \
+        ON d.driver = mo.driver \
+       AND d.name = 'postgresql' \
+     WHERE mo.name = $1 \
+       AND mp.namespace = $2 ";
 #endif // STRINGS_H
