@@ -1,0 +1,453 @@
+({
+    QUERY
+        :commandType 1
+        :querySource 0
+        :canSetTag true
+        :utilityStmt <>
+        :resultRelation 0
+        :hasAggs false
+        :hasWindowFuncs false
+        :hasTargetSRFs false
+        :hasSubLinks false
+        :hasDistinctOn false
+        :hasRecursive false
+        :hasModifyingCTE false
+        :hasForUpdate false
+        :hasRowSecurity false
+        :isReturn false
+        :cteList ({
+            COMMONTABLEEXPR
+                :ctename tt_test
+                :aliascolnames <>
+                :ctematerialized 0
+                :ctequery {
+                    QUERY
+                        :commandType 1
+                        :querySource 0
+                        :canSetTag false
+                        :utilityStmt <>
+                        :resultRelation 0
+                        :hasAggs false
+                        :hasWindowFuncs false
+                        :hasTargetSRFs false
+                        :hasSubLinks false
+                        :hasDistinctOn false
+                        :hasRecursive false
+                        :hasModifyingCTE false
+                        :hasForUpdate false
+                        :hasRowSecurity false
+                        :isReturn false
+                        :cteList <>
+                        :rtable ({
+                            RTE
+                                :alias {
+                                    ALIAS
+                                        :aliasname a
+                                        :colnames <>
+                                    }
+                                :eref {
+                                    ALIAS
+                                        :aliasname a
+                                        :colnames ("foo" "bar" "baz")
+                                    }
+                                :rtekind 0
+                                :relid 18288
+                                :relkind r
+                                :rellockmode 1
+                                :tablesample <>
+                                :lateral false
+                                :inh true
+                                :inFromCl true
+                                :requiredPerms 2
+                                :checkAsUser 0
+                                :selectedCols (b 8)
+                                :insertedCols (b)
+                                :updatedCols (b)
+                                :extraUpdatedCols (b)
+                                :securityQuals <>
+                        })
+                        :jointree {
+                            FROMEXPR
+                                :fromlist ({
+                                    RANGETBLREF
+                                        :rtindex 1
+                                })
+                                :quals <>
+                            }
+                        targetList ({
+                            TARGETENTRY
+                                :expr {
+                                    VAR
+                                        :varno 1
+                                        :varattno 1
+                                        :vartype 23
+                                        :vartypmod -1
+                                        :varcollid 0
+                                        :varlevelsup 0
+                                        :varnosyn 1
+                                        :varattnosyn 1
+                                        :location 48
+                                }
+                            :resno 1
+                            :resname foo
+                            :ressortgroupref 0
+                            :resorigtbl 18288
+                            :resorigcol 1
+                            :resjunk false
+                        })
+                        :override 0
+                        :onConflict <>
+                        :returningList <>
+                        :groupClause <>
+                        :groupDistinct false
+                        :groupingSets <>
+                        :havingQual <>
+                        :windowClause <>
+                        :distinctClause <>
+                        :sortClause <>
+                        :limitOffset <>
+                        :limitCount <>
+                        :limitOption 0
+                        :rowMarks <>
+                        :setOperations <>
+                        :constraintDeps <>
+                        :withCheckOptions <>
+                        :stmt_location 0
+                        :stmt_len 0
+                }
+                :search_clause <>
+                :cycle_clause <>
+                :location 29
+                :cterecursive false
+                :cterefcount 1
+                :ctecolnames ("foo")
+                :ctecoltypes (o 23)
+                :ctecoltypmods (i -1)
+                :ctecolcollations (o 0)
+        })
+        :rtable ({
+            RTE
+                :alias {
+                    ALIAS
+                        :aliasname old
+                        :colnames <>
+                }
+                :eref {
+                    ALIAS
+                        :aliasname old
+                        :colnames ("foo" "bar" "baz")
+                }
+                :rtekind 0
+                :relid 18371
+                :relkind v
+                :rellockmode 1
+                :tablesample <>
+                :lateral false
+                :inh false
+                :inFromCl false
+                :requiredPerms 0
+                :checkAsUser 0
+                :selectedCols (b)
+                :insertedCols (b)
+                :updatedCols (b)
+                :extraUpdatedCols (b)
+                :securityQuals <>
+        } {
+            RTE
+                :alias {
+                    ALIAS
+                        :aliasname new
+                        :colnames <>
+                }
+                :eref {
+                    ALIAS
+                        :aliasname new
+                        :colnames ("foo" "bar" "baz")
+                }
+                :rtekind 0
+                :relid 18371
+                :relkind v
+                :rellockmode 1
+                :tablesample <>
+                :lateral false
+                :inh false
+                :inFromCl false
+                :requiredPerms 0
+                :checkAsUser 0
+                :selectedCols (b)
+                :insertedCols (b)
+                :updatedCols (b)
+                :extraUpdatedCols (b)
+                :securityQuals <>
+        } {
+            RTE
+                :alias {
+                    ALIAS
+                        :aliasname a
+                        :colnames <>
+                }
+                :eref {
+                    ALIAS
+                        :aliasname a
+                        :colnames ("foo")
+                }
+                :rtekind 6
+                :ctename tt_test
+                :ctelevelsup 0
+                :self_reference false
+                :coltypes (o 23)
+                :coltypmods (i -1)
+                :colcollations (o 0)
+                :lateral false
+                :inh false
+                :inFromCl true
+                :requiredPerms 0
+                :checkAsUser 0
+                :selectedCols (b)
+                :insertedCols (b)
+                :updatedCols (b)
+                :extraUpdatedCols (b)
+                :securityQuals <>
+        } {
+            RTE
+                :alias {
+                    ALIAS
+                        :aliasname b
+                        :colnames <>
+                }
+                :eref {
+                    ALIAS
+                        :aliasname b
+                        :colnames ("foo" "bar" "baz")
+                }
+                :rtekind 0
+                :relid 18293
+                :relkind r
+                :rellockmode 1
+                :tablesample <>
+                :lateral false
+                :inh true
+                :inFromCl true
+                :requiredPerms 2
+                :checkAsUser 0
+                :selectedCols (b 8 10)
+                :insertedCols (b)
+                :updatedCols (b)
+                :extraUpdatedCols (b)
+                :securityQuals <>
+        } {
+            RTE
+                :alias <>
+                :eref {
+                    ALIAS
+                        :aliasname unnamed_join
+                        :colnames ("foo" "foo" "bar" "baz")
+                }
+                :rtekind 2
+                :jointype 0
+                :joinmergedcols 0
+                :joinaliasvars ({
+                    VAR
+                        :varno 3
+                        :varattno 1
+                        :vartype 23
+                        :vartypmod -1
+                        :varcollid 0
+                        :varlevelsup 0
+                        :varnosyn 3
+                        :varattnosyn 1
+                        :location -1
+                } {
+                    VAR
+                        :varno 4
+                        :varattno 1
+                        :vartype 23
+                        :vartypmod -1
+                        :varcollid 0
+                        :varlevelsup 0
+                        :varnosyn 4
+                        :varattnosyn 1
+                        :location -1
+                } {
+                    VAR
+                        :varno 4
+                        :varattno 2
+                        :vartype 23
+                        :vartypmod -1
+                        :varcollid 0
+                        :varlevelsup 0
+                        :varnosyn 4
+                        :varattnosyn 2
+                        :location -1
+                } {
+                    VAR
+                        :varno 4
+                        :varattno 3
+                        :vartype 23
+                        :vartypmod -1
+                        :varcollid 0
+                        :varlevelsup 0
+                        :varnosyn 4
+                        :varattnosyn 3
+                        :location -1
+                })
+                :joinleftcols (i 1)
+                :joinrightcols (i 1 2 3)
+                :join_using_alias <>
+                :lateral false
+                :inh false
+                :inFromCl true
+                :requiredPerms 0
+                :checkAsUser 0
+                :selectedCols (b)
+                :insertedCols (b)
+                :updatedCols (b)
+                :extraUpdatedCols (b)
+                :securityQuals <>
+        })
+        :jointree {
+            FROMEXPR
+                :fromlist ({
+                    JOINEXPR
+                        :jointype 0
+                        :isNatural false
+                        :larg {
+                            RANGETBLREF
+                                :rtindex 3
+                        }
+                        :rarg {
+                            RANGETBLREF
+                                :rtindex 4
+                        }
+                        :usingClause <>
+                        :join_using_alias <>
+                        :quals {
+                            OPEXPR
+                                :opno 96
+                                :opfuncid 65
+                                :opresulttype 16
+                                :opretset false
+                                :opcollid 0
+                                :inputcollid 0
+                                :args ({
+                                    VAR
+                                        :varno 4
+                                        :varattno 1
+                                        :vartype 23
+                                        :vartypmod -1
+                                        :varcollid 0
+                                        :varlevelsup 0
+                                        :varnosyn 4
+                                        :varattnosyn 1
+                                        :location 143
+                                } {
+                                    VAR
+                                        :varno 3
+                                        :varattno 1
+                                        :vartype 23
+                                        :vartypmod -1
+                                        :varcollid 0
+                                        :varlevelsup 0
+                                        :varnosyn 3
+                                        :varattnosyn 1
+                                        :location 151
+                                })
+                                :location 149
+                        }
+                        :alias <>
+                        :rtindex 5
+                })
+                :quals <>
+        }
+        :targetList ({
+            TARGETENTRY
+                :expr {
+                    VAR
+                        :varno 3
+                        :varattno 1
+                        :vartype 23
+                        :vartypmod -1
+                        :varcollid 0
+                        :varlevelsup 0
+                        :varnosyn 3
+                        :varattnosyn 1
+                        :location 75
+                }
+                :resno 1
+                :resname foo
+                :ressortgroupref 0
+                :resorigtbl 18288
+                :resorigcol 1
+                :resjunk false
+        } {
+            TARGETENTRY
+                :expr {
+                    FUNCEXPR
+                        :funcid 18318
+                        :funcresulttype 23
+                        :funcretset false
+                        :funcvariadic false
+                        :funcformat 0
+                        :funccollid 0
+                        :inputcollid 0
+                        :args ({
+                            VAR
+                                :varno 3
+                                :varattno 1
+                                :vartype 23
+                                :vartypmod -1
+                                :varcollid 0
+                                :varlevelsup 0
+                                :varnosyn 3
+                                :varattnosyn 1
+                                :location 91
+                        })
+                        :location 82
+                }
+                :resno 2
+                :resname bar
+                :ressortgroupref 0
+                :resorigtbl 0
+                :resorigcol 0
+                :resjunk false
+        } {
+            TARGETENTRY
+                :expr {
+                    VAR
+                        :varno 4
+                        :varattno 3
+                        :vartype 23
+                        :vartypmod -1
+                        :varcollid 0
+                        :varlevelsup 0
+                        :varnosyn 4
+                        :varattnosyn 3
+                        :location 107
+                }
+                :resno 3
+                :resname baz
+                :ressortgroupref 0
+                :resorigtbl 18293
+                :resorigcol 3
+                :resjunk false
+        })
+        :override 0
+        :onConflict <>
+        :returningList <>
+        :groupClause <>
+        :groupDistinct false
+        :groupingSets <>
+        :havingQual <>
+        :windowClause <>
+        :distinctClause <>
+        :sortClause <>
+        :limitOffset <>
+        :limitCount <>
+        :limitOption 0
+        :rowMarks <>
+        :setOperations <>
+        :constraintDeps <>
+        :withCheckOptions <>
+        :stmt_location 0
+        :stmt_len 158
+})

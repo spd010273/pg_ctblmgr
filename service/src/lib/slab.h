@@ -71,7 +71,7 @@
 #ifndef _SLAB_H
 #define _SLAB_H
 
-#define SLAB_DEBUG 1
+#define SLAB_DEBUG 0
 #define SLAB_FSM_DEBUG 0
 
 #if defined( SLAB_DEBUG ) && SLAB_DEBUG >= 1

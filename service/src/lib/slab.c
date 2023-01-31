@@ -568,12 +568,12 @@ bool slab_init( void )
             // XXX can setup pointer cache as we validate
             // For now we empty out the pointer cache and figure things
             // out from scratch when things are dereferenced
-            __ptr_cache[i].as_base = NULL;
-            __ptr_cache[i].as_size = 0;
+            __ptr_cache[i].as_base     = NULL;
+            __ptr_cache[i].as_size     = 0;
             __ptr_cache[i].allocs_base = NULL;
             __ptr_cache[i].allocs_size = 0;
-            __ptr_cache[i].fsm_base = NULL;
-            __ptr_cache[i].fsm_size = 0;
+            __ptr_cache[i].fsm_base    = NULL;
+            __ptr_cache[i].fsm_size    = 0;
         }
     }
 
@@ -762,7 +762,8 @@ static INLINE context_t _new_slab(
         #ifdef _SLAB_DEBUG
         _slab_log( LL_SLAB_DEBUG, "Child entry into _new_slab() %s, got header %p (%u)", ident, header, header->magic );
         #endif // _SLAB_DEBUG
-        // TODO: So far, the parent enters here and sees that the segment is allocated (by child) but the pointer information is incorrect / NULL
+        // TODO: So far, the parent enters here and sees that the segment is allocated (by child)
+        // but the pointer information is incorrect / NULL
         if( __ptr_cache[ret].as_base != get_ptr( header->allocset.set ) )
         {
             __ptr_cache[ret].as_base = get_ptr( header->allocset.set );

@@ -120,7 +120,7 @@ changeset_ref_t json_to_changeset(
     jsmntok_t *              temp_val       = NULL;
 
     n = JSON_TOKENS;
-
+    _log( LOG_LEVEL_DEBUG, "Parsing JSON '%s'", json );
     if( json == NULL )
         return NULLREF;
 
@@ -896,8 +896,11 @@ changeset_ref_t json_to_changeset(
 
         if( temp_val->end >= data_val->end - 2 )
         {
+            // XXX We seem to be returning early during actual change parse here
             // No other record
             free( tokens );
+            _log( LOG_LEVEL_DEBUG, "early return json parse" );
+            dump_changeset( changeset );
             return changeset;
         }
 
@@ -976,6 +979,8 @@ changeset_ref_t json_to_changeset(
     }
 
     free( tokens );
+    _log( LOG_LEVEL_DEBUG, "Dumping parent parsed changeset" );
+    dump_changeset( changeset );
     return changeset;
 }
 
@@ -1369,21 +1374,21 @@ void dump_changeset( changeset_ref_t changeset )
         {
             a = ( char * ) to_ptr( changeset_string_context, keys[i] );
             b = ( char * ) to_ptr( changeset_string_context, vals[i] );
-            if( a != NULL )
-                a_sz += strlen( a ) + 1;
+            if( a != NULL ) // XXX added +1
+                a_sz += strlen( a ) + 1 + 1;
             if( b != NULL )
-                b_sz += strlen( b ) + 1;
+                b_sz += strlen( b ) + 1 + 1;
         }
 
         a = ( char * ) calloc( a_sz, sizeof( char ) );
         b = ( char * ) calloc( b_sz, sizeof( char ) );
         c = ( char * ) to_ptr( changeset_array_context, keys[0] );
         d = ( char * ) to_ptr( changeset_array_context, vals[0] );
-
+        _log( LOG_LEVEL_DEBUG, "making room for '%s' and '%s'", c, d ); 
         if( c != NULL )
             strncpy( a, c, strlen( c ) );
         if( d != NULL )
-            strncpy( b, c, strlen( c ) );
+            strncpy( b, d, strlen( c ) );
 
         for( i = 1; i < cs->num_keys; i++ )
         {

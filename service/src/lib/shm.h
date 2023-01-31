@@ -106,7 +106,7 @@
 #define _SHM_H
 
 //#define __TESTING__ // code coverage
-#define SHM_DEBUG 1 
+#define SHM_DEBUG 0 
 
 #if defined( SHM_DEBUG ) && SHM_DEBUG >= 1
  #define _SHM_DEBUG
