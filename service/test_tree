@@ -74,7 +74,7 @@
                                 })
                                 :quals <>
                             }
-                        targetList ({
+                        :targetList ({
                             TARGETENTRY
                                 :expr {
                                     VAR
