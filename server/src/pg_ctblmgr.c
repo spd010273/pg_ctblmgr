@@ -1098,6 +1098,1060 @@ static char * node_to_json_string( void * node )
     return json.data;
 }
 
+// Enum parsers
+static char * enum_JoinType( JoinType jt )
+{
+    switch( jt )
+    {
+        case JOIN_INNER:
+            return "INNER";
+        case JOIN_LEFT:
+            return "LEFT";
+        case JOIN_FULL:
+            return "FULL";
+        case JOIN_RIGHT:
+            return "RIGHT";
+        case JOIN_SEMI:
+            return "SEMI";
+        case JOIN_ANTI:
+            return "ANTI";
+        case JOIN_UNIQUE_OUTER:
+            return "UNIQUE_OUTER";
+        case JOIN_UNIQUE_INNER:
+            return "UNIQUE_INNER";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_CoercionForm( CoercionForm cf )
+{
+    switch( cf )
+    {
+        case COERCE_EXPLICIT_CALL:
+            return "EXPLICIT_CALL";
+        case COERCE_EXPLICIT_CAST:
+            return "EXPLICIT_CAST";
+        case COERCE_IMPLICIT_CAST:
+            return "IMPLICIT_CAST";
+        case COERCE_SQL_SYNTAX:
+            return "SQL_SYNTAX";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_SortByNulls( SortByNulls sbn )
+{
+    switch( sbn )
+    {
+        case SORTBY_NULLS_DEFAULT:
+            return "DEFAULT";
+        case SORTBY_NULLS_FIRST:
+            return "FIRST";
+        case SORTBY_NULLS_LAST:
+            return "LAST";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_SortByDir( SortByDir sbd )
+{
+    switch( sbd )
+    {
+        case SORTBY_DEFAULT:
+            return "DEFAULT";
+        case SORTBY_ASC:
+            return "ASC";
+        case SORTBY_DESC:
+            return "DESC";
+        case SORTBY_USING:
+            return "USING";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_SubLinkType( SubLinkType slt )
+{
+    switch( slt )
+    {
+        case EXISTS_SUBLINK:
+            return "EXISTS";
+        case ALL_SUBLINK:
+            return "ALL";
+        case ANY_SUBLINK:
+            return "ANY";
+        case ROWCOMPARE_SUBLINK:
+            return "ROWCOMPARE";
+        case EXPR_SUBLINK:
+            return "EXPR";
+        case MULTIEXPR_SUBLINK:
+            return "MUILTIEXPR";
+        case ARRAY_SUBLINK:
+            return "ARRAY";
+        case CTE_SUBLINK:
+            return "CTE";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_OnCommitAction( OnCommitAction oca )
+{
+    switch( oca )
+    {
+        case ONCOMMIT_NOOP:
+            return "NOOP";
+        case ONCOMMIT_PRESERVE_ROWS:
+            return "PRESERVE_ROWS";
+        case ONCOMMIT_DELETE_ROWS:
+            return "DELETE_ROWS";
+        case ONCOMMIT_DROP:
+            return "DROP";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_DefElemAction( DefElemAction dea )
+{
+    switch( dea )
+    {
+        case DEFELEM_UNSPEC:
+            return "UNSPEC"; // Unspecified
+        case DEFELEM_SET:
+            return "SET";
+        case DEFELEM_ADD:
+            return "ADD";
+        case DEFELEM_DROP:
+            return "DROP";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_CmdType( CmdType ct )
+{
+    switch( ct )
+    {
+        case CMD_UNKNOWN:
+            return "UNKNOWN";
+        case CMD_SELECT:
+            return "SELECT";
+        case CMD_UPDATE:
+            return "UPDATE";
+        case CMD_INSERT:
+            return "INSERT";
+        case CMD_DELETE:
+            return "DELETE";
+        case CMD_UTILITY: // create, destroy, copy, vacuum, etc
+            return "UTILITY";
+        case CMD_NOTHING:
+            return "NOTHING";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_MinMaxOp( MinMaxOp mmo )
+{
+    switch( mmo )
+    {
+        case IS_GREATEST:
+            return "GREATEST";
+        case IS_LEAST:
+            return "LEAST";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_RTEKind( RTEKind rk )
+{
+    switch( rk )
+    {
+        case RTE_RELATION:
+            return "RELATION";
+        case RTE_SUBQUERY:
+            return "SUBQUERY";
+        case RTE_JOIN:
+            return "JOIN";
+        case RTE_FUNCTION:
+            return "FUNCTION";
+        case RTE_TABLEFUNC:
+            return "TABLEFUNC";
+        case RTE_VALUES:
+            return "VALUES";
+        case RTE_CTE:
+            return "CTE";
+        case RTE_NAMEDTUPLESTORE:
+            return "NAMEDTUPLESTORE";
+        case RTE_RESULT:
+            return "RESULT";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_ScanDirection( ScanDirection sd )
+{
+    switch( sd )
+    {
+        case BackwardScanDirection:
+            return "BACKWARD";
+        case NoMovementScanDirection:
+            return "NOMOVEMENT";
+        case ForwardScanDirection:
+            return "FORWARD";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_NullTestType( NullTestType ntt )
+{
+    switch( ntt )
+    {
+        case IS_NULL:
+            return "IS_NULL";
+        case IS_NOT_NULL:
+            return "IS_NOT_NULL";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_AggStrategy( AggStrategy as )
+{
+    switch( as )
+    {
+        case AGG_PLAIN:
+            return "PLAIN";
+        case AGG_SORTED:
+            return "SORTED";
+        case AGG_HASHED:
+            return "HASHED";
+        case AGG_MIXED:
+            return "MIXED";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_BoolTestType( BoolTestType btt )
+{
+    switch( btt )
+    {
+        case IS_TRUE:
+            return "IS_TRUE";
+        case IS_NOT_TRUE:
+            return "IS_NOT_TRUE";
+        case IS_FALSE:
+            return "IS_FALSE";
+        case IS_NOT_FALSE:
+            return "IS_NOT_FALSE";
+        case IS_UNKNOWN:
+            return "IS_UNKNOWN";
+        case IS_NOT_UNKNOWN:
+            return "IS_NOT_UNKNOWN";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_ParamKind( ParamKind pk )
+{
+    switch( pk )
+    {
+        case PARAM_EXTERN:
+            return "EXTERN";
+        case PARAM_EXEC:
+            return "EXEC";
+        case PARAM_SUBLINK:
+            return "SUBLINK";
+        case PARAM_MULTIEXPR:
+            return "MULTIEXPR";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
+static char * enum_NodeTag( NodeTag nt )
+{
+
+    switch( nt )
+    {
+        case T_Invalid:
+            return "INVALID";
+        // Tags for executor nodes
+        case T_IndexInfo:
+            return "IndexInfo";
+        case T_ExprContext:
+            return "ExprContext";
+        case T_ProjectionInfo:
+            return "ProjectionInfo";
+        case T_JunkFilter:
+            return "JunkFilter";
+        case T_OnConflictSetState:
+            return "OnConflictSetState";
+        case T_ResultRelInfo:
+            return "ResultRelInfo";
+        case T_EState:
+            return "EState";
+        case T_TupleTableSlot:
+            return "TupleTableSlot";
+        // Tags for plan nodes
+        case T_Plan:
+            return "Plan";
+        case T_Result:
+            return "Result";
+        case T_ProjectSet:
+            return "ProjectSet";
+        case T_ModifyTable:
+            return "ModifyTable";
+        case T_Append:
+            return "Append";
+        case T_MergeAppend:
+            return "MergeAppend";
+        case T_RecursiveUnion:
+            return "RecursiveUnion";
+        case T_BitmapAnd:
+            return "BitmapAnd";
+        case T_BitmapOr:
+            return "BitmapOr";
+        case T_Scan:
+            return "Scan";
+        case T_SeqScan:
+            return "SeqScan";
+        case T_SampleScan:
+            return "SampleScan";
+        case T_IndexScan:
+            return "IndexScan";
+        case T_IndexOnlyScan:
+            return "IndexOnlyScan";
+        case T_BitmapIndexScan:
+            return "BitmapIndexScan";
+        case T_BitmapHeapScan:
+            return "BitmapHeapScan";
+        case T_TidScan:
+            return "TidScan";
+        case T_TidRangeScan:
+            return "TidRangeScan";
+        case T_SubqueryScan:
+            return "SubqueryScan";
+        case T_FunctionScan:
+            return "FunctionScan";
+        case T_ValuesScan:
+            return "ValuesScan";
+        case T_TableFuncScan:
+            return "TableFuncScan";
+        case T_CteScan:
+            return "CteScan";
+        case T_NamedTuplestoreScan:
+            return "NamedTuplestoreScan";
+        case T_WorkTableScan:
+            return "WorkTableScan";
+        case T_ForeignScan:
+            return "ForeignScan";
+        case T_CustomScan:
+            return "CustomScan";
+        case T_Join:
+            return "Join";
+        case T_NestLoop:
+            return "NestLoop";
+        case T_MergeJoin:
+            return "MergeJoin";
+        case T_HashJoin:
+            return "HashJoin";
+        case T_Material:
+            return "Material";
+        case T_Memoize:
+            return "Memoize";
+        case T_Sort:
+            return "Sort";
+        case T_IncrementalSort:
+            return "IncrementalSort";
+        case T_Group:
+            return "Group";
+        case T_Agg:
+            return "Agg";
+        case T_WindowAgg:
+            return "WindowAgg";
+        case T_Unique:
+            return "Unique";
+        case T_Gather:
+            return "Gather";
+        case T_GatherMerge:
+            return "GatherMerge";
+        case T_Hash:
+            return "Hash";
+        case T_SetOp:
+            return "SetOp";
+        case T_LockRows:
+            return "LockRows";
+        case T_Limit:
+            return "Limit";
+        case T_NestLoopParam:
+            return "NestLoopParam";
+        case T_PlanRowMark:
+            return "PlanRowMark";
+        case T_PartitionPruneInfo:
+            return "PartitionPruneInfo";
+        case T_PartitionedRelPruneInfo:
+            return "PartitionRelPruneInfo";
+        case T_PartitionPruneStepOp:
+            return "PartitionPruneStepOp";
+        case T_PartitionPruneStepCombine:
+            return "PartitionPruneStepCombine";
+        case T_PlanInvalItem:
+            return "PlanInvalItem";
+        // Skip exec nodes
+        // Primitive nodes
+        case T_Alias:
+            return "Alias";
+        case T_RangeVar:
+            return "RangeVar";
+        case T_TableFunc:
+            return "TableFunc";
+        case T_Expr:
+            return "Expr";
+        case T_Var:
+            return "Var";
+        case T_Const:
+            return "Const";
+        case T_Param:
+            return "Param";
+        case T_Aggref:
+            return "Aggref";
+        case T_GroupingFunc:
+            return "GroupingFunc";
+        case T_WindowFunc:
+            return "WindowFunc";
+        case T_SubscriptingRef:
+            return "SubscriptingRef";
+        case T_FuncExpr:
+            return "FuncExpr";
+        case T_NamedArgExpr:
+            return "NamedArgExpr";
+        case T_OpExpr:
+            return "OpExpr";
+        case T_DistinctExpr:
+            return "DistinctExpr";
+        case T_NullIfExpr:
+            return "NullIfExpr";
+        case T_ScalarArrayOpExpr:
+            return "ScalarArrayOpExpr";
+        case T_BoolExpr:
+            return "BoolExpr";
+        case T_SubLink:
+            return "SubLink";
+        case T_SubPlan:
+            return "SubPlan";
+        case T_AlternativeSubPlan:
+            return "AlternativeSubPlan";
+        case T_FieldSelect:
+            return "FieldSelect";
+        case T_FieldStore:
+            return "FieldStore";
+        case T_RelabelType:
+            return "RelabelType";
+        case T_CoerceViaIO:
+            return "CoerceViaIO";
+        case T_ArrayCoerceExpr:
+            return "ArrayCoerceExpr";
+        case T_ConvertRowtypeExpr:
+            return "ConvertRowtypeExpr";
+        case T_CollateExpr:
+            return "CollateExpr";
+        case T_CaseExpr:
+            return "CaseExpr";
+        case T_CaseWhen:
+            return "CaseWhen";
+        case T_CaseTestExpr:
+            return "CaseTestExpr";
+        case T_ArrayExpr:
+            return "ArrayExpr";
+        case T_RowExpr:
+            return "RowExpr";
+        case T_RowCompareExpr:
+            return "RowCompareExpr";
+        case T_CoalesceExpr:
+            return "CoalesceExpr";
+        case T_MinMaxExpr:
+            return "MinMaxExpr";
+        case T_SQLValueFunction:
+            return "SQLValueFunction";
+        case T_XmlExpr:
+            return "XmlExpr";
+        case T_NullTest:
+            return "NullTest";
+        case T_BooleanTest:
+            return "BooleanTest";
+        case T_CoerceToDomain:
+            return "CoerceToDomain";
+        case T_CoerceToDomainValue:
+            return "CoerceToDomainValue";
+        case T_SetToDefault:
+            return "SetToDefault";
+        case T_CurrentOfExpr:
+            return "CurrentOfExpr";
+        case T_NextValueExpr:
+            return "NextValueExpr";
+        case T_InferenceElem:
+            return "InferenceElem";
+        case T_TargetEntry:
+            return "TargetEntry";
+        case T_RangeTblRef:
+            return "RangeTblRef";
+        case T_JoinExpr:
+            return "JoinExpr";
+        case T_FromExpr:
+            return "FromExpr";
+        case T_OnConflictExpr:
+            return "OnConflictExpr";
+        case T_IntoClause:
+            return "IntoClause";
+        // Expression State Nodes
+        case T_ExprState:
+            return "ExprState";
+        case T_WindowFuncExprState:
+            return "WindowFuncExprState";
+        case T_SetExprState:
+            return "SetExprState";
+        case T_SubPlanState:
+            return "SubPlanState";
+        case T_DomainConstraintState:
+            return "DomainConstraintState";
+        // Planner nodes
+        case T_PlannerInfo:
+            return "PlannerInfo";
+        case T_PlannerGlobal:
+            return "PlannerGlobal";
+        case T_RelOptInfo:
+            return "RelOptInfo";
+        case T_IndexOptInfo:
+            return "IndexOptInfo";
+        case T_ForeignKeyOptInfo:
+            return "ForeignKeyOptInfo";
+        case T_ParamPathInfo:
+            return "ParamPathInfo";
+        case T_Path:
+            return "Path";
+        case T_IndexPath:
+            return "IndexPath";
+        case T_BitmapHeapPath:
+            return "BitmapHeapPath";
+        case T_BitmapAndPath:
+            return "BitmapAndPath";
+        case T_BitmapOrPath:
+            return "BitmapOrPath";
+        case T_TidPath:
+            return "TidPath";
+        case T_TidRangePath:
+            return "TidRangePath";
+        case T_SubqueryScanPath:
+            return "SubqueryScanPath";
+        case T_ForeignPath:
+            return "ForeignPath";
+        case T_CustomPath:
+            return "CustomPath";
+        case T_NestPath:
+            return "NestPath";
+        case T_MergePath:
+            return "MergePath";
+        case T_HashPath:
+            return "HashPath";
+        case T_AppendPath:
+            return "AppendPath";
+        case T_MergeAppendPath:
+            return "MergeAppendPath";
+        case T_GroupResultPath:
+            return "GroupResultPath";
+        case T_MaterialPath:
+            return "MaterialPath";
+        case T_MemoizePath:
+            return "MemoizePath";
+        case T_UniquePath:
+            return "UniquePath";
+        case T_GatherPath:
+            return "GatherPath";
+        case T_GatherMergePath:
+            return "GatherMergePath";
+        case T_ProjectionPath:
+            return "ProjectionPath";
+        case T_ProjectSetPath:
+            return "ProjectSetPath";
+        case T_SortPath:
+            return "SortPath";
+        case T_IncrementalSortPath:
+            return "IncrementalSortPath";
+        case T_GroupPath:
+            return "GroupPath";
+        case T_UpperUniquePath:
+            return "UpperUniquePath";
+        case T_AggPath:
+            return "AggPath";
+        case T_GroupingSetsPath:
+            return "GroupingSetsPath";
+        case T_MinMaxAggPath:
+            return "MinMaxAggPath";
+        case T_WindowAggPath:
+            return "WindowAggPath";
+        case T_SetOpPath:
+            return "SetOpPath";
+        case T_RecursiveUnionPath:
+            return "RecursiveUnionPath";
+        case T_LockRowsPath:
+            return "LockRowsPath";
+        case T_ModifyTablePath:
+            return "ModifyTablePath";
+        case T_LimitPath:
+            return "LimitPath";
+        case T_EquivalenceClass:
+            return "EquivalenceClass";
+        case T_EquivalenceMember:
+            return "EquivalenceMember";
+        case T_PathKey:
+            return "PathKey";
+        case T_RestrictInfo:
+            return "RestrictInfo";
+        case T_IndexClause:
+            return "IndexClause";
+        case T_PlaceHolderVar:
+            return "PlaceHolderVar";
+        case T_SpecialJoinInfo:
+            return "SpecialJoinInfo";
+        case T_AppendRelInfo:
+            return "AppendRelInfo";
+        case T_RowIdentityVarInfo:
+            return "RowIdentityVarInfo";
+        case T_PlaceHolderInfo:
+            return "PlaceHolderInfo";
+        case T_MinMaxAggInfo:
+            return "MinMaxAggInfo";
+        case T_PlannerParamItem:
+            return "PlannerParamItem";
+        case T_RollupData:
+            return "RollupData";
+        case T_GroupingSetData:
+            return "GroupingSetData";
+        case T_StatisticExtInfo:
+            return "StatisticExtInfo";
+        // Memory node tags
+        case T_MemoryContext:
+            return "MemoryContext";
+        case T_AllocSetContext:
+            return "AllocSetContext";
+        case T_SlabContext:
+            return "SlabContext";
+        case T_GenerationContext:
+            return "GenerationContext";
+        // Value nodes
+        case T_Value:
+            return "Value";
+        case T_Integer:
+            return "Integer";
+        case T_Float:
+            return "Float";
+        case T_String:
+            return "String";
+        case T_BitString:
+            return "BitString";
+        case T_Null:
+            return "Null";
+        // List nodes
+        case T_List:
+            return "List";
+        case T_IntList:
+            return "IntList";
+        case T_OidList:
+            return "OidList";
+        // Extensible Nodes
+        case T_ExtensibleNode:
+            return "ExtensibleNode";
+        // Statement Nodes
+        case T_RawStmt:
+            return "RawStmt";
+        case T_Query:
+            return "Query";
+        case T_PlannedStmt:
+            return "PlannedStmt";
+        case T_InsertStmt:
+            return "InsertStmt";
+        case T_DeleteStmt:
+            return "DeleteStmt";
+        case T_UpdateStmt:
+            return "UpdateStmt";
+        case T_SelectStmt:
+            return "SelectStmt";
+        case T_ReturnStmt:
+            return "ReturnStmt";
+        case T_PLAssignStmt:
+            return "PLAssignStmt";
+        case T_AlterTableStmt:
+            return "AlterTableStmt";
+        case T_AlterTableCmd:
+            return "AlterTableCmd";
+        case T_AlterDomainStmt:
+            return "AlterDomainStmt";
+        case T_SetOperationStmt:
+            return "SetOperationStmt";
+        case T_GrantStmt:
+            return "GrantStmt";
+        case T_GrantRoleStmt:
+            return "GrantRoleStmt";
+        case T_AlterDefaultPrivilegesStmt:
+            return "AlterDefaultPrivilegesStmt";
+        case T_ClosePortalStmt:
+            return "ClosePortalStmt";
+        case T_ClusterStmt:
+            return "ClusterStmt";
+        case T_CopyStmt:
+            return "CopyStmt";
+        case T_CreateStmt:
+            return "CreateStmt";
+        case T_DefineStmt:
+            return "DefineStmt";
+        case T_DropStmt:
+            return "DropStmt";
+        case T_TruncateStmt:
+            return "TruncateStmt";
+        case T_CommentStmt:
+            return "CommentStmt";
+        case T_FetchStmt:
+            return "FetchStmt";
+        case T_IndexStmt:
+            return "IndexStmt";
+        case T_CreateFunctionStmt:
+            return "CreateFunctionStmt";
+        case T_AlterFunctionStmt:
+            return "AlterFunctionStmt";
+        case T_DoStmt:
+            return "DoStmt";
+        case T_RenameStmt:
+            return "RenameStmt";
+        case T_RuleStmt:
+            return "RuleStmt";
+        case T_NotifyStmt:
+            return "NotifyStmt";
+        case T_ListenStmt:
+            return "ListenStmt";
+        case T_UnlistenStmt:
+            return "UnlistenStmt";
+        case T_TransactionStmt:
+            return "TransactionStmt";
+        case T_ViewStmt:
+            return "ViewStmt";
+        case T_LoadStmt:
+            return "LoadStmt";
+        case T_CreateDomainStmt:
+            return "CreateDomainStmt";
+        case T_CreatedbStmt:
+            return "CreatedbStmt";
+        case T_DropdbStmt:
+            return "DropdbStmt";
+        case T_VacuumStmt:
+            return "VacuumStmt";
+        case T_ExplainStmt:
+            return "ExplainStmt";
+        case T_CreateTableAsStmt:
+            return "CreateTableAsStmt";
+        case T_CreateSeqStmt:
+            return "CreateSeqStmt";
+        case T_AlterSeqStmt:
+            return "AlterSeqStatement";
+        case T_VariableSetStmt:
+            return "VariableSetStmt";
+        case T_VariableShowStmt:
+            return "VariableShowStmt";
+        case T_DiscardStmt:
+            return "DiscardStmt";
+        case T_CreateTrigStmt:
+            return "CreateTrigStmt";
+        case T_CreatePLangStmt:
+            return "CreatePLangStmt";
+        case T_CreateRoleStmt:
+            return "CreateRoleStmt";
+        case T_AlterRoleStmt:
+            return "AlterRoleStmt";
+        case T_DropRoleStmt:
+            return "DropRoleStmt";
+        case T_LockStmt:
+            return "LockStmt";
+        case T_ConstraintsSetStmt:
+            return "ConstraintsSetStmt";
+        case T_ReindexStmt:
+            return "ReindexStmt";
+        case T_CheckPointStmt:
+            return "CheckPointStmt";
+        case T_CreateSchemaStmt:
+            return "CreateSchemaStmt";
+        case T_AlterDatabaseStmt:
+            return "AlterDatabaseStmt";
+        case T_AlterDatabaseSetStmt:
+            return "AlterDatabaseSetStmt";
+        case T_AlterRoleSetStmt:
+            return "AlterRoleSetStmt";
+        case T_CreateConversionStmt:
+            return "CreateConversionStmt";
+        case T_CreateCastStmt:
+            return "CreateCastStmt";
+        case T_CreateOpClassStmt:
+            return "CreateOpClassStmt";
+        case T_CreateOpFamilyStmt:
+            return "CreateOpFamilyStmt";
+        case T_AlterOpFamilyStmt:
+            return "AlterOpFamilyStmt";
+        case T_PrepareStmt:
+            return "PrepareStmt";
+        case T_ExecuteStmt:
+            return "ExecuteStmt";
+        case T_DeallocateStmt:
+            return "DeallocateStmt";
+        case T_DeclareCursorStmt:
+            return "DeclareCursorStmt";
+        case T_CreateTableSpaceStmt:
+            return "CreateTableSpaceStmt";
+        case T_DropTableSpaceStmt:
+            return "DropTableSpaceStmt";
+        case T_AlterObjectDependsStmt:
+            return "AlterObjectDependsStmt";
+        case T_AlterObjectSchemaStmt:
+            return "AlterObjectSchemaStmt";
+        case T_AlterOwnerStmt:
+            return "AlterOwnerStmt";
+        case T_AlterOperatorStmt:
+            return "AlterOperatorStmt";
+        case T_AlterTypeStmt:
+            return "AlterTypeStmt";
+        case T_DropOwnedStmt:
+            return "DropOwnedStmt";
+        case T_ReassignOwnedStmt:
+            return "ReassignOwnedStmt";
+        case T_CompositeTypeStmt:
+            return "CompositeTypeStmt";
+        case T_CreateEnumStmt:
+            return "CreateEnumStmt";
+        case T_CreateRangeStmt:
+            return "CreateRangeStmt";
+        case T_AlterEnumStmt:
+            return "AlterEnumStmt";
+        case T_AlterTSDictionaryStmt:
+            return "AlterTSDictionaryStmt";
+        case T_AlterTSConfigurationStmt:
+            return "AlterTSConfigurationStmt";
+        case T_CreateFdwStmt:
+            return "CreateFdwStmt";
+        case T_AlterFdwStmt:
+            return "AlterFdwStmt";
+        case T_CreateForeignServerStmt:
+            return "CreateForeignServerStmt";
+        case T_AlterForeignServerStmt:
+            return "AlterForeignServerStmt";
+        case T_CreateUserMappingStmt:
+            return "CreateUserMappingStmt";
+        case T_AlterUserMappingStmt:
+            return "AlterUserMappingStmt";
+        case T_DropUserMappingStmt:
+            return "DropUserMappingStmt";
+        case T_AlterTableSpaceOptionsStmt:
+            return "AlterTableSpaceOptionsStmt";
+        case T_AlterTableMoveAllStmt:
+            return "AlterTableMoveAllStmt";
+        case T_SecLabelStmt:
+            return "SetLabelStmt";
+        case T_CreateForeignTableStmt:
+            return "CreateForeignTableStmt";
+        case T_ImportForeignSchemaStmt:
+            return "ImportForeignSchemaStmt";
+        case T_CreateExtensionStmt:
+            return "CreateExtensionStmt";
+        case T_AlterExtensionStmt:
+            return "AlterExtensionStmt";
+        case T_AlterExtensionContentsStmt:
+            return "AlterExtensionContentsStmt";
+        case T_CreateEventTrigStmt:
+            return "CreateEventTrigStmt";
+        case T_AlterEventTrigStmt:
+            return "AlterEventTrigStmt";
+        case T_RefreshMatViewStmt:
+            return "RefreshMatViewStmt";
+        case T_ReplicaIdentityStmt:
+            return "ReplicaIdentityStmt";
+        case T_AlterSystemStmt:
+            return "T_AlterSystemStmt";
+        case T_CreateTransformStmt:
+            return "CreateTransformStmt";
+        case T_CreateAmStmt:
+            return "CreateAmStmt";
+        case T_CreatePublicationStmt:
+            return "CreatePublicationStmt";
+        case T_AlterPublicationStmt:
+            return "AlterPublicationStmt";
+        case T_CreateSubscriptionStmt:
+            return "CreateSubscriptionStmt";
+        case T_AlterSubscriptionStmt:
+            return "AlterSubscriptionStmt";
+        case T_DropSubscriptionStmt:
+            return "DropSubscriptionStmt";
+        case T_CreateStatsStmt:
+            return "CreateStatsStmt";
+        case T_AlterCollationStmt:
+            return "AlterCollationStmt";
+        case T_CallStmt:
+            return "CallStmt";
+        case T_AlterStatsStmt:
+            return "AlterStatsStmt";
+        // Parse Tree Nodes
+        case T_A_Expr:
+            return "T_A_Expr";
+        case T_ColumnRef:
+            return "ColumnRef";
+        case T_ParamRef:
+            return "ParamRef";
+        case T_A_Const:
+            return "A_Const";
+        case T_FuncCall:
+            return "FuncCall";
+        case T_A_Star:
+            return "A_Star";
+        case T_A_Indices:
+            return "A_Indices";
+        case T_A_Indirection:
+            return "A_Indirection";
+        case T_A_ArrayExpr:
+            return "A_ArrayExpr";
+        case T_ResTarget:
+            return "ResTarget";
+        case T_MultiAssignRef:
+            return "MultiAssignRef";
+        case T_TypeCast:
+            return "TypeCast";
+        case T_CollateClause:
+            return "CollateClause";
+        case T_SortBy:
+            return "SortBy";
+        case T_WindowDef:
+            return "WindowDef";
+        case T_RangeSubselect:
+            return "RangeSubselect";
+        case T_RangeFunction:
+            return "RangeFunction";
+        case T_RangeTableSample:
+            return "RangeTableSample";
+        case T_RangeTableFunc:
+            return "RangeTableFunc";
+        case T_RangeTableFuncCol:
+            return "RangeTableFuncCol";
+        case T_TypeName:
+            return "TypeName";
+        case T_ColumnDef:
+            return "ColumnDef";
+        case T_IndexElem:
+            return "IndexElem";
+        case T_StatsElem:
+            return "StatsElem";
+        case T_Constraint:
+            return "Constraint";
+        case T_DefElem:
+            return "DefElem";
+        case T_RangeTblEntry:
+            return "RangeTblEntry";
+        case T_RangeTblFunction:
+            return "RangeTblFunction";
+        case T_TableSampleClause:
+            return "TableSampleClause";
+        case T_WithCheckOption:
+            return "WithCheckOption";
+        case T_SortGroupClause:
+            return "SortGroupClause";
+        case T_GroupingSet:
+            return "GroupingSet";
+        case T_WindowClause:
+            return "WindowClause";
+        case T_ObjectWithArgs:
+            return "ObjectWithArgs";
+        case T_AccessPriv:
+            return "AccessPriv";
+        case T_CreateOpClassItem:
+            return "CreateOpClassItem";
+        case T_TableLikeClause:
+            return "TableLikeClause";
+        case T_FunctionParameter:
+            return "FunctionParameter";
+        case T_LockingClause:
+            return "LockingClause";
+        case T_RowMarkClause:
+            return "RowMarkClause";
+        case T_XmlSerialize:
+            return "XmlSerialize";
+        case T_WithClause:
+            return "WithClause";
+        case T_InferClause:
+            return "InferClause";
+        case T_OnConflictClause:
+            return "OnConflictClause";
+        case T_CTESearchClause:
+            return "CTESearchClause";
+        case T_CTECycleClause:
+            return "CTECycleClause";
+        case T_CommonTableExpr:
+            return "CommonTableExpr";
+        case T_RoleSpec:
+            return "RoleSpec";
+        case T_TriggerTransition:
+            return "TriggerTransition";
+        case T_PartitionElem:
+            return "PartitionElem";
+        case T_PartitionSpec:
+            return "PartitionSpec";
+        case T_PartitionBoundSpec:
+            return "PartitionBoundSpec";
+        case T_PartitionRangeDatum:
+            return "PartitionRangeDatum";
+        case T_PartitionCmd:
+            return "PartitionCmd";
+        case T_VacuumRelation:
+            return "VacuumRelation";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
 // Node -> JSON fragment helpers
 static void Aggref_out( StringInfo str, Aggref * node )
 {
@@ -1125,7 +2179,7 @@ static void Agg_out( StringInfo str, Agg * node )
 
     appendStringInfoString( str, "\"name\":\"AGG\"" );
     PlanInfo_out( str, ( Plan * ) node );
-    appendStringInfo( str, ",\"aggstrategy\":%d", node->aggstrategy ); // enum - AggStrategy
+    appendStringInfo( str, ",\"aggstrategy\":\"%s\"", enum_AggStrategy( node->aggstrategy ) );
     appendStringInfo( str, ",\"numCols\":%d", node->numCols );
     appendStringInfo( str, ",\"grpColIdx\":[");
 
@@ -1159,11 +2213,14 @@ static void Agg_out( StringInfo str, Agg * node )
 static void Alias_out( StringInfo str, Alias * node )
 {
     appendStringInfoString( str, "\"name\":\"ALIAS\"" );
-    appendStringInfo( str, ",\"aliasname\":\"" );
+    appendStringInfo( str, ",\"aliasname\":" );
     Token_out( str, node->aliasname );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"colnames\":" );
-    Node_out( str, node->colnames );
+
+    if( node->colnames )
+    {
+        appendStringInfo( str, ",\"colnames\":" );
+        Node_out( str, node->colnames );
+    }
     return;
 }
 
@@ -1217,7 +2274,7 @@ static void ArrayCoerceExpr_out( StringInfo str, ArrayCoerceExpr * node )
     appendStringInfo( str, ",\"resulttype\":%u", node->resulttype );
     appendStringInfo( str, ",\"resulttypmod\":%d", node->resulttypmod );
     appendStringInfo( str, ",\"resultcollid\":%u", node->resultcollid );
-    appendStringInfo( str, ",\"coerceformat\":%d", node->coerceformat ); // enum - CoercionForm
+    appendStringInfo( str, ",\"coerceformat\":\"%s\"", enum_CoercionForm( node->coerceformat ) );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
 }
@@ -1450,7 +2507,7 @@ static void BooleanTest_out( StringInfo str, BooleanTest * node )
     appendStringInfoString( str, "\"name\":\"BOOLEANTEST\"" );
     appendStringInfo( str, ",\"arg\":" );
     Node_out( str, node->arg );
-    appendStringInfo( str, ",\"booltesttype\":%d", node->booltesttype ); // enum - BoolTestType
+    appendStringInfo( str, ",\"booltesttype\":\"%s\"", enum_BoolTestType( node->booltesttype ) );
     return;
 }
 
@@ -1473,9 +2530,8 @@ static void BoolExpr_out( StringInfo str, BoolExpr * node )
     }
 
     appendStringInfoString( str, "\"name\":\"BOOLEXPR\"" );
-    appendStringInfo( str, ",\"boolop\":\"" );
+    appendStringInfo( str, ",\"boolop\":" );
     Token_out( str, op_str );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"args\":" );
     Node_out( str, node->args );
     appendStringInfo( str, ",\"location\":%d", node->location );
@@ -1546,7 +2602,7 @@ static void CoerceToDomain_out( StringInfo str, CoerceToDomain * node )
     appendStringInfo( str, ",\"resulttype\":%u", node->resulttype );
     appendStringInfo( str, ",\"resulttypmod\":%d", node->resulttypmod );
     appendStringInfo( str, ",\"resultcollid\":%u", node->resultcollid );
-    appendStringInfo( str, ",\"coercionformat\":%d", node->coercionformat ); // enum - CoercionForm
+    appendStringInfo( str, ",\"coercionformat\":\"%s\"", enum_CoercionForm( node->coercionformat ) );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
 }
@@ -1558,7 +2614,7 @@ static void CoerceViaIO_out( StringInfo str, CoerceViaIO * node )
     Node_out( str, node->arg );
     appendStringInfo( str, ",\"resulttype\":%u", node->resulttype );
     appendStringInfo( str, ",\"resultcollid\":%u", node->resultcollid );
-    appendStringInfo( str, ",\"coerceformat\":%d", node->coerceformat ); // enum - CoercionForm
+    appendStringInfo( str, ",\"coerceformat\":\"%s\"", enum_CoercionForm( node->coerceformat ) );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
 }
@@ -1587,9 +2643,8 @@ static void CollateExpr_out( StringInfo str, CollateExpr * node )
 static void ColumnDef_out( StringInfo str, ColumnDef * node )
 {
     appendStringInfoString( str, "\"name\":\"COLUMNDEF\"" );
-    appendStringInfo( str, ",\"colname\":\"" );
+    appendStringInfo( str, ",\"colname\":" );
     Token_out( str, node->colname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"typeName\":" );
     Node_out( str, node->typeName );
     appendStringInfo( str, ",\"inhcount\":%d", node->inhcount );
@@ -1621,9 +2676,8 @@ static void ColumnRef_out( StringInfo str, ColumnRef * node )
 static void CommonTableExpr_out( StringInfo str, CommonTableExpr * node )
 {
     appendStringInfoString( str, "\"name\":\"COMMONTABLEEXPR\"" );
-    appendStringInfo( str, ",\"ctename\":\"" );
+    appendStringInfo( str, ",\"ctename\":" );
     Token_out( str, node->ctename );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"aliascolnames\":" );
     Node_out( str, node->aliascolnames );
     appendStringInfo( str, ",\"ctequery\":" );
@@ -1655,7 +2709,7 @@ static void Const_out( StringInfo str, Const * node )
     appendStringInfo(str, ",\"constvalue\":");
 
     if( node->constisnull )
-        appendStringInfo( str, "NULL" );
+        appendStringInfo( str, "null" );
     else
         Datum_out( str, node->constvalue, node->constlen, node->constbyval );
 
@@ -1668,7 +2722,7 @@ static void ConvertRowtypeExpr_out( StringInfo str, ConvertRowtypeExpr * node )
     appendStringInfo( str, ",\"arg\":" );
     Node_out( str, node->arg );
     appendStringInfo( str, ",\"resulttype\":%u", node->resulttype );
-    appendStringInfo( str, ",\"convertformat\":%d", node->convertformat ); // enum - CoercionForm
+    appendStringInfo( str, ",\"convertformat\":\"%s\"", enum_CoercionForm( node->convertformat ) );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
 }
@@ -1676,9 +2730,8 @@ static void ConvertRowtypeExpr_out( StringInfo str, ConvertRowtypeExpr * node )
 static void Constraint_out( StringInfo str, Constraint * node )
 {
     appendStringInfoString( str, "\"name\":\"CONSTRAINT\"" );
-    appendStringInfo( str, ",\"conname\":\"" );
+    appendStringInfo( str, ",\"conname\":" );
     Token_out( str, node->conname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"deferrable\":%s", node->deferrable ? "true" : "false" );
     appendStringInfo( str, ",\"initdeferred\":%s", node->initdeferred ? "true" : "false" );
     appendStringInfo( str, ",\"location\":%d", node->location );
@@ -1697,17 +2750,15 @@ static void Constraint_out( StringInfo str, Constraint * node )
             appendStringInfo( str, "\"DEFAULT\"" );
             appendStringInfo( str, ",\"raw_expr\":" );
             Node_out( str, node->raw_expr );
-            appendStringInfo( str, ",\"cooked_expr\":\"" );
+            appendStringInfo( str, ",\"cooked_expr\":" );
             Token_out( str, node->cooked_expr );
-            appendStringInfo( str, "\"" );
             break;
         case CONSTR_CHECK:
             appendStringInfo( str, "\"CHECK\"" );
             appendStringInfo( str, ",\"raw_expr\":" );
             Node_out( str, node->raw_expr );
-            appendStringInfo( str, ",\"cooked_expr\":\"" );
+            appendStringInfo( str, ",\"cooked_expr\":" );
             Token_out( str, node->cooked_expr );
-            appendStringInfo( str, "\"" );
             break;
         case CONSTR_PRIMARY:
             // Need to output where_clause and access_method attribs
@@ -1716,12 +2767,10 @@ static void Constraint_out( StringInfo str, Constraint * node )
             Node_out( str, node->keys );
             appendStringInfo( str, ",\"options\":" );
             Node_out( str, node->options );
-            appendStringInfo( str, ",\"indexname\":\"" );
+            appendStringInfo( str, ",\"indexname\":" );
             Token_out( str, node->indexname );
-            appendStringInfo( str, "\"" );
-            appendStringInfo( str, ",\"indexspace\":\"" );
+            appendStringInfo( str, ",\"indexspace\":" );
             Token_out( str, node->indexspace );
-            appendStringInfo( str, "\"" );
             break;
         case CONSTR_UNIQUE:
             // Need to output where_clause and access_method attribs
@@ -1730,12 +2779,10 @@ static void Constraint_out( StringInfo str, Constraint * node )
             Node_out( str, node->keys );
             appendStringInfo( str, ",\"options\":" );
             Node_out( str, node->options );
-            appendStringInfo( str, ",\"indexname\":\"" );
+            appendStringInfo( str, ",\"indexname\":" );
             Token_out( str, node->indexname );
-            appendStringInfo( str, "\"" );
-            appendStringInfo( str, ",\"indexspace\":\"" );
+            appendStringInfo( str, ",\"indexspace\":" );
             Token_out( str, node->indexspace );
-            appendStringInfo( str, "\"" );
             break;
         case CONSTR_EXCLUSION:
             appendStringInfo( str, "\"EXCLUSION\"" );
@@ -1743,15 +2790,12 @@ static void Constraint_out( StringInfo str, Constraint * node )
             Node_out( str, node->exclusions );
             appendStringInfo( str, ",\"options\":" );
             Node_out( str, node->options );
-            appendStringInfo( str, ",\"indexname\":\"" );
+            appendStringInfo( str, ",\"indexname\":" );
             Token_out( str, node->indexname );
-            appendStringInfo( str, "\"" );
-            appendStringInfo( str, ",\"indexspace\":\"" );
+            appendStringInfo( str, ",\"indexspace\":" );
             Token_out( str, node->indexspace );
-            appendStringInfo( str, "\"" );
-            appendStringInfo( str, ",\"access_method\":\"" );
+            appendStringInfo( str, ",\"access_method\":" );
             Token_out( str, node->access_method );
-            appendStringInfo( str, "\"" );
             appendStringInfo( str, ",\"where_clause\":" );
             Node_out( str, node->where_clause );
             break;
@@ -1797,9 +2841,8 @@ static void CreateForeignTableStmt_out( StringInfo str, CreateForeignTableStmt *
 {
     appendStringInfoString( str, "\"name\":\"CREATEFOREIGNTABLESTMT\"" );
     CreateStmt_out( str, ( CreateStmt * ) &node->base );
-    appendStringInfo( str, ",\"servername\":\"" );
+    appendStringInfo( str, ",\"servername\":" );
     Token_out( str, node->servername );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"options\":" );
     Node_out( str, node->options );
     return;
@@ -1820,10 +2863,9 @@ static void CreateStmt_out( StringInfo str, CreateStmt * node )
     Node_out( str, node->constraints );
     appendStringInfo( str, ",\"options\":" );
     Node_out( str, node->options );
-    appendStringInfo( str, ",\"oncommit\":%d", node->oncommit ); // enum - OnCommitAction
-    appendStringInfo( str, ",\"tablespacename\":\"" );
+    appendStringInfo( str, ",\"oncommit\":\"%s\"", enum_OnCommitAction( node->oncommit ) );
+    appendStringInfo( str, ",\"tablespacename\":" );
     Token_out( str, node->tablespacename );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"if_not_exists\":%s", node->if_not_exists ? "true" : "false" );
     return;
 }
@@ -1841,9 +2883,8 @@ static void CurrentOfExpr_out( StringInfo str, CurrentOfExpr * node )
 {
     appendStringInfoString( str, "\"name\":\"CURRENTOFEXPR\"" );
     appendStringInfo( str, ",\"cvarno\":%u", node->cvarno );
-    appendStringInfo( str, ",\"cursor_name\":\"" );
+    appendStringInfo( str, ",\"cursor_name\":" );
     Token_out( str, node->cursor_name );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"cursor_param\":%d", node->cursor_param );
     return;
 }
@@ -1915,9 +2956,8 @@ static void Datum_out( StringInfo str, Datum value, int typlen, bool typbyval )
 static void DeclareCursorStmt_out( StringInfo str, DeclareCursorStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"DECLARECURSORSTMT\"" );
-    appendStringInfo( str, ",\"portalname\":\"" );
+    appendStringInfo( str, ",\"portalname\":" );
     Token_out( str, node->portalname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"options\":%d", node->options );
     appendStringInfo( str, ",\"query\":" );
     Node_out( str, node->query );
@@ -1927,15 +2967,13 @@ static void DeclareCursorStmt_out( StringInfo str, DeclareCursorStmt * node )
 static void DefElem_out( StringInfo str, DefElem * node )
 {
     appendStringInfoString( str, "\"name\":\"DEFELEM\"" );
-    appendStringInfo( str, ",\"defnamespace\":\"" );
+    appendStringInfo( str, ",\"defnamespace\":" );
     Token_out( str, node->defnamespace );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"defname\":\"" );
+    appendStringInfo( str, ",\"defname\":" );
     Token_out( str, node->defname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"arg\":" );
     Node_out( str, node->arg );
-    appendStringInfo( str, ",\"defaction\":%d", node->defaction ); // enum - DefElemAction
+    appendStringInfo( str, ",\"defaction\":\"%s\"", enum_DefElemAction( node->defaction ) );
     return;
 }
 
@@ -2074,7 +3112,7 @@ static void FuncExpr_out( StringInfo str, FuncExpr * node )
     appendStringInfo( str, ",\"funcid\":%u", node->funcid );
     appendStringInfo( str, ",\"funcresulttype\":%u", node->funcresulttype );
     appendStringInfo( str, ",\"funcretset\":%s", node->funcretset ? "true" : "false" );
-    appendStringInfo( str, ",\"funcformat\":%d", node->funcformat ); // enum - CoercionForm
+    appendStringInfo( str, ",\"funcformat\":\"%s\"", enum_CoercionForm( node->funcformat ) );
     appendStringInfo( str, ",\"funccollid\":%u", node->funccollid );
     appendStringInfo( str, ",\"inputcollid\":%u", node->inputcollid );
     appendStringInfo( str, ",\"args\":" );
@@ -2164,20 +3202,18 @@ static void Hash_out( StringInfo str, Hash * node )
 static void IndexElem_out( StringInfo str, IndexElem * node )
 {
     appendStringInfoString( str, "\"name\":\"INDEXELEM\"" );
-    appendStringInfo( str, ",\"name\":\"" );
+    appendStringInfo( str, ",\"name\":" );
     Token_out( str, node->name );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"expr\":" );
     Node_out( str, node->expr );
-    appendStringInfo( str, ",\"indexcolname\":\"" );
+    appendStringInfo( str, ",\"indexcolname\":" );
     Token_out( str, node->indexcolname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"collation\":" );
     Node_out( str, node->collation );
     appendStringInfo( str, ",\"opclass\":" );
     Node_out( str, node->opclass );
-    appendStringInfo( str, ",\"ordering\":%d", node->ordering ); // enum - SortByDir
-    appendStringInfo( str, ",\"nulls_ordering\":%d", node->nulls_ordering ); // enum - SoryByNulls
+    appendStringInfo( str, ",\"ordering\":\"%s\"", enum_SortByDir( node->ordering ) );
+    appendStringInfo( str, ",\"nulls_ordering\":\"%s\"", enum_SortByNulls( node->nulls_ordering ) );
     return;
 }
 
@@ -2210,7 +3246,7 @@ static void IndexPath_out( StringInfo str, IndexPath * node )
     Node_out( str, node->indexclauses );
     appendStringInfo( str, ",\"indexorderbys\":" );
     Node_out( str, node->indexorderbys );
-    appendStringInfo( str, ",\"indexscandir\":%d", node->indexscandir ); // enum - ScanDirection
+    appendStringInfo( str, ",\"indexscandir\":\"%s\"", enum_ScanDirection( node->indexscandir ) );
     appendStringInfo( str, ",\"indextotalcost\":%.2f", node->indextotalcost );
     appendStringInfo( str, ",\"indexselectivity\":%.4f", node->indexselectivity );
     return;
@@ -2229,24 +3265,21 @@ static void IndexScan_out( StringInfo str, IndexScan * node )
     Node_out( str, node->indexorderby );
     appendStringInfo( str, ",\"indexorderbyorig\":" );
     Node_out( str, node->indexorderbyorig );
-    appendStringInfo( str, ",\"indexorderdir\":%d", node->indexorderdir ); // enum - ScanDirection
+    appendStringInfo( str, ",\"indexorderdir\":\"%s\"", enum_ScanDirection( node->indexorderdir ) );
     return;
 }
 
 static void IndexStmt_out( StringInfo str, IndexStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"INDEXSTMT\"" );
-    appendStringInfo( str, ",\"idxname\":\"" );
+    appendStringInfo( str, ",\"idxname\":" );
     Token_out( str, node->idxname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"relation\":" );
     Node_out( str, node->relation );
-    appendStringInfo( str, ",\"accessMethod\":\"" );
+    appendStringInfo( str, ",\"accessMethod\":" );
     Token_out( str, node->accessMethod );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"tableSpace\":\"" );
+    appendStringInfo( str, ",\"tableSpace\":" );
     Token_out( str, node->tableSpace );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"indexParams\":" );
     Node_out( str, node->indexParams );
     appendStringInfo( str, ",\"options\":" );
@@ -2270,32 +3303,63 @@ static void IntoClause_out( StringInfo str, IntoClause * node )
     appendStringInfoString( str, "\"name\":\"INTOCLAUSE\"" );
     appendStringInfo( str, ",\"rel\":" );
     Node_out( str, node->rel );
-    appendStringInfo( str, ",\"colNames\":" );
-    Node_out( str, node->colNames );
-    appendStringInfo( str, ",\"options\":" );
-    Node_out( str, node->options );
-    appendStringInfo( str, ",\"onCommit\":%d", node->onCommit ); // enum - OnCommitAction
-    appendStringInfo( str, ",\"tableSpaceName\":\"" );
-    Token_out( str, node->tableSpaceName );
-    appendStringInfo( str, "\"" );
+    if( node->colNames != NIL )
+    {
+        appendStringInfo( str, ",\"colNames\":" );
+        Node_out( str, node->colNames );
+    }
+
+    if( node->options != NIL )
+    {
+        appendStringInfo( str, ",\"options\":" );
+        Node_out( str, node->options );
+    }
+
+    appendStringInfo( str, ",\"onCommit\":\"%s\"", enum_OnCommitAction( node->onCommit ) );
+    if( node->tableSpaceName )
+    {
+        appendStringInfo( str, ",\"tableSpaceName\":" );
+        Token_out( str, node->tableSpaceName );
+    }
     return;
 }
 
 static void JoinExpr_out( StringInfo str, JoinExpr * node )
 {
     appendStringInfoString( str, "\"name\":\"JOINEXPR\"" );
-    appendStringInfo( str, ",\"jointype\":%d", node->jointype ); // enum - JoinType
+    appendStringInfo( str, ",\"jointype\":\"%s\"", enum_JoinType( node->jointype ) );
     appendStringInfo( str, ",\"isNatural\":%s", node->isNatural ? "true" : "false" );
-    appendStringInfo( str, ",\"larg\":" );
-    Node_out( str, node->larg );
-    appendStringInfo( str, ",\"rarg\":" );
-    Node_out( str, node->rarg );
-    appendStringInfo( str, ",\"usingClause\":" );
-    Node_out( str, node->usingClause );
-    appendStringInfo( str, ",\"quals\":" );
-    Node_out( str, node->quals );
-    appendStringInfo( str, ",\"alias\":" );
-    Node_out( str, node->alias );
+
+    if( node->larg )
+    {
+        appendStringInfo( str, ",\"larg\":" );
+        Node_out( str, node->larg );
+    }
+
+    if( node->rarg )
+    {
+        appendStringInfo( str, ",\"rarg\":" );
+        Node_out( str, node->rarg );
+    }
+
+    if( node->usingClause )
+    {
+        appendStringInfo( str, ",\"usingClause\":" );
+        Node_out( str, node->usingClause );
+    }
+
+    if( node->quals )
+    {
+        appendStringInfo( str, ",\"quals\":" );
+        Node_out( str, node->quals );
+    }
+
+    if( node->alias )
+    {
+        appendStringInfo( str, ",\"alias\":" );
+        Node_out( str, node->alias );
+    }
+
     appendStringInfo( str, ",\"rtindex\":%d", node->rtindex );
     return;
 }
@@ -2305,7 +3369,7 @@ static void JoinInfo_out( StringInfo str, Join * node )
     // Write out common join node stuff before returning
     // and callee writing out specific information
     PlanInfo_out( str, ( Plan * ) node );
-    appendStringInfo( str, ",\"jointype\":%d", node->jointype ); // enum - JoinType
+    appendStringInfo( str, ",\"jointype\":\"%s\"", enum_JoinType( node->jointype ) );
     appendStringInfo( str, ",\"joinqual\":" );
     Node_out( str, node->joinqual );
     return;
@@ -2316,7 +3380,7 @@ static void JoinPathInfo_out( StringInfo str, JoinPath * node )
     // Write out common joinpath node stuff before returning
     // and callee writing out specific information
     PathInfo_out( str, ( Path * ) node );
-    appendStringInfo( str, ",\"jointype\":%d", node->jointype ); // enum - JoinType
+    appendStringInfo( str, ",\"jointype\":\"%s\"", enum_JoinType( node->jointype ) );
     appendStringInfo( str, ",\"outerjoinpath\":" );
     Node_out( str, node->outerjoinpath );
     appendStringInfo( str, ",\"innerjoinpath\":" );
@@ -2356,18 +3420,33 @@ static void List_out( StringInfo str, List * node )
 
     if( IsA( node, IntList ) )
     {
-        appendStringInfoString( str, "\"i\"" );
+        appendStringInfoString( str, "\"IntList\"" );
     }
     else if( IsA( node, OidList ) )
     {
-        appendStringInfoString( str, "\"o\"" );
+        appendStringInfoString( str, "\"OidList\"" );
     }
     else
     {
-        appendStringInfoString( str, "NULL" );
+        if( node->type == T_List )
+        {
+            cell = ( Node * ) linitial( node );
+            appendStringInfo( str, "\"%s\"", enum_NodeTag( cell->type ) ); // Suggest the type based on the type of the elements
+        }
+        else
+        {
+            appendStringInfo( str, "\"%s\"", enum_NodeTag( node->type ) ); // Generic List
+        }
     }
 
     appendStringInfoString( str, ",\"value\":[" );
+
+    elog(
+        DEBUG1,
+        "Parsing list type %d (%s)",
+        ( int ) node->type,
+        enum_NodeTag( node->type )
+    );
 
     foreach( lc, node )
     {
@@ -2402,12 +3481,17 @@ static void List_out( StringInfo str, List * node )
         {
             appendStringInfo( str, "%u", lfirst_oid( lc ) );
         }
+        else if( IsA( node, List ) )
+        {
+            Node_out( str, cell );
+        }
         else
         {
             elog(
                 ERROR,
-                "Unknown list node type %d",
-                ( int ) node->type
+                "Unknown list node type %d (%s)",
+                ( int ) node->type,
+                enum_NodeTag( node->type )
             );
         }
     }
@@ -2419,8 +3503,11 @@ static void List_out( StringInfo str, List * node )
 static void LockingClause_out( StringInfo str, LockingClause * node )
 {
     appendStringInfoString( str, "\"name\":\"LOCKINGCLAUSE\"" );
-    appendStringInfo( str, ",\"lockedRels\":" );
-    Node_out( str, node->lockedRels );
+    if( node->lockedRels )
+    {
+        appendStringInfo( str, ",\"lockedRels\":" );
+        Node_out( str, node->lockedRels );
+    }
     // Need to output strength and waitPolicy
     return;
 }
@@ -2429,8 +3516,11 @@ static void LockRows_out( StringInfo str, LockRows * node )
 {
     appendStringInfoString( str, "\"name\":\"LOCKROWS\"" );
     PlanInfo_out( str, ( Plan * ) node );
-    appendStringInfo( str, ",\"rowMarks\":" );
-    Node_out( str, node->rowMarks );
+    if( node->rowMarks )
+    {
+        appendStringInfo( str, ",\"rowMarks\":" );
+        Node_out( str, node->rowMarks );
+    }
     appendStringInfo( str, ",\"epqParam\":%d", node->epqParam );
     return;
 }
@@ -2439,8 +3529,11 @@ static void MaterialPath_out( StringInfo str, MaterialPath * node )
 {
     appendStringInfoString( str, "\"name\":\"MATERIALPATH\"" );
     PathInfo_out( str, ( Path * ) node );
-    appendStringInfo( str, ",\"subpath\":" );
-    Node_out( str, node->subpath );
+    if( node->subpath )
+    {
+        appendStringInfo( str, ",\"subpath\":" );
+        Node_out( str, node->subpath );
+    }
     return;
 }
 
@@ -2455,8 +3548,11 @@ static void MergeAppendPath_out( StringInfo str, MergeAppendPath * node )
 {
     appendStringInfoString( str, "\"name\":\"MERGEAPPENDPATH\"" );
     PathInfo_out( str, ( Path * ) node );
-    appendStringInfo( str, ",\"subpaths\":" );
-    Node_out( str, node->subpaths );
+    if( node->subpaths )
+    {
+        appendStringInfo( str, ",\"subpaths\":" );
+        Node_out( str, node->subpaths );
+    }
     appendStringInfo( str, ",\"limit_tuples\":%.0f", node->limit_tuples );
     return;
 }
@@ -2468,8 +3564,11 @@ static void MergeAppend_out( StringInfo str, MergeAppend * node )
 
     appendStringInfoString( str, "\"name\":\"MERGEAPPEND\"" );
     PlanInfo_out( str, ( Plan * ) node );
-    appendStringInfo( str, ",\"mergeplans\":" );
-    Node_out( str, node->mergeplans );
+    if( node->mergeplans )
+    {
+        appendStringInfo( str, ",\"mergeplans\":" );
+        Node_out( str, node->mergeplans );
+    }
     appendStringInfo( str, ",\"numCols\":%d", node->numCols );
     appendStringInfo( str, ",\"sortColIdx\":[" );
 
@@ -2534,8 +3633,11 @@ static void MergeJoin_out( StringInfo str, MergeJoin * node )
 
     appendStringInfoString( str, "\"name\":\"MERGEJOIN\"" );
     JoinInfo_out( str, ( Join * ) node );
-    appendStringInfo( str, ",\"mergeclauses\":" );
-    Node_out( str, node->mergeclauses );
+    if( node->mergeclauses )
+    {
+        appendStringInfo( str, ",\"mergeclauses\":" );
+        Node_out( str, node->mergeclauses );
+    }
     num_cols = list_length( node->mergeclauses );
     appendStringInfo( str, ",\"mergeFamilies\":[" );
 
@@ -2628,7 +3730,7 @@ static void MinMaxExpr_out( StringInfo str, MinMaxExpr * node )
     appendStringInfo( str, ",\"minmaxtype\":%u", node->minmaxtype );
     appendStringInfo( str, ",\"minmaxcollid\":%u", node->minmaxcollid );
     appendStringInfo( str, ",\"inputcollid\":%u", node->inputcollid );
-    appendStringInfo( str, ",\"op\":%d", node->op ); // enum - MinMaxOp
+    appendStringInfo( str, ",\"op\":\"%s\"", enum_MinMaxOp( node->op ) );
     appendStringInfo( str, ",\"args\":" );
     Node_out( str, node->args );
     appendStringInfo( str, ",\"location\":%d", node->location );
@@ -2639,7 +3741,7 @@ static void ModifyTable_out( StringInfo str, ModifyTable * node )
 {
     appendStringInfoString( str, "\"name\":\"MODIFYTABLE\"" );
     PlanInfo_out( str, ( Plan * ) node );
-    appendStringInfo( str, ",\"operation\":%d", node->operation ); // enum - CmdType
+    appendStringInfo( str, ",\"operation\":\"%s\"", enum_CmdType( node->operation ) );
     appendStringInfo( str, ",\"canSetTag\":%s", node->canSetTag ? "true" : "false" );
     appendStringInfo( str, ",\"partColsUpdated\":%s", node->partColsUpdated ? "true" : "false" );
     appendStringInfo( str, ",\"resultRelations\":" );
@@ -2671,9 +3773,8 @@ static void NamedArgExpr_out( StringInfo str, NamedArgExpr * node )
     appendStringInfoString( str, "\"name\":\"NAMEDARGEXPR\"" );
     appendStringInfo( str, ",\"arg\":" );
     Node_out( str, node->arg );
-    appendStringInfo( str, ",\"name\":\"" );
+    appendStringInfo( str, ",\"name\":" );
     Token_out( str, node->name );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"argnumber\":%d", node->argnumber );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
@@ -2708,7 +3809,7 @@ static void Node_out( StringInfo string, void * object )
 {
     if( object == NULL )
     {
-        appendStringInfo( string, "NULL" );
+        appendStringInfo( string, "null" );
     }
     else if(
                 IsA( object, List )
@@ -3054,6 +4155,9 @@ static void Node_out( StringInfo string, void * object )
             case T_RangeVar:
                 RangeVar_out( string, object );
                 break;
+            case T_RawStmt:
+                RawStmt_out( string, object );
+                break;
             case T_RecursiveUnion:
                 RecursiveUnion_out( string, object );
                 break;
@@ -3177,8 +4281,9 @@ static void Node_out( StringInfo string, void * object )
             default:
                 elog(
                     WARNING,
-                    "Unrecognized node type: %d",
-                    (int) nodeTag( object )
+                    "Unrecognized node type: %d (%s)",
+                    (int) nodeTag( object ),
+                    enum_NodeTag( nodeTag( object ) )
                 );
                 break;
         }
@@ -3192,12 +4297,10 @@ static void Node_out( StringInfo string, void * object )
 static void NotifyStmt_out( StringInfo str, NotifyStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"NOTIFY\"" );
-    appendStringInfo( str, ",\"conditionname\":\"" );
+    appendStringInfo( str, ",\"conditionname\":" );
     Token_out( str, node->conditionname );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"payload\":\"" );
+    appendStringInfo( str, ",\"payload\":" );
     Token_out( str, node->payload );
-    appendStringInfo( str, "\"" );
     return;
 }
 
@@ -3221,7 +4324,7 @@ static void NullTest_out( StringInfo str, NullTest * node )
     appendStringInfoString( str, "\"name\":\"NULLTEST\"" );
     appendStringInfo( str, ",\"arg\":" );
     Node_out( str, node->arg );
-    appendStringInfo( str, ",\"nulltesttype\":%d", node->nulltesttype ); // enum - NullTestType
+    appendStringInfo( str, ",\"nulltesttype\":\"%s\"", enum_NullTestType( node->nulltesttype ) );
     appendStringInfo( str, ",\"argisrow\":%s", node->argisrow ? "true" : "false" );
     return;
 }
@@ -3252,7 +4355,7 @@ static void ParamRef_out( StringInfo str, ParamRef * node )
 static void Param_out( StringInfo str, Param * node )
 {
     appendStringInfoString( str, "\"name\":\"PARAM\"" );
-    appendStringInfo( str, ",\"paramkind\":%d", node->paramkind ); // enum - ParamKind
+    appendStringInfo( str, ",\"paramkind\":\"%s\"", enum_ParamKind( node->paramkind ) );
     appendStringInfo( str, ",\"paramid\":%d", node->paramid );
     appendStringInfo( str, ",\"paramtype\":%u", node->paramtype );
     appendStringInfo( str, ",\"paramtypmod\":%d", node->paramtypmod );
@@ -3265,7 +4368,7 @@ static void PathInfo_out( StringInfo str, Path * node )
 {
     // Write out common path node stuff before returning
     // and callee writing out specific information
-    appendStringInfo( str, ",\"pathtype\":%d", node->pathtype ); // enum - NodeTag
+    appendStringInfo( str, ",\"pathtype\":\"%s\"", enum_NodeTag( node->pathtype ) );
     appendStringInfo(str, " :parent_relids ");
     Bitmapset_out( str, node->parent->relids );
     appendStringInfo( str, ",\"startup_cost\":%.2f", node->startup_cost );
@@ -3356,7 +4459,7 @@ static void PlanInvalItem_out( StringInfo str, PlanInvalItem * node )
 static void PlannedStmt_out( StringInfo str, PlannedStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"PLANNEDSTMT\"" );
-    appendStringInfo( str, ",\"commandType\":%d", node->commandType ); // enum - CmdType
+    appendStringInfo( str, ",\"commandType\":\"%s\"", enum_CmdType( node->commandType ) );
 #if PG_VERSION_NUM > 14000
     appendStringInfo( str, ",\"queryId\":%lu", node->queryId );
 #endif // PG_VERSION_NUM
@@ -3477,7 +4580,7 @@ static void Plan_out( StringInfo str, Plan * node )
 static void Query_out( StringInfo str, Query * node )
 {
     appendStringInfoString( str, "\"name\":\"QUERY\"" );
-    appendStringInfo( str, ",\"commandType\":%d", node->commandType ); // enum - CmdType
+    appendStringInfo( str, ",\"commandType\":\"%s\"", enum_CmdType( node->commandType ) );
     appendStringInfo( str, ",\"querySource\":%d", node->querySource ); // enum - QuerySource
 #if PG_VERSION_NUM >= 14000
     appendStringInfo( str, ",\"queryId\":%lu", node->queryId );
@@ -3590,7 +4693,7 @@ static void RangeTblEntry_out( StringInfo str, RangeTblEntry * node )
     Node_out( str, node->alias );
     appendStringInfo( str, ",\"eref\":" );
     Node_out( str, node->eref );
-    appendStringInfo( str, ",\"rtekind\":%d", node->rtekind ); // enum - RTEKind
+    appendStringInfo( str, ",\"rtekind\":\"%s\"", enum_RTEKind( node->rtekind ) );
 
     switch( node->rtekind )
     {
@@ -3604,7 +4707,7 @@ static void RangeTblEntry_out( StringInfo str, RangeTblEntry * node )
             Node_out( str, node->subquery );
             break;
         case RTE_JOIN:
-            appendStringInfo( str, ",\"jointype\":%d", node->jointype ); // enum - JoinType
+            appendStringInfo( str, ",\"jointype\":\"%s\"", enum_JoinType( node->jointype ) );
             appendStringInfo( str, ",\"joinaliasvars\":" );
             Node_out( str, node->joinaliasvars );
             break;
@@ -3618,9 +4721,8 @@ static void RangeTblEntry_out( StringInfo str, RangeTblEntry * node )
             Node_out( str, node->values_lists );
             break;
         case RTE_CTE:
-            appendStringInfo( str, ",\"ctename\":\"" );
+            appendStringInfo( str, ",\"ctename\":" );
             Token_out( str, node->ctename );
-            appendStringInfo( str, "\"" );
             appendStringInfo( str, ",\"ctelevelsup\":%u", node->ctelevelsup );
             appendStringInfo( str, ",\"self_reference\":%s", node->self_reference ? "true" : "false" );
             break;
@@ -3657,18 +4759,38 @@ static void RangeTblRef_out( StringInfo str, RangeTblRef * node )
 static void RangeVar_out( StringInfo str, RangeVar * node )
 {
     appendStringInfoString( str, "\"name\":\"RANGEVAR\"" );
-    // 'catalogname' is ignored
-    appendStringInfo( str, ",\"schemaname\":\"" );
-    Token_out( str, node->schemaname );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"relname\":\"" );
-    Token_out( str, node->relname );
-    appendStringInfo( str, "\"" );
+    // 'catalogname' is ignored - cross db is not supported so this will always be current_database()
+    if( node->schemaname )
+    {
+        appendStringInfo( str, ",\"schemaname\":" );
+        Token_out( str, node->schemaname );
+    }
+
+    if( node->relname )
+    {
+        appendStringInfo( str, ",\"relname\":" );
+        Token_out( str, node->relname );
+    }
+
     appendStringInfo( str, ",\"inh\":%s", node->inh ? "true" : "false" );
     appendStringInfo( str, ",\"relpersistence\":\"%c\"", node->relpersistence );
-    appendStringInfo( str, ",\"alias\":" );
-    Node_out( str, node->alias );
+
+    if( node->alias )
+    {
+        appendStringInfo( str, ",\"alias\":" );
+        Node_out( str, node->alias );
+    }
     appendStringInfo( str, ",\"location\":%d", node->location );
+    return;
+}
+
+static void RawStmt_out( StringInfo str, RawStmt * node )
+{
+    appendStringInfoString( str, "\"name\":\"RAWSTMT\"" );
+    appendStringInfoString( str, ",\"stmt\":" );
+    Node_out( str, node->stmt );
+    appendStringInfo( str, ",\"stmt_location\":%d", node->stmt_location );
+    appendStringInfo( str, ",\"stmt_len\":%d", node->stmt_len );
     return;
 }
 
@@ -3718,7 +4840,7 @@ static void RelabelType_out( StringInfo str, RelabelType * node )
     appendStringInfo( str, ",\"resulttype\":%u", node->resulttype );
     appendStringInfo( str, ",\"resulttypmod\":%d", node->resulttypmod );
     appendStringInfo( str, ",\"resultcollid\":%u", node->resultcollid );
-    appendStringInfo( str, ",\"relabelformat\":%d", node->relabelformat ); // enum - CoercionForm
+    appendStringInfo( str, ",\"relabelformat\":\"%s\"", enum_CoercionForm( node->relabelformat ) );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
 }
@@ -3741,7 +4863,7 @@ static void RelOptInfo_out( StringInfo str, RelOptInfo * node )
     Node_out( str, node->cheapest_unique_path );
     appendStringInfo( str, ",\"relid\":%u", node->relid );
     appendStringInfo( str, ",\"reltablespace\":%u", node->reltablespace );
-    appendStringInfo( str, ",\"rtekind\":%d", node->rtekind ); // enum - RTEKind
+    appendStringInfo( str, ",\"rtekind\":\"%s\"", enum_RTEKind( node->rtekind ) );
     appendStringInfo( str, ",\"min_attr\":%d", node->min_attr );
     appendStringInfo( str, ",\"max_attr\":%d", node->max_attr );
     appendStringInfo( str, ",\"indexlist\":" );
@@ -3796,11 +4918,19 @@ static void RestrictInfo_out( StringInfo str, RestrictInfo * node )
 static void ResTarget_out( StringInfo str, ResTarget * node )
 {
     appendStringInfoString( str, "\"name\":\"RESTARGET\"" );
-    appendStringInfo( str, ",\"name\":\"" );
-    Token_out( str, node->name );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"indirection\":" );
-    Node_out( str, node->indirection );
+
+    if( node->name )
+    {
+        appendStringInfo( str, ",\"name\":" );
+        Token_out( str, node->name );
+    }
+
+    if( node->indirection )
+    {
+        appendStringInfo( str, ",\"indirection\":" );
+        Node_out( str, node->indirection );
+    }
+
     appendStringInfo( str, ",\"val\":" );
     Node_out( str, node->val );
     appendStringInfo( str, ",\"location\":%d", node->location );
@@ -3839,7 +4969,7 @@ static void RowExpr_out( StringInfo str, RowExpr * node )
     appendStringInfo( str, ",\"args\":" );
     Node_out( str, node->args );
     appendStringInfo( str, ",\"row_typeid\":%u", node->row_typeid );
-    appendStringInfo( str, ",\"row_format\":%d", node->row_format ); // enum - CoercionForm
+    appendStringInfo( str, ",\"row_format\":\"%s\"", enum_CoercionForm( node->row_format ) );
     appendStringInfo( str, ",\"colnames\":" );
     Node_out( str, node->colnames );
     appendStringInfo( str, ",\"location\":%d", node->location );
@@ -3887,40 +5017,104 @@ static void Scan_out( StringInfo str, Scan * node )
 static void SelectStmt_out( StringInfo str, SelectStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"SELECTSTMT\"" );
-    appendStringInfo( str, ",\"distinctClause\":" );
-    Node_out( str, node->distinctClause );
-    appendStringInfo( str, ",\"intoClause\":" );
-    Node_out( str, node->intoClause );
-    appendStringInfo( str, ",\"targetList\":" );
-    Node_out( str, node->targetList );
-    appendStringInfo( str, ",\"fromClause\":" );
-    Node_out( str, node->fromClause );
-    appendStringInfo( str, ",\"whereClause\":" );
-    Node_out( str, node->whereClause );
-    appendStringInfo( str, ",\"groupClause\":" );
-    Node_out( str, node->groupClause );
-    appendStringInfo( str, ",\"havingClause\":" );
-    Node_out( str, node->havingClause );
-    appendStringInfo( str, ",\"windowClause\":" );
-    Node_out( str, node->windowClause );
-    appendStringInfo( str, ",\"withClause\":" );
-    Node_out( str, node->withClause );
-    appendStringInfo( str, ",\"valuesLists\":" );
-    Node_out( str, node->valuesLists );
-    appendStringInfo( str, ",\"sortClause\":" );
-    Node_out( str, node->sortClause );
-    appendStringInfo( str, ",\"limitOffset\":" );
-    Node_out( str, node->limitOffset );
-    appendStringInfo( str, ",\"limitCount\":" );
-    Node_out( str, node->limitCount );
-    appendStringInfo( str, ",\"lockingClause\":" );
-    Node_out( str, node->lockingClause );
+    if( node->distinctClause )
+    {
+        appendStringInfo( str, ",\"distinctClause\":" );
+        Node_out( str, node->distinctClause );
+    }
+
+    if( node->intoClause )
+    {
+        appendStringInfo( str, ",\"intoClause\":" );
+        Node_out( str, node->intoClause );
+    }
+
+    if( node->targetList )
+    {
+        appendStringInfo( str, ",\"targetList\":" );
+        Node_out( str, node->targetList );
+    }
+
+    if( node->fromClause )
+    {
+        appendStringInfo( str, ",\"fromClause\":" );
+        Node_out( str, node->fromClause );
+    }
+
+    if( node->whereClause )
+    {
+        appendStringInfo( str, ",\"whereClause\":" );
+        Node_out( str, node->whereClause );
+    }
+
+    if( node->groupClause )
+    {
+        appendStringInfo( str, ",\"groupClause\":" );
+        Node_out( str, node->groupClause );
+    }
+
+    if( node->havingClause )
+    {
+        appendStringInfo( str, ",\"havingClause\":" );
+        Node_out( str, node->havingClause );
+    }
+
+    if( node->windowClause )
+    {
+        appendStringInfo( str, ",\"windowClause\":" );
+        Node_out( str, node->windowClause );
+    }
+
+    if( node->withClause )
+    {
+        appendStringInfo( str, ",\"withClause\":" );
+        Node_out( str, node->withClause );
+    }
+
+    if( node->valuesLists )
+    {
+        appendStringInfo( str, ",\"valuesLists\":" );
+        Node_out( str, node->valuesLists );
+    }
+
+    if( node->sortClause )
+    {
+        appendStringInfo( str, ",\"sortClause\":" );
+        Node_out( str, node->sortClause );
+    }
+
+    if( node->limitOffset )
+    {
+        appendStringInfo( str, ",\"limitOffset\":" );
+        Node_out( str, node->limitOffset );
+    }
+
+    if( node->limitCount )
+    {
+        appendStringInfo( str, ",\"limitCount\":" );
+        Node_out( str, node->limitCount );
+    }
+
+    if( node->lockingClause )
+    {
+        appendStringInfo( str, ",\"lockingClause\":" );
+        Node_out( str, node->lockingClause );
+    }
+
     appendStringInfo( str, ",\"op\":%d", node->op ); // enum - SetOperation
     appendStringInfo( str, ",\"all\":%s", node->all ? "true" : "false" );
-    appendStringInfo( str, ",\"larg\":" );
-    Node_out( str, node->larg );
-    appendStringInfo( str, ",\"rarg\":" );
-    Node_out( str, node->rarg );
+    
+    if( node->larg )
+    {
+        appendStringInfo( str, ",\"larg\":" );
+        Node_out( str, node->larg );
+    }
+
+    if( node->rarg )
+    {
+        appendStringInfo( str, ",\"rarg\":" );
+        Node_out( str, node->rarg );
+    }
     return;
 }
 
@@ -4007,8 +5201,8 @@ static void SortBy_out( StringInfo str, SortBy * node )
     appendStringInfoString( str, "\"name\":\"SORTBY\"" );
     appendStringInfo( str, ",\"node\":" );
     Node_out( str, node->node );
-    appendStringInfo( str, ",\"sortby_dir\":%d", node->sortby_dir ); // enum - SortByDir
-    appendStringInfo( str, ",\"sortby_nulls\":%d", node->sortby_nulls ); // enum - SortByNulls
+    appendStringInfo( str, ",\"sortby_dir\":\"%s\"", enum_SortByDir( node->sortby_dir ) );
+    appendStringInfo( str, ",\"sortby_nulls\":\"%s\"", enum_SortByNulls( node->sortby_nulls ) );
     appendStringInfo( str, ",\"useOp\":" );
     Node_out( str, node->useOp );
     appendStringInfo( str, ",\"location\":%d", node->location );
@@ -4100,7 +5294,7 @@ static void SpecialJoinInfo_out( StringInfo str, SpecialJoinInfo * node )
     Bitmapset_out( str, node->syn_lefthand );
     appendStringInfo( str, ",\"syn_righthand\":" );
     Bitmapset_out( str, node->syn_righthand );
-    appendStringInfo( str, ",\"jointype\":%d", node->jointype ); // enum - JoinType
+    appendStringInfo( str, ",\"jointype\":\"%s\"", enum_JoinType( node->jointype ) );
     appendStringInfo( str, ",\"lhs_strict\":%s", node->lhs_strict ? "true" : "false" );
     appendStringInfo( str, ",\"delay_upper_joins\":%s", node->delay_upper_joins ? "true" : "false" );
     appendStringInfo( str, ",\"semi_can_hash\":%s", node->semi_can_hash ? "true" : "false" );
@@ -4115,7 +5309,7 @@ static void SpecialJoinInfo_out( StringInfo str, SpecialJoinInfo * node )
 static void SubLink_out( StringInfo str, SubLink * node )
 {
     appendStringInfoString( str, "\"name\":\"SUBLINK\"" );
-    appendStringInfo( str, ",\"subLinkType\":%d", node->subLinkType ); // enum - SubLinkType
+    appendStringInfo( str, ",\"subLinkType\":\"%s\"", enum_SubLinkType( node->subLinkType ) );
     appendStringInfo( str, ",\"testexpr\":" );
     Node_out( str, node->testexpr );
     appendStringInfo( str, ",\"operName\":" );
@@ -4129,15 +5323,14 @@ static void SubLink_out( StringInfo str, SubLink * node )
 static void SubPlan_out( StringInfo str, SubPlan * node )
 {
     appendStringInfoString( str, "\"name\":\"SUBPLAN\"" );
-    appendStringInfo( str, ",\"subLinkType\":%d", node->subLinkType ); // enum - SubLinkType
+    appendStringInfo( str, ",\"subLinkType\":\"%s\"", enum_SubLinkType( node->subLinkType ) );
     appendStringInfo( str, ",\"testexpr\":" );
     Node_out( str, node->testexpr );
     appendStringInfo( str, ",\"paramIds\":" );
     Node_out( str, node->paramIds );
     appendStringInfo( str, ",\"plan_id\":%d", node->plan_id );
-    appendStringInfo( str, ",\"plan_name\":\"" );
+    appendStringInfo( str, ",\"plan_name\":" );
     Token_out( str, node->plan_name );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"firstColType\":%u", node->firstColType );
     appendStringInfo( str, ",\"firstColTypmod\":%d", node->firstColTypmod );
     appendStringInfo( str, ",\"firstColCollation\":%u", node->firstColCollation );
@@ -4169,9 +5362,8 @@ static void TargetEntry_out( StringInfo str, TargetEntry * node )
     appendStringInfo( str, ",\"expr\":" );
     Node_out( str, node->expr );
     appendStringInfo( str, ",\"resno\":%d", node->resno );
-    appendStringInfo( str, ",\"resname\":\"" );
+    appendStringInfo( str, ",\"resname\":" );
     Token_out( str, node->resname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"ressortgroupref\":%u", node->ressortgroupref );
     appendStringInfo( str, ",\"resorigtbl\":%u", node->resorigtbl );
     appendStringInfo( str, ",\"resorigcol\":%d", node->resorigcol );
@@ -4201,10 +5393,11 @@ static void Token_out( StringInfo str, char * s )
 {
     if( s == NULL || *s == '\0' )
     {
-        appendStringInfo( str, "NULL" );
+        appendStringInfo( str, "null" );
         return;
     }
 
+    appendStringInfoChar( str, '"' );
     // Treat tokens similar to read.c (nodeRead wrapper or underlying pg_strtok function)
     if(
             *s == '<'
@@ -4240,6 +5433,7 @@ static void Token_out( StringInfo str, char * s )
         appendStringInfoChar( str, *s++ );
     }
 
+    appendStringInfoChar( str, '"' );
     return;
 }
 
@@ -4343,9 +5537,7 @@ static void Value_out( StringInfo str, Value * value )
             appendStringInfoString( str, value->val.str );
             break;
         case T_String:
-            appendStringInfoChar( str, '"' );
             Token_out( str, value->val.str );
-            appendStringInfoChar( str, '"' );
             break;
         case T_BitString:
             appendStringInfoChar( str, '"' );
@@ -4353,7 +5545,7 @@ static void Value_out( StringInfo str, Value * value )
             appendStringInfoChar( str, '"' );
             break;
         case T_Null:
-            appendStringInfoString( str, "NULL" );
+            appendStringInfoString( str, "null" );
             break;
         default:
             elog( ERROR, "unrecognized value type: %d", ( int ) value->type );
@@ -4448,12 +5640,10 @@ static void WindowAgg_out( StringInfo str, WindowAgg * node )
 static void WindowClause_out( StringInfo str, WindowClause * node )
 {
     appendStringInfoString( str, "\"name\":\"WINDOWCLAUSE\"" );
-    appendStringInfo( str, ",\"name\":\"" );
+    appendStringInfo( str, ",\"name\":" );
     Token_out( str, node->name );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"refname\":\"" );
+    appendStringInfo( str, ",\"refname\":" );
     Token_out( str, node->refname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"partitionClause\":" );
     Node_out( str, node->partitionClause );
     appendStringInfo( str, ",\"orderClause\":" );
@@ -4471,12 +5661,10 @@ static void WindowClause_out( StringInfo str, WindowClause * node )
 static void WindowDef_out( StringInfo str, WindowDef * node )
 {
     appendStringInfoString( str, "\"name\":\"WINDOWDEF\"" );
-    appendStringInfo( str, ",\"name\":\"" );
+    appendStringInfo( str, ",\"name\":" );
     Token_out( str, node->name );
-    appendStringInfo( str, "\"" );
-    appendStringInfo( str, ",\"refname\":\"" );
+    appendStringInfo( str, ",\"refname\":" );
     Token_out( str, node->refname );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"partitionClause\":" );
     Node_out( str, node->partitionClause );
     appendStringInfo( str, ",\"orderClause\":" );
@@ -4528,9 +5716,8 @@ static void XmlExpr_out( StringInfo str, XmlExpr * node )
 {
     appendStringInfoString( str, "\"name\":\"XMLEXPR\"" );
     appendStringInfo( str, ",\"op\":%d", node->op ); // enum - XmlExprOp
-    appendStringInfo( str, ",\"name\":\"" );
+    appendStringInfo( str, ",\"name\":" );
     Token_out( str, node->name );
-    appendStringInfo( str, "\"" );
     appendStringInfo( str, ",\"named_args\":" );
     Node_out( str, node->named_args );
     appendStringInfo( str, ",\"arg_names\":" );
