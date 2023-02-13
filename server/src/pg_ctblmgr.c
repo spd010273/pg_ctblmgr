@@ -2685,14 +2685,30 @@ static void CommonTableExpr_out( StringInfo str, CommonTableExpr * node )
     appendStringInfo( str, ",\"location\":%d", node->location );
     appendStringInfo( str, ",\"cterecursive\":%s", node->cterecursive ? "true" : "false" );
     appendStringInfo( str, ",\"cterefcount\":%d", node->cterefcount );
-    appendStringInfo( str, ",\"ctecolnames\":" );
-    Node_out( str, node->ctecolnames );
-    appendStringInfo( str, ",\"ctecoltypes\":" );
-    Node_out( str, node->ctecoltypes );
-    appendStringInfo( str, ",\"ctecoltypmods\":" );
-    Node_out( str, node->ctecoltypmods );
-    appendStringInfo( str, ",\"ctecolcollations\":" );
-    Node_out( str, node->ctecolcollations );
+
+    if( node->ctecolnames )
+    {
+        appendStringInfo( str, ",\"ctecolnames\":" );
+        Node_out( str, node->ctecolnames );
+    }
+
+    if( node->ctecoltypes )
+    {
+        appendStringInfo( str, ",\"ctecoltypes\":" );
+        Node_out( str, node->ctecoltypes );
+    }
+
+    if( node->ctecoltypmods )
+    {
+        appendStringInfo( str, ",\"ctecoltypmods\":" );
+        Node_out( str, node->ctecoltypmods );
+    }
+
+    if( node->ctecolcollations )
+    {
+        appendStringInfo( str, ",\"ctecolcollations\":" );
+        Node_out( str, node->ctecolcollations );
+    }
     return;
 }
 
@@ -3416,30 +3432,20 @@ static void List_out( StringInfo str, List * node )
     ListCell * k         = NULL;
     Node *     cell      = NULL;
 
-    appendStringInfoString( str, "{\"type\":" );
 
     if( IsA( node, IntList ) )
     {
-        appendStringInfoString( str, "\"IntList\"" );
+        appendStringInfoString( str, "{\"type\":\"IntList\",\"value\":[" );
     }
     else if( IsA( node, OidList ) )
     {
-        appendStringInfoString( str, "\"OidList\"" );
+        appendStringInfoString( str, "{\"type\":\"OidList\",\"value\":[" );
     }
     else
     {
-        if( node->type == T_List )
-        {
-            cell = ( Node * ) linitial( node );
-            appendStringInfo( str, "\"%s\"", enum_NodeTag( cell->type ) ); // Suggest the type based on the type of the elements
-        }
-        else
-        {
-            appendStringInfo( str, "\"%s\"", enum_NodeTag( node->type ) ); // Generic List
-        }
+        // We're a list of objects, lets skip the type: value: stuff and just have the array members
+        appendStringInfoChar( str, '[' );
     }
-
-    appendStringInfoString( str, ",\"value\":[" );
 
     elog(
         DEBUG1,
@@ -3462,7 +3468,7 @@ static void List_out( StringInfo str, List * node )
         if( IsA( cell, List ) )
         {
             first_two = 1;
-            appendStringInfoChar( str, '(' );
+            appendStringInfoChar( str, '[' );
             foreach( k, ( List * ) cell )
             {
                 if( first_two )
@@ -3471,7 +3477,7 @@ static void List_out( StringInfo str, List * node )
                     appendStringInfoChar( str, ',' );
                 Node_out( str, ( Node * ) lfirst( k ) );
             }
-            appendStringInfoChar( str, ')' );
+            appendStringInfoChar( str, ']' );
         }
         else if( IsA( node, IntList ) )
         {
@@ -3496,7 +3502,13 @@ static void List_out( StringInfo str, List * node )
         }
     }
 
-    appendStringInfoString( str, "]}" );
+    appendStringInfoChar( str, ']' );
+
+    if( IsA( node, OidList ) || IsA( node, IntList ) )
+    {
+        appendStringInfoChar( str, '}' );
+    }
+
     return;
 }
 
