@@ -35,7 +35,19 @@ INSERT INTO pgctblmgr.tb_maintenance_object(
                 datamap
             )
      SELECT mg.maintenance_group,
-            'WITH tt_test AS( SELECT a.foo FROM tb_a a ) SELECT a.foo, fn_test( a.foo ) AS bar, b.baz FROM tt_test a JOIN tb_b b ON b.foo = a.foo',
+            $_$
+            WITH tt_test AS
+            (
+                SELECT a.foo
+                  FROM tb_a a
+            )
+                SELECT a.foo,
+                       fn_test( a.foo ) AS bar,
+                       b.baz
+                  FROM tt_test a
+                  JOIN tb_b b
+                    ON b.foo = a.foo
+            $_$,
             'public',
             'ct_test',
             d.driver,

@@ -2304,7 +2304,7 @@ static void A_ArrayExpr_out( StringInfo str, A_ArrayExpr * node )
 static void A_Const_out( StringInfo str, A_Const * node )
 {
     appendStringInfoString( str, "\"name\":\"A_CONST\"" );
-    appendStringInfo(str, " :val ");
+    appendStringInfo(str, ",\"val\":");
     Value_out( str, &(node->val) );
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
@@ -3111,7 +3111,7 @@ static void FuncCall_out( StringInfo str, FuncCall * node )
     Node_out( str, node->funcname );
     appendStringInfo( str, ",\"args\":" );
     Node_out( str, node->args );
-    appendStringInfo( str, ",\"agg)order\":" );
+    appendStringInfo( str, ",\"agg_order\":" );
     Node_out( str, node->agg_order );
     appendStringInfo( str, ",\"agg_star\":%s", node->agg_star ? "true" : "false" );
     appendStringInfo( str, ",\"agg_distinct\":%s", node->agg_distinct ? "true" : "false" );

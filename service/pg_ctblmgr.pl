@@ -104,8 +104,8 @@ Readonly::Scalar my $CREATE_TEST_VIEW => <<END_SQL;
     )
 END_SQL
 
-Readonly::Scalar my $GET_TEST_VIEW_PARSE_TREE => <<END_SQL;
-    SELECT r.ev_action
+Readonly::Scalar my $GET_TEST_VIEW_PARSE_TREE => <<"END_SQL";
+    SELECT ${SCHEMA_NAME}.fn_get_parse_tree( r.ev_action )::JSONB AS tree
       FROM pg_catalog.pg_rewrite r
      WHERE r.rulename = '_RETURN'
        AND r.ev_class = '_pgctblmgr_test'::REGCLASS::OID
@@ -137,8 +137,8 @@ Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
            mo.namespace,
            mo.name,
            mo.definition
-      FROM $SCHEMA_NAME.tb_driver d
-INNER JOIN $SCHEMA_NAME.tb_maintenance_object mo
+      FROM ${SCHEMA_NAME}.tb_driver d
+INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.driver = d.driver
      WHERE mo.maintenance_object = ?
 END_SQL
@@ -154,10 +154,10 @@ Readonly::Scalar my $GET_WORKER_LIST => <<"END_SQL";
            rs.filter,
            mg.wal_level,
            mo.maintenance_object
-      FROM $SCHEMA_NAME.__pgctblmgr_repl_slot rs
-INNER JOIN $SCHEMA_NAME.tb_maintenance_object mo
+      FROM ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
+INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.maintenance_object = rs.id
-INNER JOIN $SCHEMA_NAME.tb_maintenance_group mg
+INNER JOIN ${SCHEMA_NAME}.tb_maintenance_group mg
         ON mg.maintenance_group = mo.maintenance_group
 END_SQL
 
@@ -716,81 +716,34 @@ sub get_query_parsetree($$)
         { type => SCALAR },
     );
 
-    my $test_view_q = $CREATE_TEST_VIEW;
-    $test_view_q =~ s/__DEFINITION__/$definition/;
+    my $get_parse_tree_q = $GET_TEST_VIEW_PARSE_TREE;
+    $get_parse_tree_q =~ s/__DEFINITION__/$definition/;
 
-    my $sth = try_query( $handle, $test_view_q, undef ); 
-
-    unless( $sth )
-    {
-        _log( $LOG_LEVEL_FATAL, 'Failed to generate test view for query parsing' );
-    }
-
-    $sth->finish();
-    $sth = try_query( $handle, $GET_TEST_VIEW_PARSE_TREE, undef );
+    my $sth = try_query( $handle, $get_parse_tree_q, undef );
 
     my $defrow = $sth->fetchrow_hashref();
-    my $query_tree = $defrow->{ev_action};
+    my $query_tree = $defrow->{tree};
     $sth->finish();
-    $sth = try_query( $handle, $DROP_TEST_VIEW, undef );
+    my $parse_tree_obj = from_json( $query_tree );
 
-    unless( $sth )
-    {
-        _log( $LOG_LEVEL_FATAL, 'Failed to remove test view' );
-    }
-
-    $sth->finish();
-    return $query_tree;
+    return unless( $parse_tree_obj );
+    return $parse_tree_obj;
 }
 
-sub get_parse_tree_obj($)
+sub find_table_aliases($$$$)
 {
-    my( $pg_node_tree ) = validate_pos(
+    my( $handle, $relcache, $definition, $filter_tables ) = validate_pos(
         @_,
-        { type => SCALAR },
+        { type => OBJECT   },
+        { type => HASHREF  },
+        { type => SCALAR   },
+        { type => ARRAYREF },
     );
 
-    if( substr( $pg_node_tree, 0, 1 ) eq '(' && substr( $pg_node_tree, 1, 1 ) eq '{' )
-    {
-        # rip off outer '({' and '})'
-        $pg_node_tree = substr( $pg_node_tree, 2, length( $pg_node_tree ) - 4 );
-    }
+    my $parse_tree_obj = get_query_parsetree( $handle, $definition );
 
-    my @parse_tree_chars = split( /\s/, $pg_node_tree );
-    my $output = {};
-    my @nest_stack = [];
-    foreach my $word( @parse_tree_chars )
-    {
-        if( $word =~ /^[A-Z]+$/ || $word =~ /^{[A-Z]+$/ || $word =~ /^\({[A-Z]+$/ )
-        {
-            my $cleaned_word = $word;
-            $cleaned_word =~ s/\(//g;
-            $cleaned_word =~ s/{//g;
-            print "Found key $cleaned_word\n";
-            my $temp_hr = $output;
-            foreach my $nested_key( @nest_stack )
-            {
-                $temp_hr = $temp_hr->{$nested_key};
-            }
-
-            
-            $temp_hr->{$word} = {};
-        }
-    }
-
-    print Dumper( $output );
-}
-
-sub find_table_aliases($$)
-{
-    my( $handle, $definition ) = validate_pos(
-        @_,
-        { type => OBJECT },
-        { type => SCALAR },
-    );
-
-    my $parse_tree = get_query_parsetree( $handle, $definition );
-    my $parse_tree_obj = get_parse_tree_obj( $parse_tree );
+    return unless( defined $parse_tree_obj );
+    # XXX
 }
 
 sub get_worker_list($)
@@ -1055,7 +1008,7 @@ sub worker_entrypoint($$$$)
         check_ct_exists( $handle, $cache_table_schema, $cache_table_name, $cache_table_definition );
         my $relcache = get_relcache( $handle, $filter_tables );
         print Dumper( $relcache );
-        my $parse_tree = find_table_aliases( $handle, $cache_table_definition );
+        my $parse_tree = find_table_aliases( $handle, $relcache, $cache_table_definition, $filter_tables );
 
         print Dumper( $parse_tree );
     }
