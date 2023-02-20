@@ -89,30 +89,27 @@ Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
 END_SQL
 
 Readonly::Scalar my $FILTER_TABLE_OID_CACHE => <<END_SQL;
-    SELECT n.nspname::VARCHAR || '.' || c.relname::VARCHAR AS name,
-           c.oid
+    SELECT n.nspname::VARCHAR AS schema_name,
+           c.relname::VARCHAR AS obj_name,
+           c.oid,
+           'r' AS type
       FROM pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
-     WHERE n.nspname::VARCHAR || '.' || c.relname::VARCHAR = ANY( ARRAY[ __BINDPOINTS__ ]::VARCHAR[] )
+       AND n.nspname::VARCHAR != 'pg_toast'
+     UNION ALL
+    SELECT n.nspname::VARCHAR AS schema_name,
+           p.proname::VARCHAR AS obj_name,
+           p.oid,
+           'f' AS type
+      FROM pg_proc p
+INNER JOIN pg_namespace n
+        ON n.oid = p.pronamespace
+       AND n.nspname::VARCHAR != 'pg_toast'
 END_SQL
 
-Readonly::Scalar my $CREATE_TEST_VIEW => <<END_SQL;
-    CREATE TEMPORARY VIEW _pgctblmgr_test AS
-    (
-        __DEFINITION__
-    )
-END_SQL
-
-Readonly::Scalar my $GET_TEST_VIEW_PARSE_TREE => <<"END_SQL";
-    SELECT ${SCHEMA_NAME}.fn_get_parse_tree( r.ev_action )::JSONB AS tree
-      FROM pg_catalog.pg_rewrite r
-     WHERE r.rulename = '_RETURN'
-       AND r.ev_class = '_pgctblmgr_test'::REGCLASS::OID
-END_SQL
-
-Readonly::Scalar my $DROP_TEST_VIEW => <<END_SQL;
-    DROP VIEW IF EXISTS _pgctblmgr_test
+Readonly::Scalar my $GET_PARSE_TREE => <<"END_SQL";
+    SELECT ${SCHEMA_NAME}.fn_get_parse_tree( \$_\$__DEFINITION__\$_\$ )::JSONB AS tree
 END_SQL
 
 Readonly::Scalar my $CHECK_CACHE_TABLE_EXISTS => <<END_SQL;
@@ -445,21 +442,16 @@ sub try_query($$;$)
     return $sth;
 }
 
-sub get_relcache($$)
+sub get_relcache($)
 {
-    my( $handle, $filter_tables ) = validate_pos(
+    my( $handle ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => ARRAYREF },
     );
 
     my $query = $FILTER_TABLE_OID_CACHE;
-    my $bindpoints = '?,' x ( scalar( @$filter_tables ) - 1 );
-    $bindpoints .= '?';
 
-    $query =~ s/__BINDPOINTS__/$bindpoints/;
-
-    my $sth = try_query( $handle, $query, $filter_tables );
+    my $sth = try_query( $handle, $query, undef );
 
     unless( $sth )
     {
@@ -469,10 +461,14 @@ sub get_relcache($$)
     my $cache = {};
     while( my $row = $sth->fetchrow_hashref() )
     {
-        my $name = $row->{name};
-        my $oid  = $row->{oid};
-        $cache->{$name} = $oid;
+        my $schema = $row->{schema_name};
+        my $name   = $row->{obj_name};
+        my $oid    = $row->{oid};
+        $cache->{rels}->{$schema}->{$name} = $oid if( $row->{type} eq 'r' );
+        $cache->{func}->{$schema}->{$name} = $oid if( $row->{type} eq 'f' );
     }
+
+    $sth->finish();
 
     return $cache;
 }
@@ -716,7 +712,7 @@ sub get_query_parsetree($$)
         { type => SCALAR },
     );
 
-    my $get_parse_tree_q = $GET_TEST_VIEW_PARSE_TREE;
+    my $get_parse_tree_q = $GET_PARSE_TREE;
     $get_parse_tree_q =~ s/__DEFINITION__/$definition/;
 
     my $sth = try_query( $handle, $get_parse_tree_q, undef );

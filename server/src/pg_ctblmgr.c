@@ -2152,6 +2152,25 @@ static char * enum_NodeTag( NodeTag nt )
     return NULL;
 }
 
+static char * enum_SetOperation( SetOperation so )
+{
+    switch( so )
+    {
+        case SETOP_NONE:
+            return "NONE";
+        case SETOP_UNION:
+            return "UNION";
+        case SETOP_INTERSECT:
+            return "INTERSECT";
+        case SETOP_EXCEPT:
+            return "EXCEPT";
+        default:
+            return "UNKNOWN";
+    }
+
+    return NULL;
+}
+
 // Node -> JSON fragment helpers
 static void Aggref_out( StringInfo str, Aggref * node )
 {
@@ -5113,7 +5132,7 @@ static void SelectStmt_out( StringInfo str, SelectStmt * node )
         Node_out( str, node->lockingClause );
     }
 
-    appendStringInfo( str, ",\"op\":%d", node->op ); // enum - SetOperation
+    appendStringInfo( str, ",\"op\":\"%s\"", enum_SetOperation( node->op ) );
     appendStringInfo( str, ",\"all\":%s", node->all ? "true" : "false" );
     
     if( node->larg )
@@ -5140,7 +5159,7 @@ static void SeqScan_out( StringInfo str, SeqScan * node )
 static void SetOperationStmt_out( StringInfo str, SetOperationStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"SETOPERATIONSTMT\"" );
-    appendStringInfo( str, ",\"op\":%d", node->op ); // enum - SetOperation
+    appendStringInfo( str, ",\"op\":\"%s\"", enum_SetOperation( node->op ) );
     appendStringInfo( str, ",\"all\":%s", node->all ? "true" : "false" );
     appendStringInfo( str, ",\"larg\":" );
     Node_out( str, node->larg );
@@ -5412,8 +5431,8 @@ static void Token_out( StringInfo str, char * s )
     appendStringInfoChar( str, '"' );
     // Treat tokens similar to read.c (nodeRead wrapper or underlying pg_strtok function)
     if(
-            *s == '<'
-         || *s == '\"'
+//            *s == '<'
+            *s == '\"'
          || isdigit( ( unsigned char ) *s )
          || (
                 (*s == '+' || *s == '-' )

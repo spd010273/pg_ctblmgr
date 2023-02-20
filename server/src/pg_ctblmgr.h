@@ -195,7 +195,7 @@ static char * enum_AggStrategy( AggStrategy );
 static char * enum_BoolTestType( BoolTestType );
 static char * enum_ParamKind( ParamKind );
 static char * enum_NodeTag( NodeTag );
-
+static char * enum_SetOperation( SetOperation );
 static void Aggref_out( StringInfo, Aggref * );
 static void Agg_out( StringInfo, Agg * );
 static void Alias_out( StringInfo, Alias * );
