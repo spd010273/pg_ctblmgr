@@ -5,11 +5,12 @@ use utf8;
 use warnings;
 
 use DBI;
-use JSON;
+use JSON::XS; # Can't use JSON:PP because it tried to redefine simple bools as a blessed class that other packages aren't aware of
 use Readonly;
 use Params::Validate qw( :all );
 use Data::Dumper;
 use English qw( -no_match_vars );
+use Data::Search;
 
 Readonly::Scalar my $DEBUG                  => 1;
 Readonly::Scalar my $CLEAN_UP               => 0; # Emergency shm cleanup
@@ -56,10 +57,32 @@ END_SQL
 my $CONNECTION_MAP->{connection_string} = 'dbi:Pg:dbname=__pgc_testing__;host=localhost;port=5432';
 $CONNECTION_MAP->{user_name} = 'postgres';
 my $definition = <<END_SQL;
+WITH tt_foo AS
+(
+    SELECT c.bar
+      FROM public.tb_c c
+),
+tt_bar AS
+(
+    SELECT b.bar
+      FROM tb_b b
+      JOIN public.tb_a a
+        ON a.baz = b.baz
+     WHERE a.baz = 2
+       AND TRUE
+       AND a.bar = 1
+)
 SELECT a.foo
   FROM tb_a a
   JOIN tb_b b
     ON b.bar = a.bar
+  JOIN tb_c c
+    ON c.baz = ANY( ARRAY[ 1,2,3] )
+  JOIN tt_bar ttb
+    ON ttb.bar = a.bar
+  JOIN tt_foo ttf
+    ON ttf.bar = a.bar
+ WHERE a.baz IS NOT NULL
  LIMIT 10
 END_SQL
 
@@ -185,7 +208,7 @@ sub get_query_parsetree($$)
     my $query_tree = $defrow->{tree};
     $sth->finish();
 
-    my $parse_tree_obj = from_json( $query_tree );
+    my $parse_tree_obj = decode_json( $query_tree );
     return unless( $parse_tree_obj );
 
     if( ref( $parse_tree_obj ) eq 'ARRAY' )
@@ -207,12 +230,11 @@ sub get_query_parsetree($$)
     return $parse_tree_obj;
 }
 
-sub get_relcache($$)
+sub get_relcache($)
 {
-    my( $handle, $filter_tables ) = validate_pos(
+    my( $handle ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => ARRAYREF },
     );
 
     my $query = $FILTER_TABLE_OID_CACHE;
@@ -330,11 +352,7 @@ sub add_table_mapping($$$$$$$;$)
 
     my $obj_data = resolve_relation( $relcache, $obj_name );
 
-    unless( $obj_data )
-    {
-        warn "Unable to resolve relation '$obj_name' in relcache";
-        return;
-    }
+    return unless( $obj_data ); # Likely a CTE
 
     $obj_name = $obj_data->{name};
     my $obj_schema = $obj_data->{schema};
@@ -418,7 +436,31 @@ sub get_joined_rels($$$$)
     if( defined( $json_fragment->{location} ) )
     {
         $location = $json_fragment->{location};
-        print "Found location $location for $json_fragment->{name}\n";
+    }
+
+    my $supplemental_location;
+
+    if( defined( $json_fragment->{quals} ) )
+    {
+        my $old_warn = $SIG{__WARN__};
+        $SIG{__WARN__} = sub { };
+        my @locs = datasearch( data => $json_fragment->{quals}, search => 'keys', find => qr/location/ );
+        $SIG{__WARN__} = $old_warn;
+        if( scalar( @locs ) > 0 )
+        {
+            foreach my $loc( @locs )
+            {
+                if( !defined( $supplemental_location ) || $supplemental_location < $loc )
+                {
+                    $supplemental_location = $loc;
+                }
+            }
+        }
+    }
+
+    if( defined( $supplemental_location ) && $supplemental_location > $location )
+    {
+        $location = $supplemental_location;
     }
 
     if( defined $json_fragment && defined( $json_fragment->{larg} ) )
@@ -432,6 +474,7 @@ sub get_joined_rels($$$$)
 
         if( defined( $json_fragment->{rarg} ) )
         {
+
             if( $json_fragment->{rarg}->{name} eq 'RANGEFUNCTION' )
             { # SRF Function
                 # According to parsenodes.h - each element of this List is a two element sublist
@@ -453,13 +496,18 @@ sub get_joined_rels($$$$)
                     $function_alias = $json_fragment->{rarg}->{alias}->{aliasname};
                 }
 
+                if( $location < $function_call->{rarg}->{location} )
+                {
+                    $location = $function_call->{rarg}->{location};
+                }
+
                 push(
                     @$from_list,
                     {
                         $function_alias => {
                             obj      => $function_name,
                             type     => 'FUNCTION',
-                            location => $function_call->{rarg}->{location},
+                            location => $location,
                         }
                     }
                 );
@@ -489,13 +537,18 @@ sub get_joined_rels($$$$)
                     $alias = $json_fragment->{rarg}->{alias}->{aliasname};
                 }
 
+                if( $location < $json_fragment->{rarg}->{location} )
+                {
+                    $location = $json_fragment->{rarg}->{location};
+                }
+
                 push(
                     @$from_list,
                     {
                         $alias => {
                             obj      => $right_relation,
                             type     => 'RELATION',
-                            location => $json_fragment->{rarg}->{location},
+                            location => $location,
                         }
                     }
                 );
@@ -512,6 +565,11 @@ sub get_joined_rels($$$$)
             elsif( $json_fragment->{rarg}->{name} eq 'RANGESUBSELECT' )
             {
                 my $alias = $json_fragment->{rarg}->{alias}->{aliasname};
+                if( $location < $json_fragment->{rarg}->{location} )
+                {
+                    $location = $json_fragment->{rarg}->{location};
+                }
+
                 push(
                     @$from_list,
                     {
@@ -523,7 +581,7 @@ sub get_joined_rels($$$$)
                                 $relcache
                             ),
                             type     => 'SUBSELECT',
-                            location => $json_fragment->{rarg}->{location},
+                            location => $location,
                         }
                     }
                 );
@@ -776,7 +834,9 @@ sub parse_from_clause($$$$)
         { type => HASHREF },
     );
 
-    return &get_joined_rels( $json_fragment->[0], $parent, $table_mapping, $relcache );
+    my $result = &get_joined_rels( $json_fragment->[0], $parent, $table_mapping, $relcache );
+
+    return $result;
 }
 
 sub parse_select($$$$)
@@ -788,7 +848,7 @@ sub parse_select($$$$)
         { type => HASHREF },
         { type => HASHREF },
     );
-    
+
     #The conditionals around location here are to narrow down the location (or possible location)
     # of a WHERE clause
     if( $json_fragment->{name} ne 'SELECTSTMT' )
@@ -883,7 +943,45 @@ sub parse_select($$$$)
             else
             {
                 $where_start = $json_fragment->{whereClause}->{location};
+
+                if( $where_start == -1 )
+                {
+                    my $old_warn = $SIG{__WARN__};
+                    $SIG{__WARN__} = sub { };
+                    my @locs = datasearch( data => $json_fragment->{whereClause}, search => 'keys', find => qr/location/ );
+                    $SIG{__WARN__} = $old_warn;
+                    my $new_where_start;
+                    foreach my $loc( @locs )
+                    {
+                        next if( $loc == -1 );
+                        if( !defined( $new_where_start ) || $loc < $new_where_start )
+                        {
+                            $new_where_start = $loc;
+                        }
+                    }
+
+                    $where_start = $new_where_start;
+                }
             }
+        }
+        else
+        {
+            my $old_warn = $SIG{__WARN__};
+            $SIG{__WARN__} = sub { };
+            my @locs = datasearch( data => $json_fragment->{whereClause}, search => 'keys', find => qr/location/ );
+            $SIG{__WARN__} = $old_warn;
+            my $new_where_start;
+
+            foreach my $loc( @locs )
+            {
+                next if( $loc == -1 );
+                if( !defined( $new_where_start ) || $loc < $new_where_start )
+                {
+                    $new_where_start = $loc;
+                }
+            }
+
+            $where_start = $new_where_start;
         }
     }
     else
@@ -903,7 +1001,7 @@ sub parse_select($$$$)
 
         $where_start = $max_location;
     }
-     
+
     # it's important we set the where_start after parsing the whereclause,
     # if it exists, as its where start takes precedence but the logic is
     # counter-intuitive
@@ -962,7 +1060,7 @@ sub parse_select($$$$)
         $statement_info->{has_sort} = 1;
 
         if(
-               defined( $json_fragment->{sortClause}->[0]->{location} ) 
+               defined( $json_fragment->{sortClause}->[0]->{location} )
             && $json_fragment->{sortClause}->[0]->{location} > 0
           )
         {
@@ -1019,9 +1117,23 @@ sub parse_select($$$$)
 
     # determine the location of the select statement based on the location
     # of the targetList ResTarget entries (if they exist)
+    my $select_location;
     my $min_location;
     if( defined( $json_fragment->{targetList} ) )
     { # we're always expected to enter this
+        my $old_warn = $SIG{__WARN__};
+        $SIG{__WARN__} = sub { };
+        my @locs = datasearch( data => $json_fragment->{targetList}, search => 'keys', find => qr/location/ );
+        $SIG{__WARN__} = $old_warn;
+
+        foreach my $loc( @locs )
+        {
+            if( !defined( $select_location ) || $select_location > $loc )
+            {
+                $select_location = $loc;
+            }
+        }
+
         foreach my $restarget( @{$json_fragment->{targetList}} )
         {
             my $location = $restarget->{location};
@@ -1048,6 +1160,33 @@ sub parse_select($$$$)
         $statement_info->{where_end} = $where_end;
     }
 
+    $table_mapping->{BINDS}->{$where_start} = {
+        start           => $where_start,
+        end             => $where_end,
+        parent          => $parent,
+        has_where       => $statement_info->{has_where} // 0,
+        has_limit       => $statement_info->{has_limit} // 0,
+        has_offset      => $statement_info->{has_offset} // 0,
+        has_group       => $statement_info->{has_group} // 0,
+        has_sort        => $statement_info->{has_sort} // 0,
+        has_having      => $statement_info->{has_having} // 0,
+        select_location => $select_location,
+        rels            => {},
+    };
+
+    foreach my $rel( @{$statement_info->{from}} )
+    {
+        foreach my $alias( keys %$rel )
+        {
+            my $obj_name = $rel->{$alias}->{obj};
+            my $qual = resolve_relation( $relcache, $obj_name );
+            next unless( defined $qual->{schema} && defined $qual->{name} );
+            my $schema = $qual->{schema};
+            my $name   = $qual->{name};
+            $table_mapping->{BINDS}->{$where_start}->{rels}->{$schema}->{$alias}->{$name} = 1;
+        }
+    }
+
     return $statement_info;
 }
 
@@ -1065,15 +1204,12 @@ sub find_table_aliases($$$$$)
     my $parse_tree_obj = get_query_parsetree( $handle, $definition );
 
     return unless( defined $parse_tree_obj );
-    #print Dumper( $parse_tree_obj );
 
     # Sanity check top-level-node
     unless( defined $parse_tree_obj && ref( $parse_tree_obj ) eq 'HASH' )
     {
         die( "Invalid structure returned\n" );
     }
-
-    print Dumper( $parse_tree_obj );
 
     unless(
                 exists( $parse_tree_obj->{stmt} )
@@ -1103,7 +1239,8 @@ sub apply_filters($$$$)
     # Lets use the filters we've received and search for the tables, their aliases, and the objects they are present in within the query,
     # then attempt to modify the query such that we habe a filtered query
     # Phase I will result in a keyed array telling us which CTE or query will need a filter applied
-    my $filter_locations = {};
+    my $filter_entries = {};
+
     foreach my $schema( keys %$filters )
     { #iterate over changed schema
         # skip if we don't have a table mapping - change doesn't appear in the query
@@ -1123,41 +1260,17 @@ sub apply_filters($$$$)
 
             foreach my $alias( keys %{$table_mapping->{RELS}->{$schema}->{$table}} )
             {
-                my $filter_entries = [];
-
                 foreach my $key( keys %{$filters->{$schema}->{$table}} )
                 {
                     foreach my $changed_key( @{$filters->{$schema}->{$table}->{$key}} )
                     {
-                        my $entry = "$alias\.$table = $changed_key";
-                        push( @$filter_entries, $entry );
-                    }
-
-                    foreach my $filter_location( @{$table_mapping->{RELS}->{$schema}->{$table}->{$alias}} )
-                    {
-                        unless( defined( $filter_location->{parent} ) ) # undef == main query
+                        my $found = 0;
+                        # check that the changed key actually applies to what we're filtering
+                        foreach my $filter_location( @{$table_mapping->{RELS}->{$schema}->{$table}->{$alias}} )
                         {
-                            if( !defined( $filter_locations->{MAIN} ) )
-                            {
-                                $filter_locations->{MAIN}->{where} = $filter_entries;
-                                $filter_locations->{MAIN}->{location} = $filter_location->{location};
-                            }
-                            else
-                            {
-                                push( @{$filter_locations}->{MAIN}->{where}, @$filter_entries );
-                            }
-                        }
-                        else
-                        {
-                            if( !defined( $filter_locations->{$filter_location->{parent}} ) )
-                            {
-                                $filter_locations->{$filter_location->{parent}}->{where} = $filter_entries;
-                                $filter_locations->{$filter_location->{parent}}->{location} = $filter_location->{location};
-                            }
-                            else
-                            {
-                                push( @{$filter_locations->{$filter_location->{parent}}->{where}}, @$filter_entries );
-                            }
+                            my $parent = $filter_location->{parent};
+                            $parent = 'MAIN' if( !defined( $parent ) );
+                            push( @{$filter_entries->{$parent}}, "$alias.$key = $changed_key" );
                         }
                     }
                 }
@@ -1165,62 +1278,96 @@ sub apply_filters($$$$)
         }
     }
 
-    #print Dumper( $filter_locations );
-    #print Dumper( $query_data );
+    my $where_expressions = {};
+    my @starts = sort { $b <=> $a } keys( %{$table_mapping->{BINDS}} );
 
-    my $where_fragments = {};
-    foreach my $filter_location( keys %{$filter_locations} )
+    # Assmple where expressions structure keyed based on the bind position
+    # for much easier substitution later
+    foreach my $parent_key( keys %$filter_entries )
     {
-        my $where_fragment = '( ( ' . join( ' ) OR ( ', @{$filter_locations->{$filter_location}->{where}} ) . ' ) )';
-
-        if( $filter_location  eq 'MAIN' )
-        {   #note for later - for the main query - we may have to store the location of the closest clause to the where to assist the replcement later
-            if( $query_data->{has_where} )
+        foreach my $start( @starts )
+        {
+            if(
+                   (
+                        defined( $table_mapping->{BINDS}->{$start}->{parent} )
+                     && $parent_key eq $table_mapping->{BINDS}->{$start}->{parent}
+                   ) # CTE
+                || ( $parent_key eq 'MAIN' && !defined( $table_mapping->{BINDS}->{$start}->{parent} ) ) # main query
+              )
             {
-                $where_fragment = ' AND ' . $where_fragment;
+                if( $table_mapping->{BINDS}->{$start}->{has_where} )
+                {
+                    $where_expressions->{$start} = ' AND ( ( ' . join( ' ) OR ( ', @{$filter_entries->{$parent_key}} ) . ' ) ) ';
+                }
+                else
+                {
+                    $where_expressions->{$start} = ' WHERE ( ( ' . join( ' ) OR ( ', @{$filter_entries->{$parent_key}} ) . ' ) ) ';
+                }
+            }
+        }
+    }
+
+    my $new_q = $definition;
+    my $index = 0;
+
+    foreach my $bind_start( @starts )
+    {
+        my $bind_end = $table_mapping->{BINDS}->{$bind_start}->{end};
+        my $next_cte_name;
+
+        if( $index - 1 >= 0 )
+        {
+            $next_cte_name = $table_mapping->{BINDS}->{$starts[$index-1]}->{parent};
+        }
+
+        if( !defined( $bind_end ) )
+        {
+            my $parent = $table_mapping->{BINDS}->{$bind_start}->{parent};
+            if( !defined( $parent ) || $index == 0 )
+            {
+                $bind_end = length( $new_q );
             }
             else
             {
-                $where_fragment = ' WHERE ' . $where_fragment;
+                # find the location of the proceeding select statement
+                my $next = $starts[$index - 1];
+                $bind_end = $table_mapping->{BINDS}->{$next}->{select_location};
             }
         }
+
+        my $bind_location = substr( $new_q, $bind_start, $bind_end - $bind_start );
+
+        # Find the end of the last expression (if has_where) or the last join predicate (if !has_where)
+        my $where_expression = $where_expressions->{$bind_start};
+        my $is_in_cte = defined( $table_mapping->{BINDS}->{$bind_start}->{parent} );
+        my $where_proceeding_clause_mark;
+        if(    $table_mapping->{BINDS}->{$bind_start}->{has_group}  ) { $where_proceeding_clause_mark = 'group\s+by';                 }
+        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_having} ) { $where_proceeding_clause_mark = 'having';                     }
+        # TODO add WINDOW
+        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_sort}   ) { $where_proceeding_clause_mark = 'order\s+by';                 }
+        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_limit}  ) { $where_proceeding_clause_mark = 'limit';                      }
+        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_offset} ) { $where_proceeding_clause_mark = 'offset';                     }
+        # TODO add FETCH
+        # TODO add FOR <lock statement>
+        elsif( $is_in_cte && defined( $next_cte_name )              ) { $where_proceeding_clause_mark = '\)\s*,\s*' . $next_cte_name; }
+        elsif( $is_in_cte && !defined( $next_cte_name )             ) { $where_proceeding_clause_mark = '\)\s*select';                }
         else
         {
-            # need to traverse $query_data to determine if the given CTE / subquery has a WHERE
+            warn "Could not determine proceeding where clause mark\n";
+            return;
         }
 
-        $where_fragments->{$filter_location} = {
-            where => $where_fragment,
-            location => $filter_locations->{$filter_location}->{location}
-        };
+        my $preceeding_query = substr( $new_q, 0, $bind_start );
+        my $proceeding_query = substr( $new_q, $bind_end, length( $new_q ) - $bind_end );
+        my $substituted_where = $bind_location;
+        $substituted_where =~ s/($where_proceeding_clause_mark)/${where_expression}$1/i;
+        $new_q = $preceeding_query . $substituted_where . $proceeding_query;
+
+        $index++;
     }
 
-    foreach my $where_fragment( keys %$where_fragments )
-    {
-        my $portion = '';
-
-        if( $where_fragment eq 'MAIN' )
-        {
-            # locate the last of the CTEs so that we can slice the main query out
-            my $largest_location = 0;
-
-            foreach my $cte( keys %{$table_mapping->{CTES}} )
-            {
-                if( $table_mapping->{CTES}->{$cte}->{location} > $largest_location )
-                {
-                    $largest_location = $table_mapping->{CTES}->{$cte}->{location};
-                }
-            }
-            
-            $portion = substr( $definition, $largest_location, length( $definition ) );
-
-            print "$portion\n";
-        }
-    }
-
-    return;
+    return $new_q;
 }
-
 my $handle = DBI->connect( $CONNECTION_MAP->{connection_string}, $CONNECTION_MAP->{user_name}, undef );
 
 unless( $handle )
@@ -1230,9 +1377,9 @@ unless( $handle )
 
 my $test_change = { 'public' => { 'tb_a' => { 'foo' => [ 1 ] }, 'tb_b' => { 'foo'=>[2,3]}, 'tb_c' => {'foo'=>[4,5]} } };
 my $filter_tables = [ 'public.tb_a', 'public.tb_b', 'public.tb_c' ];
-my $relcache = get_relcache( $handle, $filter_tables );
+my $relcache = get_relcache( $handle );
 my $table_mapping = {};
 my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
-print Dumper( $data );
-#my $q = apply_filters( $data, $table_mapping, $definition, $test_change );
 #print Dumper( $table_mapping );
+my $substituted_query = apply_filters( $data, $table_mapping, $definition, $test_change );
+print "$substituted_query\n";
