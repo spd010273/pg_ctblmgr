@@ -50,6 +50,20 @@ INNER JOIN pg_namespace n
        AND n.nspname::VARCHAR != 'pg_toast'
 END_SQL
 
+Readonly::Scalar my $GET_RELATION_TYPEMODS => <<END_SQL;
+    SELECT a.attname::VARCHAR AS column,
+           t.typname::VARCHAR AS type
+      FROM pg_class c
+INNER JOIN pg_attribute a
+        ON a.attrelid = c.oid
+INNER JOIN pg_type t
+        ON t.oid = a.atttypid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+     WHERE c.relname::VARCHAR = ?
+END_SQL
+
 Readonly::Scalar my $GET_TEST_VIEW_PARSE_TREE => <<"END_SQL";
     SELECT ${SCHEMA_NAME}.fn_get_parse_tree( \$_\$__DEFINITION__\$_\$ )::JSONB AS tree
 END_SQL
@@ -266,6 +280,53 @@ sub get_relcache($)
 
 
     return $cache;
+}
+
+sub get_typmods($$$;$)
+{
+    my( $handle, $schema, $table, $column ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR | UNDEF, optional => 1 },
+    );
+
+    my $query = $GET_RELATION_TYPEMODS;
+    my @binds;
+
+    push( @binds, $schema );
+    push( @binds, $table );
+
+    if( defined( $column ) )
+    {
+        $query .= 'AND a.attname::VARCHAR = ?';
+        push( @binds, $column );
+    }
+
+    my $sth = try_query( $handle, $query, \@binds );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_FATAL, "Failed to get typmods for '$table'" );
+    }
+
+    if( $sth->rows() > 0 )
+    {
+        my $ret = { };
+
+        while( my $row = $sth->fetchrow_hashref() )
+        {
+            my $column = $row->{column};
+            my $type   = $row->{type};
+
+            $ret->{$column} = $type;
+        }
+
+        return $ret;
+    }
+
+    return;
 }
 
 sub resolve_relation($$)
@@ -1257,10 +1318,11 @@ sub find_table_aliases($$$$$)
     return $query_data;
 }
 
-sub apply_filters($$$$)
+sub apply_filters($$$$$)
 {
-    my( $query_data, $table_mapping, $definition, $filters ) = validate_pos(
+    my( $handle, $query_data, $table_mapping, $definition, $filters ) = validate_pos(
         @_,
+        { type => OBJECT },
         { type => HASHREF },
         { type => HASHREF },
         { type => SCALAR },
@@ -1289,11 +1351,37 @@ sub apply_filters($$$$)
                     {
                         foreach my $key( keys %{$filters->{$schema}->{$table_name}} )
                         {
-                            foreach my $value( @{$filters->{$schema}->{$table_name}->{$key}} )
+                            my $typmod = get_typmods( $handle, $schema, $table_name, $key );
+
+                            if( !defined( $typmod ) )
                             {
-                                # TODO: Get typmod cache and use that to correctly bind stuff
-                                push( @$where_entries, "${alias}.${key} = ${value}" );
+                                warn "Invalid column for table $schema.$table_name - $key. Column appears to have no type\n";
+                                next;
                             }
+
+                            my $type = $typmod->{$key};
+                            my $where_entry = "${alias}.${key} ";
+                            if( scalar( @{$filters->{$schema}->{$table_name}->{$key}} ) > 1 )
+                            {
+                                my $values = [];
+                                foreach my $value( @{$filters->{$schema}->{$table_name}->{$key}} )
+                                {
+                                    push( @$values, "( '${value}' )::$type" );
+                                }
+
+                                $where_entry .= 'IN( ' . join( ', ', @$values ) .' ) ';
+                            }
+                            elsif( scalar( @{$filters->{$schema}->{$table_name}->{$key}} ) > 0 )
+                            {
+                                my $value = $filters->{$schema}->{$table_name}->{$key}->[0];
+                                $where_entry .= "= ( '${value}' )::$type";
+                            }
+                            else
+                            {
+                                next;
+                            }
+
+                            push( @$where_entries, $where_entry );
                         }
                     }
 
@@ -1421,5 +1509,5 @@ my $table_mapping = {};
 my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
 #print Dumper( $data );
 #print Dumper( $table_mapping );
-my $substituted_query = apply_filters( $data, $table_mapping, $definition, $test_change );
+my $substituted_query = apply_filters( $handle, $data, $table_mapping, $definition, $test_change );
 print "$substituted_query\n";
