@@ -59,8 +59,14 @@ $CONNECTION_MAP->{user_name} = 'postgres';
 my $definition = <<END_SQL;
 WITH tt_foo AS
 (
-    SELECT c.bar
-      FROM public.tb_c c
+    WITH tt_union_test AS
+    (
+        SELECT c.bar FROM public.tb_c c
+         UNION
+        SELECT b.bar FROM public.tb_b b
+    )
+        SELECT bar
+          FROM tt_union_test
 ),
 tt_bar AS
 (
@@ -688,7 +694,7 @@ sub get_joined_rels($$$$)
     }
 }
 
-sub parse_union($$$$)
+sub parse_union($$$$$;$)
 {
     # Unions are expressed in node trees as
     # rarg => { fromClause => [] },
@@ -696,12 +702,14 @@ sub parse_union($$$$)
     #   rarg => { fromClause => [] ),
     #   larg => ...
     # }
-    my( $json_fragment, $parent, $table_mapping, $relcache ) = validate_pos(
+    my( $json_fragment, $parent, $table_mapping, $relcache, $is_rarg, $union_flag ) = validate_pos(
         @_,
         { type => HASHREF },
         { type => SCALAR | UNDEF },
         { type => HASHREF },
         { type => HASHREF },
+        { type => SCALAR },
+        { type => SCALAR, optional => 1 },
     );
 
     if(
@@ -710,7 +718,13 @@ sub parse_union($$$$)
       )
     {
         # Regular union element - we're likely at an end element in the union tree
-        return [ parse_select( $json_fragment, $parent, $table_mapping, $relcache ) ];
+        if( $is_rarg )
+        {
+            # for anchoring unions (final where clause) we need to know if this is the last union member
+            return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, 'NONE' ) ];
+        }
+
+        return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) ];
     }
     elsif(
               defined( $json_fragment->{larg} )
@@ -722,14 +736,17 @@ sub parse_union($$$$)
             $json_fragment->{larg},
             $parent,
             $table_mapping,
-            $relcache
+            $relcache,
+            0,
+            $json_fragment->{op}
         );
 
         my $union_from_b = &parse_union(
             $json_fragment->{rarg},
             $parent,
             $table_mapping,
-            $relcache
+            $relcache,
+            1
         );
 
         if(
@@ -747,12 +764,13 @@ sub parse_union($$$$)
         return [ $union_from_a, $union_from_b ];
     }
     elsif( $json_fragment->{name} eq 'SELECTSTMT' )
-    {
+    { # catchall
         return &parse_select(
             $json_fragment,
             $parent,
             $table_mapping,
-            $relcache
+            $relcache,
+            $union_flag
         );
     }
     else
@@ -839,16 +857,19 @@ sub parse_from_clause($$$$)
     return $result;
 }
 
-sub parse_select($$$$)
+sub parse_select($$$$;$)
 {
-    my( $json_fragment, $parent, $table_mapping, $relcache ) = validate_pos(
+    my( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) = validate_pos(
         @_,
         { type => HASHREF },
         { type => SCALAR | UNDEF },
         { type => HASHREF },
         { type => HASHREF },
+        { type => SCALAR | UNDEF, optional => 1 },
     );
 
+    my $is_union_member;
+    $is_union_member = $union_flag if( defined( $union_flag ) );
     #The conditionals around location here are to narrow down the location (or possible location)
     # of a WHERE clause
     if( $json_fragment->{name} ne 'SELECTSTMT' )
@@ -879,7 +900,8 @@ sub parse_select($$$$)
             $json_fragment,
             $parent,
             $table_mapping,
-            $relcache
+            $relcache,
+            0
         );
     }
 
@@ -986,20 +1008,27 @@ sub parse_select($$$$)
     }
     else
     {
-        # We need to find the END of the from clause to determine where the WHERE clause should go
-        my $max_location = 0;
-        foreach my $from( @{$statement_info->{from}} )
+        if( defined( $statement_info->{union} ) )
         {
-            foreach my $alias( keys %$from )
+            $where_start = -1;
+        }
+        else
+        {
+            # We need to find the END of the from clause to determine where the WHERE clause should go
+            my $max_location = 0;
+            foreach my $from( @{$statement_info->{from}} )
             {
-                if( $from->{$alias}->{location} > $max_location )
+                foreach my $alias( keys %$from )
                 {
-                    $max_location = $from->{$alias}->{location};
+                    if( $from->{$alias}->{location} > $max_location )
+                    {
+                        $max_location = $from->{$alias}->{location};
+                    }
                 }
             }
-        }
 
-        $where_start = $max_location;
+            $where_start = $max_location;
+        }
     }
 
     # it's important we set the where_start after parsing the whereclause,
@@ -1170,6 +1199,7 @@ sub parse_select($$$$)
         has_group       => $statement_info->{has_group} // 0,
         has_sort        => $statement_info->{has_sort} // 0,
         has_having      => $statement_info->{has_having} // 0,
+        is_union        => $is_union_member,
         select_location => $select_location,
         rels            => {},
     };
@@ -1221,6 +1251,7 @@ sub find_table_aliases($$$$$)
     }
 
     my $statement = $parse_tree_obj->{stmt};
+    #print Dumper( $statement );
     my $query_data = parse_select( $statement, undef, $table_mapping, $relcache );
 
     return $query_data;
@@ -1239,79 +1270,66 @@ sub apply_filters($$$$)
     # Lets use the filters we've received and search for the tables, their aliases, and the objects they are present in within the query,
     # then attempt to modify the query such that we habe a filtered query
     # Phase I will result in a keyed array telling us which CTE or query will need a filter applied
-    my $filter_entries = {};
+    my $where_expressions = {};
 
-    foreach my $schema( keys %$filters )
-    { #iterate over changed schema
-        # skip if we don't have a table mapping - change doesn't appear in the query
-        unless( defined( $table_mapping->{RELS}->{$schema} ) )
+    foreach my $position( keys %{$table_mapping->{BINDS}} )
+    {
+        next if( $position < 0 );
+
+        my $RELS          = $table_mapping->{BINDS}->{$position}->{rels};
+        my $where_entries = [];
+
+        foreach my $schema( keys %$RELS )
         {
-            warn "Found change to a schema not in the query!\n";
-            next;
-        }
-
-        foreach my $table( keys %{$filters->{$schema}} )
-        {
-            unless( defined( $table_mapping->{RELS}->{$schema}->{$table} ) )
+            foreach my $alias( keys %{$RELS->{$schema}} )
             {
-                warn "Found change to a table not in the query!\n";
-                next;
-            }
-
-            foreach my $alias( keys %{$table_mapping->{RELS}->{$schema}->{$table}} )
-            {
-                foreach my $key( keys %{$filters->{$schema}->{$table}} )
+                foreach my $table_name( keys %{$RELS->{$schema}->{$alias}} )
                 {
-                    foreach my $changed_key( @{$filters->{$schema}->{$table}->{$key}} )
+                    if( defined( $filters->{$schema}->{$table_name} ) )
                     {
-                        my $found = 0;
-                        # check that the changed key actually applies to what we're filtering
-                        foreach my $filter_location( @{$table_mapping->{RELS}->{$schema}->{$table}->{$alias}} )
+                        foreach my $key( keys %{$filters->{$schema}->{$table_name}} )
                         {
-                            my $parent = $filter_location->{parent};
-                            $parent = 'MAIN' if( !defined( $parent ) );
-                            push( @{$filter_entries->{$parent}}, "$alias.$key = $changed_key" );
+                            foreach my $value( @{$filters->{$schema}->{$table_name}->{$key}} )
+                            {
+                                # TODO: Get typmod cache and use that to correctly bind stuff
+                                push( @$where_entries, "${alias}.${key} = ${value}" );
+                            }
                         }
                     }
+
                 }
             }
         }
+
+        my $where_entry;
+
+        if( scalar( @$where_entries ) > 0 )
+        {
+            if( $table_mapping->{BINDS}->{$position}->{has_where} )
+            {
+                $where_entry = ' AND ( ( ' . join( ' ) OR ( ', @$where_entries ) . ' ) ) ';
+            }
+            else
+            {
+                $where_entry = ' WHERE ( ( ' . join( ' ) OR ( ', @$where_entries ) . ' ) ) ';
+            }
+
+            $where_expressions->{$position} = $where_entry;
+        }
     }
 
-    my $where_expressions = {};
     my @starts = sort { $b <=> $a } keys( %{$table_mapping->{BINDS}} );
-
     # Assmple where expressions structure keyed based on the bind position
     # for much easier substitution later
-    foreach my $parent_key( keys %$filter_entries )
-    {
-        foreach my $start( @starts )
-        {
-            if(
-                   (
-                        defined( $table_mapping->{BINDS}->{$start}->{parent} )
-                     && $parent_key eq $table_mapping->{BINDS}->{$start}->{parent}
-                   ) # CTE
-                || ( $parent_key eq 'MAIN' && !defined( $table_mapping->{BINDS}->{$start}->{parent} ) ) # main query
-              )
-            {
-                if( $table_mapping->{BINDS}->{$start}->{has_where} )
-                {
-                    $where_expressions->{$start} = ' AND ( ( ' . join( ' ) OR ( ', @{$filter_entries->{$parent_key}} ) . ' ) ) ';
-                }
-                else
-                {
-                    $where_expressions->{$start} = ' WHERE ( ( ' . join( ' ) OR ( ', @{$filter_entries->{$parent_key}} ) . ' ) ) ';
-                }
-            }
-        }
-    }
 
+    #print Dumper( $where_expressions );
     my $new_q = $definition;
     my $index = 0;
 
     foreach my $bind_start( @starts )
     {
+        next if( $bind_start < 0 ); # Skip if unbindable (no relevent relations)
+        next if( !defined( $where_expressions->{$bind_start} ) ); # Skip if no filters to be applied
         my $bind_end = $table_mapping->{BINDS}->{$bind_start}->{end};
         my $next_cte_name;
 
@@ -1336,6 +1354,8 @@ sub apply_filters($$$$)
         }
 
         my $bind_location = substr( $new_q, $bind_start, $bind_end - $bind_start );
+        # note for union parsing - we need to constrain by adding where_end in select parsing :(
+        # also, we need to corelate against the $table_mapping->binds itself
 
         # Find the end of the last expression (if has_where) or the last join predicate (if !has_where)
         my $where_expression = $where_expressions->{$bind_start};
@@ -1344,6 +1364,22 @@ sub apply_filters($$$$)
         if(    $table_mapping->{BINDS}->{$bind_start}->{has_group}  ) { $where_proceeding_clause_mark = 'group\s+by';                 }
         elsif( $table_mapping->{BINDS}->{$bind_start}->{has_having} ) { $where_proceeding_clause_mark = 'having';                     }
         # TODO add WINDOW
+        elsif(
+                  defined( $table_mapping->{BINDS}->{$bind_start}->{is_union} )
+               && $table_mapping->{BINDS}->{$bind_start}->{is_union} ne 'NONE'
+             )
+        {
+            $where_proceeding_clause_mark = '\s+' . lc( $table_mapping->{BINDS}->{$bind_start}->{is_union} );
+        }
+        elsif( # handle case where we union at the end of a CTE def
+                  defined( $table_mapping->{BINDS}->{$bind_start}->{is_union} )
+             )
+        {
+            # NOTE This may need to be expanded - there are many cases where unions can be used / abused and
+            # a union can appear in the form of:
+
+            $where_proceeding_clause_mark = '\)';
+        }
         elsif( $table_mapping->{BINDS}->{$bind_start}->{has_sort}   ) { $where_proceeding_clause_mark = 'order\s+by';                 }
         elsif( $table_mapping->{BINDS}->{$bind_start}->{has_limit}  ) { $where_proceeding_clause_mark = 'limit';                      }
         elsif( $table_mapping->{BINDS}->{$bind_start}->{has_offset} ) { $where_proceeding_clause_mark = 'offset';                     }
@@ -1360,7 +1396,10 @@ sub apply_filters($$$$)
         my $preceeding_query = substr( $new_q, 0, $bind_start );
         my $proceeding_query = substr( $new_q, $bind_end, length( $new_q ) - $bind_end );
         my $substituted_where = $bind_location;
+        #print "---------------POS: $bind_start\n";
+        #print "Binding\n$where_proceeding_clause_mark\nto\n$bind_location\n";
         $substituted_where =~ s/($where_proceeding_clause_mark)/${where_expression}$1/i;
+        #print "---------------\n";
         $new_q = $preceeding_query . $substituted_where . $proceeding_query;
 
         $index++;
@@ -1380,6 +1419,7 @@ my $filter_tables = [ 'public.tb_a', 'public.tb_b', 'public.tb_c' ];
 my $relcache = get_relcache( $handle );
 my $table_mapping = {};
 my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
+#print Dumper( $data );
 #print Dumper( $table_mapping );
 my $substituted_query = apply_filters( $data, $table_mapping, $definition, $test_change );
 print "$substituted_query\n";
