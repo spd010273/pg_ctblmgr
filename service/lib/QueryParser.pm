@@ -19,7 +19,7 @@ use lib "$FindBin::Bin";
 use DB;
 use Util;
 
-Readonly::Scalar my $FILTER_TABLE_OID_CACHE => <<END_SQL;
+Readonly::Scalar my $OID_CACHE => <<END_SQL;
     SELECT n.nspname::VARCHAR AS schema_name,
            c.relname::VARCHAR AS obj_name,
            c.oid,
@@ -53,7 +53,7 @@ INNER JOIN pg_namespace n
      WHERE c.relname::VARCHAR = ?
 END_SQL
 
-Readonly::Scalar my $GET_TEST_VIEW_PARSE_TREE => <<"END_SQL";
+Readonly::Scalar my $GET_PARSE_TREE => <<"END_SQL";
     SELECT ${SCHEMA_NAME}.fn_get_parse_tree( \$_\$__DEFINITION__\$_\$ )::JSONB AS tree
 END_SQL
 
@@ -65,7 +65,7 @@ sub get_query_parsetree($$) :Export( :MANDATORY )
         { type => SCALAR },
     );
 
-    my $get_parse_tree_query = $GET_TEST_VIEW_PARSE_TREE;
+    my $get_parse_tree_query = $GET_PARSE_TREE;
     $get_parse_tree_query =~ s/__DEFINITION__/$definition/;
 
     my $sth = try_query( $handle, $get_parse_tree_query, undef );
@@ -103,7 +103,7 @@ sub get_relcache($) :Export( :MANDATORY )
         { type => OBJECT },
     );
 
-    my $query = $FILTER_TABLE_OID_CACHE;
+    my $query = $OID_CACHE;
 
     my $sth = try_query( $handle, $query, undef );
 
