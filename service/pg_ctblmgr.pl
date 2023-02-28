@@ -277,70 +277,86 @@ sub worker_entrypoint($$$$)
 
     # Table mapping and parse tree are (relatively) static and only change if our query changes underneath us
     # TODO: Add detection and correction for the above
+    _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
     if( $cache_table_driver eq 'postgresql' )
     {
         check_ct_exists( $handle, $cache_table_schema, $cache_table_name, $cache_table_definition );
         my $relcache = get_relcache( $handle );
         my $TABLE_MAPPING = {};
         my $PARSE_TREE = find_table_aliases( $handle, $relcache, $cache_table_definition, $filter_tables, $TABLE_MAPPING );
+    
+        # Main worker loop
+        my $max_peeked_lsn = '';
+        my $max_applied_lsn = '';
+
+        while ( 1 )
+        {
+            my $changes = {};
+            foreach my $filter_table( keys %$WAL_DATA )
+            {
+                my $pin_keyname = "P${worker_pid}${filter_table}";
+                if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
+                {
+                    unless( tie( $WAL_DATA->{$filter_table}->{pin}, 'IPC::Shareable', { key => $pin_keyname } ) )
+                    {
+                        _log( $LOG_LEVEL_WARNING, "Failed to tie shared memory $pin_keyname" );
+                    }
+                }
+
+                tied( $WAL_DATA->{$filter_table}->{pin} )->shlock( LOCK_SH );
+                my $change;
+                if(
+                        defined $WAL_DATA
+                     && defined( $WAL_DATA->{$filter_table} )
+                     && defined( $WAL_DATA->{$filter_table}->{pin} )
+                  )
+                {
+                    while( scalar( @{$WAL_DATA->{$filter_table}->{pin}} ) > 0 )
+                    {
+                        $change = pop( @{$WAL_DATA->{$filter_table}->{pin}} );
+                        
+                        if( $change )
+                        {
+                            my $schema = $change->{data}->{schema_name};
+                            my $table  = $change->{data}->{table_name};
+
+                            foreach my $key( keys %{$change->{data}->{key}} )
+                            {
+                                my $val = $change->{data}->{key}->{$key};
+                                if( !defined( $changes->{$schema}->{$table}->{$key} ) )
+                                {
+                                    $changes->{$schema}->{$table}->{$key} = [ $val ];
+                                }
+                                else
+                                {
+                                    push( @{$changes->{$schema}->{$table}->{$key}}, $val );
+                                }
+                            }
+
+                            if( lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0 )
+                            {
+                                $max_peeked_lsn = $change->{commit_lsn};
+                            }
+                        }
+
+                    }
+                }
+
+                print "Worker max peeked lsn: $max_peeked_lsn\n";
+                tied( $WAL_DATA->{$filter_table}->{pin} )->shunlock();
+
+                # Digest changes for this filter table    
+            }
+
+            # now lets apply changes from the array after pop
+            my $query = apply_filters( $handle, $PARSE_TREE, $TABLE_MAPPING, $cache_table_definition, $changes );
+        
+            sleep( 1 );
+        }
     }
     else
     {
         _log( $LOG_LEVEL_FATAL, "Worker cannot proceed. Driver $cache_table_driver not implemented\n" );
-    }
-
-    _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
-
-    # Main worker loop
-    my $max_peeked_lsn = '';
-    my $max_applied_lsn = '';
-
-    while ( 1 )
-    {
-        my $changes = {};
-        foreach my $filter_table( keys %$WAL_DATA )
-        {
-            my $pin_keyname = "P${worker_pid}${filter_table}";
-            if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
-            {
-                unless( tie( $WAL_DATA->{$filter_table}->{pin}, 'IPC::Shareable', { key => $pin_keyname } ) )
-                {
-                    _log( $LOG_LEVEL_WARNING, "Failed to tie shared memory $pin_keyname" );
-                }
-            }
-
-            tied( $WAL_DATA->{$filter_table}->{pin} )->shlock( LOCK_SH );
-            my $change;
-            if(
-                    defined $WAL_DATA
-                 && defined( $WAL_DATA->{$filter_table} )
-                 && defined( $WAL_DATA->{$filter_table}->{pin} )
-              )
-            {
-                while( scalar( @{$WAL_DATA->{$filter_table}->{pin}} ) > 0 )
-                {
-                    $change = pop( @{$WAL_DATA->{$filter_table}->{pin}} );
-                    
-                    if( $change )
-                    {
-                        push( @{$changes->{filter_table}}, $change );
-                        if( lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0 )
-                        {
-                            $max_peeked_lsn = $change->{commit_lsn};
-                        }
-                    }
-
-                }
-            }
-
-            print "Worker max peeked lsn: $max_peeked_lsn\n";
-            tied( $WAL_DATA->{$filter_table}->{pin} )->shunlock();
-
-            # now lets apply changes from the array after pop
-
-        }
-    
-        sleep( 1 );
     }
 
     return;
