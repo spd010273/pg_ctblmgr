@@ -330,14 +330,15 @@ sub add_table_mapping($$$$$$$;$)
     return;
 }
 
-sub get_joined_rels($$$$)
+sub get_joined_rels($$$$;$)
 {
-    my( $json_fragment, $parent, $table_mapping, $relcache ) = validate_pos(
+    my( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) = validate_pos(
         @_,
         { type => HASHREF },
         { type => SCALAR | UNDEF },
         { type => HASHREF },
         { type => HASHREF },
+        { type => SCALAR | UNDEF, optional => 1 },
     );
 
     #NOTE: We parse location to determine where the WHERE clause should go
@@ -382,7 +383,8 @@ sub get_joined_rels($$$$)
             $json_fragment->{larg},
             $parent,
             $table_mapping,
-            $relcache
+            $relcache,
+            $union_flag
         );
 
         if( defined( $json_fragment->{rarg} ) )
@@ -491,7 +493,8 @@ sub get_joined_rels($$$$)
                                 $json_fragment->{rarg}->{subquery},
                                 $parent,
                                 $table_mapping,
-                                $relcache
+                                $relcache,
+                                $union_flag
                             ),
                             type     => 'SUBSELECT',
                             location => $location,
@@ -586,7 +589,7 @@ sub get_joined_rels($$$$)
             return [
                 {
                     $alias => {
-                        obj      => &parse_select( $json_fragment->{subquery}, $parent, $table_mapping, $relcache ),
+                        obj      => &parse_select( $json_fragment->{subquery}, $parent, $table_mapping, $relcache, $union_flag ),
                         type     => 'SUBSELECT',
                         location => -1,
                     }
@@ -625,10 +628,11 @@ sub parse_union($$$$$;$)
       )
     {
         # Regular union element - we're likely at an end element in the union tree
+        $union_flag = 'NONE' if( !defined( $union_flag ) );
         if( $is_rarg )
         {
             # for anchoring unions (final where clause) we need to know if this is the last union member
-            return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, 'NONE' ) ];
+            return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) ];
         }
 
         return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) ];
@@ -647,13 +651,15 @@ sub parse_union($$$$$;$)
             0,
             $json_fragment->{op}
         );
-
+        
+        $union_flag = 'NONE' if( !defined( $union_flag ) );
         my $union_from_b = &parse_union(
             $json_fragment->{rarg},
             $parent,
             $table_mapping,
             $relcache,
-            1
+            1,
+            $union_flag
         );
 
         if(
@@ -684,6 +690,8 @@ sub parse_union($$$$$;$)
     {
         warn "parse_union: Invalid structure in $json_fragment->{name} node\n";
     }
+
+    return;
 }
 
 sub parse_cte($$$$)
@@ -749,17 +757,18 @@ sub parse_cte($$$$)
     return $ctes;
 }
 
-sub parse_from_clause($$$$)
+sub parse_from_clause($$$$;$)
 {
-    my( $json_fragment, $parent, $table_mapping, $relcache ) = validate_pos(
+    my( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) = validate_pos(
         @_,
         { type => ARRAYREF },
         { type => SCALAR | UNDEF },
         { type => HASHREF },
         { type => HASHREF },
+        { type => SCALAR | UNDEF, optional => 1 },
     );
 
-    my $result = &get_joined_rels( $json_fragment->[0], $parent, $table_mapping, $relcache );
+    my $result = &get_joined_rels( $json_fragment->[0], $parent, $table_mapping, $relcache, $union_flag );
 
     return $result;
 }
@@ -794,7 +803,8 @@ sub parse_select($$$$;$)
             $json_fragment->{fromClause},
             $parent,
             $table_mapping,
-            $relcache
+            $relcache,
+            $union_flag
         );
 
     }
@@ -1126,8 +1136,6 @@ sub recursive_from_finder($$$)
         { type => HASHREF },
     );
     
-    print Dumper( $json_fragment );
-
     if(
           defined( $json_fragment->{from} )
        && ref( $json_fragment->{from} ) eq 'ARRAY'
@@ -1150,7 +1158,6 @@ sub recursive_from_finder($$$)
                     $qual = resolve_relation( $relcache, $obj_name );
                     unless( defined( $qual->{schema} ) && defined( $qual->{name} ) )
                     {
-                        warn "Unable to resolve relation $obj_name\n";
                         next;
                     }
                     my $schema = $qual->{schema};
@@ -1217,7 +1224,6 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     # Phase I will result in a keyed array telling us which CTE or query will need a filter applied
     my $where_expressions = {};
 
-    print Dumper( $table_mapping->{BINDS} );
     foreach my $position( keys %{$table_mapping->{BINDS}} )
     {
         next if( $position < 0 );
@@ -1300,7 +1306,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     #print Dumper( $where_expressions ) if( $DEBUG );
     my $new_q = $definition;
     my $index = 0;
-    print Dumper( $where_expressions );
+    #print Dumper( $where_expressions );
     foreach my $bind_start( @starts )
     {
         next if( $bind_start < 0 ); # Skip if unbindable (no relevent relations)
@@ -1333,7 +1339,6 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
         # Find the end of the last expression (if has_where) or the last join predicate (if !has_where)
         my $where_expression = $where_expressions->{$bind_start};
-        print "Bind start: $bind_start, bind_end: $bind_end\n$where_expression\n";
         my $is_in_cte = defined( $table_mapping->{BINDS}->{$bind_start}->{parent} );
         my $where_proceeding_clause_mark;
         if(    $table_mapping->{BINDS}->{$bind_start}->{has_group}  ) { $where_proceeding_clause_mark = 'group\s+by';                 }
@@ -1352,7 +1357,6 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         {
             # NOTE This may need to be expanded - there are many cases where unions can be used / abused and
             # a union can appear in the form of:
-
             $where_proceeding_clause_mark = '\)';
         }
         elsif( $table_mapping->{BINDS}->{$bind_start}->{has_sort}   ) { $where_proceeding_clause_mark = 'order\s+by';                 }
@@ -1368,6 +1372,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             return;
         }
 
+        #print "Bind start: $bind_start, bind_end: $bind_end\nwhere: $where_expression\nPreceeding mark: '$where_proceeding_clause_mark'\nLOC: $bind_location\n================\n";
         my $preceeding_query = substr( $new_q, 0, $bind_start );
         my $proceeding_query = substr( $new_q, $bind_end, length( $new_q ) - $bind_end );
         my $substituted_where = $bind_location;
