@@ -669,7 +669,7 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
     }
 
     my $join_predicate  = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
-    my $update_fragment = join( ', ', map { "$_ = tt.$_" } @$non_unique_columns );
+    my $update_fragment = join( ', ', map { "$_ = tt.$_" } @$table_columns );
     my $columns         = join( ', ', map { "vw.$_" } @$table_columns );
     my $where_clause    = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
 
