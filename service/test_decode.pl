@@ -68,8 +68,8 @@ my $filter_tables = [ 'public.tb_a', 'public.tb_b', 'public.tb_c' ];
 my $relcache = get_relcache( $handle );
 my $table_mapping = {};
 my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
-#print Dumper( $data ) if( $DEBUG );
-#print Dumper( $table_mapping ) if( $DEBUG );
+#print Dumper( $data );
+#print Dumper( $table_mapping );
 my $substituted_query = apply_filters( $handle, $data, $table_mapping, $definition, $test_change );
 print "$substituted_query\n";
 

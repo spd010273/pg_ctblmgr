@@ -651,7 +651,7 @@ sub parse_union($$$$$;$)
             0,
             $json_fragment->{op}
         );
-        
+
         $union_flag = 'NONE' if( !defined( $union_flag ) );
         my $union_from_b = &parse_union(
             $json_fragment->{rarg},
@@ -1135,7 +1135,7 @@ sub recursive_from_finder($$$)
         { type => HASHREF },
         { type => HASHREF },
     );
-    
+
     if(
           defined( $json_fragment->{from} )
        && ref( $json_fragment->{from} ) eq 'ARRAY'

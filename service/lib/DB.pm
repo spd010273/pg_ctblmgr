@@ -27,6 +27,63 @@ INNER JOIN pg_catalog.pg_namespace n
        AND c.relkind = 'r'
 END_SQL
 
+Readonly::Scalar my $CACHE_TABLE_COLUMNS => <<"END_SQL";
+    SELECT a.attname::VARCHAR AS column_name
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+     WHERE c.relname::VARCHAR = ?
+  ORDER BY a.attnum ASC
+END_SQL
+
+Readonly::Scalar my $CACHE_TABLE_UNIQUE => <<END_SQL;
+    SELECT array_agg( a.attname::VARCHAR ) AS unique_keys
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+INNER JOIN pg_catalog.pg_constraint co
+        ON co.contype = 'u'
+       AND co.conrelid = c.oid
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum = ANY( co.conkey )
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+     WHERE c.relname::VARCHAR = ?
+  GROUP BY co.oid
+     UNION
+    SELECT array_agg( a.attname::VARCHAR ) AS unique_keys
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+INNER JOIN pg_catalog.pg_index i
+        ON i.indisunique IS TRUE
+       AND i.indislive IS TRUE
+       AND i.indisready IS TRUE
+       AND i.indrelid = c.oid
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+       AND a.attnum = ANY( i.indkey ) 
+INNER JOIN pg_catalog.pg_class ci
+        ON ci.oid = i.indexrelid
+ LEFT JOIN pg_catalog.pg_constraint co
+        ON co.contype = 'u'
+       AND co.conrelid = c.oid
+       AND co.conindid = ci.oid
+     WHERE c.relname::VARCHAR = ? 
+       AND co.oid IS NULL
+  GROUP BY ci.oid
+END_SQL
+
 Readonly::Scalar my $EXTENSION_CHECK_QUERY => <<END_SQL;
     SELECT n.oid
       FROM pg_namespace n
@@ -478,6 +535,251 @@ sub check_ct_exists($$$$) :Export( :MANDATORY )
     _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
     $sth->finish();
     return;
+}
+
+sub test_query($$) :Export( :MANDATORY )
+{
+    my( $handle, $query ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $test_query = "WITH tt_test AS( $query ) SELECT * FROM tt_test LIMIT 0";
+
+    my $sth = $handle->prepare( $test_query );
+
+    return 0 if( !defined( $sth ) );
+    return 0 unless( $sth->execute() );
+
+    $sth->finish();
+    return 1;
+}
+
+sub generate_temp_table($$) :Export( :MANDATORY )
+{
+    my( $handle, $query ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $temp_table_name = 'tt_foo';
+    my $tt_query = "CREATE TEMP TABLE $temp_table_name AS( $query );";
+
+    my $sth = try_query( $handle, $tt_query );
+
+    return $temp_table_name if( $sth );
+    return;
+}
+
+sub get_cache_table_columns($$$) :Export( :MANDATORY )
+{
+    my( $handle, $cache_table_schema, $cache_table_name ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+    );
+
+    my $sth = &try_query( $handle, $CACHE_TABLE_COLUMNS, [ $cache_table_schema, $cache_table_name ] );
+
+    return unless( $sth );
+    my $columns = [];
+
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        push( @$columns, $row->{column_name} );
+    }
+
+    $sth->finish();
+    return $columns;
+}
+
+sub get_cache_table_unique($$$) :Export( :MANDATORY )
+{
+    my( $handle, $cache_table_schema, $cache_table_name ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+    );
+
+    my $sth = &try_query(
+        $handle,
+        $CACHE_TABLE_UNIQUE,
+        [
+            $cache_table_schema,
+            $cache_table_name,
+            $cache_table_schema,
+            $cache_table_name
+        ]
+    );
+
+    return unless( $sth );
+    my $uniques = [];
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        # each row represents a different unique constraint
+        my $unique_columns = $row->{unique_keys};
+        push( @$uniques, $unique_columns );
+    }
+
+    $sth->finish();
+    return $uniques;
+}
+
+sub generate_update_statement($$$$$$) :Export( :MANDATORY )
+{
+    my( $handle, $temp_table, $cache_table_schema, $cache_table_name, $table_columns, $uniques ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => ARRAYREF },
+        { type => ARRAYREF },
+    );
+
+    my $join_clauses = [];
+    my $where_clauses = [];
+    my $distinct_uniques = [];
+    my $non_unique_columns = [];
+
+    foreach my $unique_columns( @$uniques )
+    {
+        my $join_clause = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $where_clause = join( ' AND ', map { "ct.$_ = tt.$_" } @$unique_columns );
+        push( @$join_clauses, $join_clause );
+        push( @$where_clauses, $where_clause );
+
+        foreach my $unique_column( @$unique_columns )
+        {
+            unless( grep /^$unique_column$/, @$distinct_uniques )
+            {
+                push( @$distinct_uniques, $unique_column );
+            }
+        }
+    }
+
+    foreach my $column_name( @$table_columns )
+    {
+        next if( grep( /^$column_name$/, @$distinct_uniques ) );
+        push( @$non_unique_columns, $column_name );
+    }
+
+    my $join_predicate  = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
+    my $update_fragment = join( ', ', map { "$_ = tt.$_" } @$non_unique_columns );
+    my $columns         = join( ', ', map { "vw.$_" } @$table_columns );
+    my $where_clause    = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
+
+    my $UPDATE_Q = <<END_SQL;
+    WITH tt_records_to_update
+    (
+        SELECT $columns
+          FROM $temp_table vw
+    INNER JOIN $cache_table_schema.$cache_table_name tt
+            ON $join_predicate
+    )
+        UPDATE $cache_table_schema.$cache_table_name ct
+           SET $update_fragment
+          FROM tt_records_to_update tt
+         WHERE $where_clause
+END_SQL
+
+    return $UPDATE_Q;
+}
+
+sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
+{
+    my( $handle, $temp_table, $cache_table_schema, $cache_table_name, $table_columns, $uniques ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => ARRAYREF },
+        { type => ARRAYREF },
+    );
+
+    my $join_clauses = [];
+    my $where_clauses = [];
+
+    foreach my $unique_columns( @$uniques )
+    {
+        my $join_clause = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
+        push( @$join_clauses, $join_clause );
+        push( @$where_clauses, $where_clause );
+    }
+
+    my $columns = join( ', ', map { "vw.$_" } @$table_columns );
+    my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
+    my $where_clause = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
+
+    my $INSERT_Q = <<END_SQL;
+    WITH tt_records_to_insert
+    (
+        SELECT $columns
+          FROM $temp_table vw
+     LEFT JOIN $cache_table_schema.$cache_table_name tt
+            ON $join_predicate
+         WHERE $where_clause
+    )
+    INSERT INTO $cache_table_schema.$cache_table_name
+         SELECT $columns
+           FROM tt_records_to_insert vw
+END_SQL
+
+    return $INSERT_Q;
+}
+
+sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
+{
+    my( $handle, $definition, $cache_table_schema, $cache_table_name, $table_columns, $uniques ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => ARRAYREF },
+        { type => ARRAYREF },
+    );
+
+    my $join_clauses = [];
+    my $where_clauses = [];
+
+    foreach my $unique_columns( @$uniques )
+    {
+        my $join_clause = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
+        push( @$join_clauses, $join_clause );
+        push( @$where_clauses, $where_clause );
+    }
+
+    my $columns = join( ', ', map { "vw.$_" } @$table_columns );
+    my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
+    my $where_clause = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
+
+    my $DELETE_Q = <<"END_SQL";
+    WITH tt_base_data AS
+    (
+        $definition
+    ),
+    tt_rows_to_delete AS
+    (
+        SELECT $columns
+          FROM $cache_table_schema.$cache_table_name vw
+     LEFT JOIN tt_base_data tt
+            ON $join_predicate
+         WHERE $where_clause
+    )
+    DELETE FROM $cache_table_schema.$cache_table_name tt
+          USING tt_rows_to_delete vw
+          WHERE $join_predicate
+END_SQL
+
+    return $DELETE_Q;
 }
 
 1;

@@ -27,7 +27,13 @@ use Util;
 use DB;
 use QueryParser;
 
+# DEV NOTES:
+# - This can read queries but is relatively untested against all the possible variations and expressiveness of SQL
+#   therefore, the simpler and less deeply nested a query can be, the better. There are safety checks to prevent bad
+#   queries from executing
+# - This requires, like matviews, that a unique expression exists on the table, though this can support multiple 
 # NOTE: IPC::Shareable keys seeem to be extremely short (4-8 chars) and may collide!
+
 $OUTPUT_AUTOFLUSH = 1;
 
 Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
@@ -68,11 +74,11 @@ sub shm_cleanup()
     my $WORKER_STATUSES;
     tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
     tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } );
-    
+
     tied( $WORKER_FILTER_TABLES )->clean_up_all();
     tied( $WORKER_STATUSES )->clean_up_all();
 
-    my $sigwarn = $SIG{__WARN__}; 
+    my $sigwarn = $SIG{__WARN__};
     local $SIG{__WARN__} = sub {};
     my $test;
     for( my $i = 0; $i < 1000; $i++ )
@@ -145,7 +151,7 @@ sub parent_loop($$$)
             my $data = replication_peek( $handle, $filter_table, \$last_peeked_lsn );
             next unless( $data );
             my $index = 0;
- 
+
             foreach my $PIN( @{$WORKER_FILTER_TABLES->{$filter_table}->{pins}} )
             {
                 my $pid = $WORKER_FILTER_TABLES->{$filter_table}->{pids}->[$index];
@@ -187,8 +193,8 @@ sub worker_entrypoint($$$$)
     my $WORKER_FILTER_TABLES = {};
     my $WAL_DATA;
     my $WORKER_STATUSES = {};
-    
-    my $worker_pid = $PROCESS_ID;
+
+    my $worker_pid  = $PROCESS_ID;
     my $array_index = 0;
     my $index_found = 0;
 
@@ -200,7 +206,10 @@ sub worker_entrypoint($$$$)
         # CRITICAL Section - check main filter_tables structure and find our index
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
 
-        if( !defined( $WORKER_FILTER_TABLES->{$filter_table} ) || !defined( $WORKER_FILTER_TABLES->{$filter_table}->{pins} ) )
+        if(
+               !defined( $WORKER_FILTER_TABLES->{$filter_table} )
+            || !defined( $WORKER_FILTER_TABLES->{$filter_table}->{pins} )
+          )
         {
             tied( $WORKER_FILTER_TABLES )->shunlock();
             _log( $LOG_LEVEL_FATAL, "Shared memory doesn't appear to be mapped" );
@@ -227,14 +236,13 @@ sub worker_entrypoint($$$$)
         if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
         {
             my $PIN = [];
+
             until( tied( $PIN ) )
             {
                 eval{ tie( $PIN, 'IPC::Shareable', { key => "P${worker_pid}${filter_table}" } ) };
-                if( $OS_ERROR )
-                {
-                    sleep( 1 );
-                }
+                sleep( 1 ) if( $OS_ERROR );
             }
+
             $WAL_DATA->{$filter_table}->{pin} = $PIN;
         }
     }
@@ -278,23 +286,68 @@ sub worker_entrypoint($$$$)
     # Table mapping and parse tree are (relatively) static and only change if our query changes underneath us
     # TODO: Add detection and correction for the above
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
+
     if( $cache_table_driver eq 'postgresql' )
     {
-        check_ct_exists( $handle, $cache_table_schema, $cache_table_name, $cache_table_definition );
-        my $relcache = get_relcache( $handle );
+        &check_ct_exists(
+            $handle,
+            $cache_table_schema,
+            $cache_table_name,
+            $cache_table_definition
+        );
+        my $relcache      = get_relcache( $handle );
         my $TABLE_MAPPING = {};
-        my $PARSE_TREE = find_table_aliases( $handle, $relcache, $cache_table_definition, $filter_tables, $TABLE_MAPPING );
-    
+        my $PARSE_TREE    = &find_table_aliases(
+            $handle,
+            $relcache,
+            $cache_table_definition,
+            $filter_tables,
+            $TABLE_MAPPING
+        );
+
         # Main worker loop
-        my $max_peeked_lsn = '';
+        my $max_peeked_lsn  = '';
         my $max_applied_lsn = '';
 
-        while ( 1 )
+        # Columns in order of appearance on table
+        my $CACHE_TABLE_COLUMNS = &get_cache_table_columns(
+            $handle,
+            $cache_table_schema,
+            $cache_table_name
+        );
+        # Array of uniques (index/constraints) containing array of constrained cols
+        my $CACHE_TABLE_UNIQUES = &get_cache_table_unique(
+            $handle,
+            $cache_table_schema,
+            $cache_table_name
+        );
+        # Last pre-flight check - validate TABLE_MAPPING against filter tables
+        foreach my $schema( keys %{$TABLE_MAPPING->{RELS}} )
+        {
+            foreach my $table( keys %{$TABLE_MAPPING->{RELS}->{$schema}} )
+            {
+                my $relname = "${schema}.${table}";
+
+                unless( grep( /^$relname$/, @$filter_tables ) )
+                {
+                    # This is mainly for debugging, but we could add this relation to the filter tables array
+                    # rather than complaining
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Relation $relname is not present in filter tables provided by parent! Updates may be missed."
+                    );
+                }
+            }
+        }
+
+        while( 1 )
         {
             my $changes = {};
+
             foreach my $filter_table( keys %$WAL_DATA )
             {
                 my $pin_keyname = "P${worker_pid}${filter_table}";
+
                 if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
                 {
                     unless( tie( $WAL_DATA->{$filter_table}->{pin}, 'IPC::Shareable', { key => $pin_keyname } ) )
@@ -305,8 +358,9 @@ sub worker_entrypoint($$$$)
 
                 tied( $WAL_DATA->{$filter_table}->{pin} )->shlock( LOCK_SH );
                 my $change;
+
                 if(
-                        defined $WAL_DATA
+                        defined( $WAL_DATA )
                      && defined( $WAL_DATA->{$filter_table} )
                      && defined( $WAL_DATA->{$filter_table}->{pin} )
                   )
@@ -314,7 +368,7 @@ sub worker_entrypoint($$$$)
                     while( scalar( @{$WAL_DATA->{$filter_table}->{pin}} ) > 0 )
                     {
                         $change = pop( @{$WAL_DATA->{$filter_table}->{pin}} );
-                        
+
                         if( $change )
                         {
                             my $schema = $change->{data}->{schema_name};
@@ -323,6 +377,7 @@ sub worker_entrypoint($$$$)
                             foreach my $key( keys %{$change->{data}->{key}} )
                             {
                                 my $val = $change->{data}->{key}->{$key};
+
                                 if( !defined( $changes->{$schema}->{$table}->{$key} ) )
                                 {
                                     $changes->{$schema}->{$table}->{$key} = [ $val ];
@@ -344,19 +399,75 @@ sub worker_entrypoint($$$$)
 
                 print "Worker max peeked lsn: $max_peeked_lsn\n";
                 tied( $WAL_DATA->{$filter_table}->{pin} )->shunlock();
-
-                # Digest changes for this filter table    
+                # Digest changes for this filter table
             }
 
             # now lets apply changes from the array after pop
-            my $query = apply_filters( $handle, $PARSE_TREE, $TABLE_MAPPING, $cache_table_definition, $changes );
-        
+            my $query = &apply_filters(
+                $handle,
+                $PARSE_TREE,
+                $TABLE_MAPPING,
+                $cache_table_definition,
+                $changes
+            );
+
+            if( !&test_query( $handle, $query ) )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Failed to apply filters to query for cache table '$cache_table_name'"
+                );
+                next;
+            }
+
+            # At this point we're ready to execute the table into a temp table
+            my $temp_table = &generate_temp_table( $handle, $query );
+
+            if( !defined( $temp_table ) )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Failed to generate temp table for updating cache table '$cache_table_name'"
+                );
+                next;
+            }
+
+            my $delete_statement = generate_delete_statement(
+                $handle,
+                $cache_table_definition,
+                $cache_table_schema,
+                $cache_table_name,
+                $CACHE_TABLE_COLUMNS,
+                $CACHE_TABLE_UNIQUES
+            );
+
+            my $update_statement = generate_update_statement(
+                $handle,
+                $temp_table,
+                $cache_table_schema,
+                $cache_table_name,
+                $CACHE_TABLE_COLUMNS,
+                $CACHE_TABLE_UNIQUES
+            );
+
+            my $insert_statement = generate_insert_statement(
+                $handle,
+                $temp_table,
+                $cache_table_schema,
+                $cache_table_name,
+                $CACHE_TABLE_COLUMNS,
+                $CACHE_TABLE_UNIQUES
+            );
+
             sleep( 1 );
         }
     }
     else
     {
-        _log( $LOG_LEVEL_FATAL, "Worker cannot proceed. Driver $cache_table_driver not implemented\n" );
+        _log(
+            $LOG_LEVEL_FATAL,
+            "Worker cannot proceed. Driver $cache_table_driver not implemented\n"
+        );
     }
 
     return;
@@ -377,10 +488,10 @@ my $user   = $opt_U;
 $DAEMONIZE = $opt_D;
 
 $port = 5432 unless( defined( $port ) );
-usage( 'Invalid port' ) if( defined( $port ) and ( $port !~ /^\d+$/ or $port < 1 or $port > 65535 ) );
+usage( 'Invalid port'          ) if( defined( $port ) and ( $port !~ /^\d+$/ or $port < 1 or $port > 65535 ) );
 usage( 'Invalid database name' ) unless( defined( $dbname ) && length( $dbname ) > 0 );
-usage( 'Invalid username' ) unless( defined( $user ) && length( $user ) > 0 );
-usage( 'Invalid host name' ) unless( defined( $host ) && length( $host ) > 0 );
+usage( 'Invalid username'      ) unless( defined( $user ) && length( $user ) > 0 );
+usage( 'Invalid host name'     ) unless( defined( $host ) && length( $host ) > 0 );
 
 my $conn_string = "dbi:Pg:dbname=${dbname};host=${host};port=${port}";
 $CONNECTION_MAP->{connection_string} = $conn_string;
@@ -444,7 +555,12 @@ foreach my $worker_entry( @$worker_data )
 
     if( defined( $child_pid ) and $child_pid == 0 )
     {
-        worker_entrypoint( $wal_level, $filter_tables, $maintenance_channel, $pk_maintenance_object );
+        &worker_entrypoint(
+            $wal_level,
+            $filter_tables,
+            $maintenance_channel,
+            $pk_maintenance_object
+        );
         exit( 0 );
     }
     elsif( defined( $child_pid ) and $child_pid > 0 )
