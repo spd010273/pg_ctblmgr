@@ -432,7 +432,7 @@ sub worker_entrypoint($$$$)
                 next;
             }
 
-            my $delete_statement = generate_delete_statement(
+            my $delete_result = generate_delete_statement(
                 $handle,
                 $cache_table_definition,
                 $cache_table_schema,
@@ -441,7 +441,16 @@ sub worker_entrypoint($$$$)
                 $CACHE_TABLE_UNIQUES
             );
 
-            my $update_statement = generate_update_statement(
+            unless( $delete_result )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Deleting entries from $cache_table_schema.$cache_table_name failed"
+                );
+                next;
+            }
+
+            my $update_result = generate_update_statement(
                 $handle,
                 $temp_table,
                 $cache_table_schema,
@@ -450,7 +459,16 @@ sub worker_entrypoint($$$$)
                 $CACHE_TABLE_UNIQUES
             );
 
-            my $insert_statement = generate_insert_statement(
+            unless( $update_result )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Updating entries in $cache_table_schema.$cache_table_name failed"
+                );
+                next;
+            }
+
+            my $insert_result = generate_insert_statement(
                 $handle,
                 $temp_table,
                 $cache_table_schema,
@@ -459,6 +477,17 @@ sub worker_entrypoint($$$$)
                 $CACHE_TABLE_UNIQUES
             );
 
+            unless( $insert_result )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Inserting entries into $cache_table_schema.$cache_table_name failed"
+                );
+                next;
+            }
+
+            # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
+            # Check here to see if the table definition has changed
             sleep( 1 );
         }
     }

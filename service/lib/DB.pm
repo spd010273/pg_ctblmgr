@@ -641,16 +641,16 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
         { type => ARRAYREF },
     );
 
-    my $join_clauses = [];
-    my $where_clauses = [];
-    my $distinct_uniques = [];
+    my $join_clauses       = [];
+    my $where_clauses      = [];
+    my $distinct_uniques   = [];
     my $non_unique_columns = [];
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $join_clause  = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
         my $where_clause = join( ' AND ', map { "ct.$_ = tt.$_" } @$unique_columns );
-        push( @$join_clauses, $join_clause );
+        push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
 
         foreach my $unique_column( @$unique_columns )
@@ -687,7 +687,15 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
          WHERE $where_clause
 END_SQL
 
-    return $UPDATE_Q;
+    my $sth = &try_query( $handle, $UPDATE_Q, [] );
+
+    unless( $sth )
+    {
+        return 0;
+    }
+
+    $sth->finish();
+    return 1;
 }
 
 sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
@@ -702,20 +710,20 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
         { type => ARRAYREF },
     );
 
-    my $join_clauses = [];
+    my $join_clauses  = [];
     my $where_clauses = [];
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $join_clause  = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
         my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
-        push( @$join_clauses, $join_clause );
+        push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
     }
 
-    my $columns = join( ', ', map { "vw.$_" } @$table_columns );
+    my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
     my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
-    my $where_clause = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
+    my $where_clause   = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
 
     my $INSERT_Q = <<END_SQL;
     WITH tt_records_to_insert
@@ -731,7 +739,15 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
            FROM tt_records_to_insert vw
 END_SQL
 
-    return $INSERT_Q;
+    my $sth = &try_query( $handle, $INSERT_Q, [] );
+
+    unless( $sth )
+    {
+        return 0;
+    }
+
+    $sth->finish();
+    return 1;
 }
 
 sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
@@ -746,20 +762,20 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
         { type => ARRAYREF },
     );
 
-    my $join_clauses = [];
+    my $join_clauses  = [];
     my $where_clauses = [];
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $join_clause  = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
         my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
-        push( @$join_clauses, $join_clause );
+        push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
     }
 
-    my $columns = join( ', ', map { "vw.$_" } @$table_columns );
+    my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
     my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
-    my $where_clause = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
+    my $where_clause   = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
 
     my $DELETE_Q = <<"END_SQL";
     WITH tt_base_data AS
@@ -779,7 +795,15 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
           WHERE $join_predicate
 END_SQL
 
-    return $DELETE_Q;
+    my $sth = &try_query( $handle, $DELETE_Q, [] );
+
+    unless( $sth )
+    {
+        return 0;
+    }
+
+    $sth->finish();
+    return 1;
 }
 
 1;
