@@ -10,7 +10,7 @@ use Carp;
 use Readonly;
 use English qw( -no_match_vars );
 
-use JSON;
+use JSON::XS;
 use IO::Select;
 use IO::Handle;
 use Getopt::Std;
@@ -488,6 +488,7 @@ sub worker_entrypoint($$$$)
 
             # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
             # Check here to see if the table definition has changed
+            &drop_temp_table( $handle, $temp_table );
             sleep( 1 );
         }
     }

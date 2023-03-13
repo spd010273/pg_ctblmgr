@@ -9,6 +9,7 @@ use Perl6::Export::Attrs;
 use FindBin;
 use English qw( -no_match_vars );
 use Params::Validate qw( :all );
+use JSON::XS;
 
 use lib "$FindBin::Bin";
 use Util;
@@ -172,6 +173,7 @@ sub try_query($$;$) :Export( :MANDATORY )
     my $sleep_backoff     = 1;
     my $try_count         = 0;
 
+    _log( $LOG_LEVEL_DEBUG, "Executing '$query'" );
     RETRY_CONN:
     $retry_counter++;
     return undef if( $retry_counter > $MAX_QUERY_RETRIES );
@@ -442,7 +444,7 @@ sub replication_peek($$$) :Export( :MANDATORY )
             }
 
             my $xid  = $row->{xid};
-            my $data = from_json( $row->{data} );
+            my $data = decode_json( $row->{data} );
             my $out  = { lsn => $lsn, xid => $xid, data => $data };
 
             unless( $xid ~~ @$xids )
@@ -569,7 +571,32 @@ sub generate_temp_table($$) :Export( :MANDATORY )
 
     my $sth = try_query( $handle, $tt_query );
 
-    return $temp_table_name if( $sth );
+    if( $sth )
+    {
+        $sth->finish();
+        return $temp_table_name;
+    }
+
+    return;
+}
+
+sub drop_temp_table($$) :Export( :MANDATORY )
+{
+    my( $handle, $temp_table ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $query = "DROP TABLE $temp_table";
+    my $sth = try_query( $handle, $query );
+
+    if( $sth )
+    {
+        $sth->finish();
+        return;
+    }
+
     return;
 }
 
@@ -674,7 +701,7 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
     my $where_clause    = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
 
     my $UPDATE_Q = <<END_SQL;
-    WITH tt_records_to_update
+    WITH tt_records_to_update AS
     (
         SELECT $columns
           FROM $temp_table vw
@@ -726,7 +753,7 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
     my $where_clause   = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
 
     my $INSERT_Q = <<END_SQL;
-    WITH tt_records_to_insert
+    WITH tt_records_to_insert AS
     (
         SELECT $columns
           FROM $temp_table vw
