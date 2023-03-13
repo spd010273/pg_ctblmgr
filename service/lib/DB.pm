@@ -127,15 +127,13 @@ Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
            xid,
            data::JSONB AS data
       FROM pg_catalog.pg_logical_slot_get_changes(
-               ?,
-               ?,
-               NULL,
-               'wal-level',
-               ?,
-               'filter-tables',
-               ?,
-               'include-transaction',
-               TRUE
+               ?::NAME,
+               ?::PG_LSN,
+               NULL::INTEGER,
+               'wal-level'::VARCHAR,
+               ?::VARCHAR,
+               'include-transaction'::VARCHAR,
+               'TRUE'::VARCHAR
            )
   ORDER BY lsn ASC
 END_SQL
@@ -364,19 +362,18 @@ sub get_worker_list($) :Export( :MANDATORY )
     return undef;
 }
 
-sub replication_seek($$$) :Export( :MANDATORY )
+sub replication_seek($$) :Export( :MANDATORY )
 {
-    my( $handle, $filter_tables, $lsn ) = validate_pos(
+    my( $handle, $lsn ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => SCALAR },
         { type => SCALAR },
     );
 
     my $sth = try_query(
         $handle,
         $REPLICATION_SEEK_QUERY,
-        [ $SLOT_NAME, $lsn, 'F', $filter_tables ]
+        [ $SLOT_NAME, $lsn, 'F' ]
     );
 
     unless( $sth )
@@ -386,15 +383,8 @@ sub replication_seek($$$) :Export( :MANDATORY )
 
     if( $sth->rows() > 0 )
     {
-        while( my $row = $sth->fetchrow_hashref() )
-        {
-            my $lsn = $row->{lsn};
-            my $xid = $row->{xid};
-            my $data = $row->{data};
-        }
-
         $sth->finish();
-        return;
+        return 1;
     }
 
     $sth->finish();

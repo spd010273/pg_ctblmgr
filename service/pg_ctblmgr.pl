@@ -142,7 +142,6 @@ sub parent_loop($$$)
 
     my $last_lsn_applied;
     my $last_peeked_lsn;
-
     while( 1 )
     {
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
@@ -173,6 +172,43 @@ sub parent_loop($$$)
         }
 
         tied( $WORKER_FILTER_TABLES )->shunlock();
+        # Get worker applied LSNs and ack up to the smallest LSN
+
+        my $worker_lsns = {};
+        tied( $WORKER_STATUSES )->shlock( LOCK_SH );
+        foreach my $pid( keys %$WORKER_STATUSES )
+        {
+            $worker_lsns->{$pid} = $WORKER_STATUSES->{$pid}->{last_lsn};
+        }
+        tied( $WORKER_STATUSES )->shunlock();
+
+        foreach my $pid( keys %$worker_lsns )
+        {
+            my $last_lsn = $worker_lsns->{$pid};
+            next unless( $last_lsn );
+
+            if( !defined( $last_lsn_applied ) )
+            {
+                $last_lsn_applied = $last_lsn;
+            }
+            else
+            {
+                if( lsn_cmp( $last_lsn_applied, $last_lsn ) < 0 )
+                {
+                    $last_lsn_applied = $last_lsn;
+                }
+            }
+        }
+
+        if( defined( $last_lsn_applied ) )
+        {
+            if( &replication_seek( $handle, $last_lsn_applied ) )
+            {
+                print "Parent seeked changes to $last_lsn_applied\n";
+            }
+        }
+
+        undef( $last_lsn_applied );
         sleep( 5 );
 
     }
@@ -493,6 +529,12 @@ sub worker_entrypoint($$$$)
                 # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
                 # Check here to see if the table definition has changed
                 &drop_temp_table( $handle, $temp_table );
+
+                print "Applied $max_peeked_lsn\n";
+                $max_applied_lsn = $max_peeked_lsn;
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
+                tied( $WORKER_STATUSES )->shunlock();
             }
             sleep( 1 );
         }
