@@ -173,7 +173,7 @@ sub try_query($$;$) :Export( :MANDATORY )
     my $sleep_backoff     = 1;
     my $try_count         = 0;
 
-    _log( $LOG_LEVEL_DEBUG, "Executing '$query'" );
+    #_log( $LOG_LEVEL_DEBUG, "Executing '$query'" );
     RETRY_CONN:
     $retry_counter++;
     return undef if( $retry_counter > $MAX_QUERY_RETRIES );

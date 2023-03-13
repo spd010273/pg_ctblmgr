@@ -368,7 +368,8 @@ sub worker_entrypoint($$$$)
                     while( scalar( @{$WAL_DATA->{$filter_table}->{pin}} ) > 0 )
                     {
                         $change = pop( @{$WAL_DATA->{$filter_table}->{pin}} );
-
+                        print "Worker got change: \n";
+                        print Dumper( $change );
                         if( $change )
                         {
                             my $schema = $change->{data}->{schema_name};
@@ -402,93 +403,97 @@ sub worker_entrypoint($$$$)
                 # Digest changes for this filter table
             }
 
-            # now lets apply changes from the array after pop
-            my $query = &apply_filters(
-                $handle,
-                $PARSE_TREE,
-                $TABLE_MAPPING,
-                $cache_table_definition,
-                $changes
-            );
-
-            if( !&test_query( $handle, $query ) )
+            if( scalar( keys %$changes ) > 0 )
             {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    "Failed to apply filters to query for cache table '$cache_table_name'"
+                _log( $LOG_LEVEL_DEBUG, "Applying changes" );
+                # now lets apply changes from the array after pop
+                my $query = &apply_filters(
+                    $handle,
+                    $PARSE_TREE,
+                    $TABLE_MAPPING,
+                    $cache_table_definition,
+                    $changes
                 );
-                next;
-            }
 
-            # At this point we're ready to execute the table into a temp table
-            my $temp_table = &generate_temp_table( $handle, $query );
+                if( !&test_query( $handle, $query ) )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Failed to apply filters to query for cache table '$cache_table_name'"
+                    );
+                    next;
+                }
 
-            if( !defined( $temp_table ) )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    "Failed to generate temp table for updating cache table '$cache_table_name'"
+                # At this point we're ready to execute the table into a temp table
+                my $temp_table = &generate_temp_table( $handle, $query );
+
+                if( !defined( $temp_table ) )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Failed to generate temp table for updating cache table '$cache_table_name'"
+                    );
+                    next;
+                }
+
+                my $delete_result = generate_delete_statement(
+                    $handle,
+                    $cache_table_definition,
+                    $cache_table_schema,
+                    $cache_table_name,
+                    $CACHE_TABLE_COLUMNS,
+                    $CACHE_TABLE_UNIQUES
                 );
-                next;
-            }
 
-            my $delete_result = generate_delete_statement(
-                $handle,
-                $cache_table_definition,
-                $cache_table_schema,
-                $cache_table_name,
-                $CACHE_TABLE_COLUMNS,
-                $CACHE_TABLE_UNIQUES
-            );
+                unless( $delete_result )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Deleting entries from $cache_table_schema.$cache_table_name failed"
+                    );
+                    next;
+                }
 
-            unless( $delete_result )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    "Deleting entries from $cache_table_schema.$cache_table_name failed"
+                my $update_result = generate_update_statement(
+                    $handle,
+                    $temp_table,
+                    $cache_table_schema,
+                    $cache_table_name,
+                    $CACHE_TABLE_COLUMNS,
+                    $CACHE_TABLE_UNIQUES
                 );
-                next;
-            }
 
-            my $update_result = generate_update_statement(
-                $handle,
-                $temp_table,
-                $cache_table_schema,
-                $cache_table_name,
-                $CACHE_TABLE_COLUMNS,
-                $CACHE_TABLE_UNIQUES
-            );
+                unless( $update_result )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Updating entries in $cache_table_schema.$cache_table_name failed"
+                    );
+                    next;
+                }
 
-            unless( $update_result )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    "Updating entries in $cache_table_schema.$cache_table_name failed"
+                my $insert_result = generate_insert_statement(
+                    $handle,
+                    $temp_table,
+                    $cache_table_schema,
+                    $cache_table_name,
+                    $CACHE_TABLE_COLUMNS,
+                    $CACHE_TABLE_UNIQUES
                 );
-                next;
+
+                unless( $insert_result )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Inserting entries into $cache_table_schema.$cache_table_name failed"
+                    );
+                    next;
+                }
+
+                # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
+                # Check here to see if the table definition has changed
+                &drop_temp_table( $handle, $temp_table );
             }
-
-            my $insert_result = generate_insert_statement(
-                $handle,
-                $temp_table,
-                $cache_table_schema,
-                $cache_table_name,
-                $CACHE_TABLE_COLUMNS,
-                $CACHE_TABLE_UNIQUES
-            );
-
-            unless( $insert_result )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    "Inserting entries into $cache_table_schema.$cache_table_name failed"
-                );
-                next;
-            }
-
-            # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
-            # Check here to see if the table definition has changed
-            &drop_temp_table( $handle, $temp_table );
             sleep( 1 );
         }
     }
