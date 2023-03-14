@@ -1366,9 +1366,17 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         # TODO add FOR <lock statement>
         elsif( $is_in_cte && defined( $next_cte_name )              ) { $where_proceeding_clause_mark = '\)\s*,\s*' . $next_cte_name; }
         elsif( $is_in_cte && !defined( $next_cte_name )             ) { $where_proceeding_clause_mark = '\)\s*select';                }
+        elsif(
+                 !$table_mapping->{BINDS}->{$bind_start}->{has_where}
+              && !defined( $table_mapping->{BINDS}->{$bind_start}->{parent} )
+             )
+        {
+            $where_proceeding_clause_mark = '$';
+        }
         else
         {
             warn "Could not determine proceeding where clause mark\n";
+            print Dumper( $table_mapping );
             return;
         }
 

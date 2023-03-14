@@ -11,6 +11,8 @@ use English qw( -no_match_vars );
 use Params::Validate qw( :all );
 use JSON::XS;
 
+use Data::Dumper;
+
 use lib "$FindBin::Bin";
 use Util;
 
@@ -412,6 +414,7 @@ sub replication_peek($$$) :Export( :MANDATORY )
         return 0;
     }
 
+    print "peek got " . $sth->rows() . " rows\n";
     if( $sth->rows() > 0 )
     {
         my $intermediate_data = {};
@@ -434,7 +437,8 @@ sub replication_peek($$$) :Export( :MANDATORY )
             }
 
             my $xid  = $row->{xid};
-            my $data = decode_json( $row->{data} );
+            my $data;
+            $data = decode_json( $row->{data} ) if( $row->{data} );
             my $out  = { lsn => $lsn, xid => $xid, data => $data };
 
             unless( $xid ~~ @$xids )

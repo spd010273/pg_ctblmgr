@@ -142,13 +142,19 @@ sub parent_loop($$$)
 
     my $last_lsn_applied;
     my $last_peeked_lsn;
+    my $filter_table_lsns = {};
+
     while( 1 )
     {
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
         foreach my $filter_table( keys %$WORKER_FILTER_TABLES )
         {
+            print "PArent checking replication slot for table $filter_table\n";
+            $last_peeked_lsn = $filter_table_lsns->{$filter_table};
             my $data = replication_peek( $handle, $filter_table, \$last_peeked_lsn );
+            $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
             next unless( $data );
+            print Dumper( $data );
             my $index = 0;
 
             foreach my $PIN( @{$WORKER_FILTER_TABLES->{$filter_table}->{pins}} )
@@ -292,6 +298,7 @@ sub worker_entrypoint($$$$)
     }
 
     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+    sleep( 1 );
     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
     tied( $WORKER_STATUSES )->shunlock();
     my $handle = DBI->connect(
@@ -434,7 +441,6 @@ sub worker_entrypoint($$$$)
                     }
                 }
 
-                print "Worker max peeked lsn: $max_peeked_lsn\n";
                 tied( $WAL_DATA->{$filter_table}->{pin} )->shunlock();
                 # Digest changes for this filter table
             }
