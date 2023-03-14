@@ -87,6 +87,19 @@ INNER JOIN pg_catalog.pg_class ci
   GROUP BY ci.oid
 END_SQL
 
+Readonly::Scalar my $GET_CT_SHA => <<"END_SQL";
+    SELECT regexp_replace(
+               digest(
+                   mo.definition, 
+                   'sha256'::VARCHAR
+               )::VARCHAR,
+               '\\\\x',
+               ''
+           ) AS hash
+      FROM ${SCHEMA_NAME}.tb_maintenance_object mo
+     WHERE mo.maintenance_object = ?
+END_SQL
+
 Readonly::Scalar my $EXTENSION_CHECK_QUERY => <<END_SQL;
     SELECT n.oid
       FROM pg_namespace n
@@ -156,6 +169,64 @@ CREATE TABLE IF NOT EXISTS __TABLE__ AS
     __DEFINITION__
 );
 END_SQL
+
+Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
+    SELECT d.name AS driver,
+           mo.namespace,
+           mo.name,
+           mo.definition
+      FROM ${SCHEMA_NAME}.tb_driver d
+INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
+        ON mo.driver = d.driver
+     WHERE mo.maintenance_object = ?
+END_SQL
+
+sub get_ct_definition($$$) :Export( :MANDATORY )
+{
+    my( $handle, $pk_maintenance_object, $cache_hash ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => HASHREF | UNDEF },
+    );
+
+    my $ct_sth = &try_query(
+        $handle,
+        $GET_CACHE_TABLE_DEFINITION,
+        [ $pk_maintenance_object ]
+    );
+
+    if( $ct_sth )
+    {
+        my $row = $ct_sth->fetchrow_hashref();
+        $cache_hash->{schema}     = $row->{namespace};
+        $cache_hash->{driver}     = $row->{driver};
+        $cache_hash->{name}       = $row->{name};
+        $cache_hash->{definition} = $row->{definition};
+        $ct_sth->finish();
+       
+        $cache_hash->{digest} = get_ct_digest( $handle, $pk_maintenance_object ); 
+        
+        if( !defined( $cache_hash->{digest} ) )
+        {
+            _log( $LOG_LEVEL_FATAL, "Failed to get SHA256 checksum for cache_table" );
+        }
+        return 1;
+    }
+
+    return 0;
+}
+
+sub replace_cache_table($$)
+{
+    my( $handle, $pk_maintenance_object ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    #my $mo_sth = try_query( $handle,  );
+}
 
 sub try_query($$;$) :Export( :MANDATORY )
 {
@@ -263,6 +334,26 @@ sub try_query($$;$) :Export( :MANDATORY )
     return $sth;
 }
 
+sub get_ct_digest($$) :Export( :MANDATORY )
+{
+    my( $handle, $pk_maintenance_object ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $sth = try_query( $handle, $GET_CT_SHA, [ $pk_maintenance_object ] );
+
+    if( $sth )
+    {
+        my $hash_row = $sth->fetchrow_hashref();
+        my $hash = $hash_row->{hash};
+        $sth->finish();
+        return $hash;
+    }
+
+    return;
+}
 
 sub check_extension($) :Export( :MANDATORY )
 {
@@ -669,8 +760,8 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
-        my $where_clause = join( ' AND ', map { "ct.$_ = tt.$_" } @$unique_columns );
+        my $join_clause  = join( ' AND ', map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns );
+        my $where_clause = join( ' AND ', map { "ct.$_ IS NOT DISTINCT FROM tt.$_" } @$unique_columns );
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
 
@@ -736,7 +827,7 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $join_clause  = join( ' AND ', map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns );
         my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
@@ -788,7 +879,7 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join( ' AND ', map { "tt.$_ = vw.$_" } @$unique_columns );
+        my $join_clause  = join( ' AND ', map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns );
         my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
@@ -816,6 +907,7 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
           WHERE $join_predicate
 END_SQL
 
+    print "$DELETE_Q\n";
     my $sth = &try_query( $handle, $DELETE_Q, [] );
 
     unless( $sth )

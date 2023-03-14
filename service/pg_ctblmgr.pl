@@ -36,17 +36,6 @@ use QueryParser;
 
 $OUTPUT_AUTOFLUSH = 1;
 
-Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
-    SELECT d.name AS driver,
-           mo.namespace,
-           mo.name,
-           mo.definition
-      FROM ${SCHEMA_NAME}.tb_driver d
-INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
-        ON mo.driver = d.driver
-     WHERE mo.maintenance_object = ?
-END_SQL
-
 ## GLOBAL VARIABLES
 $PARENT_PID  = $PROCESS_ID;
 $SLOT_NAME   = '__pg_ctblmgr';
@@ -191,7 +180,13 @@ sub parent_loop($$$)
         foreach my $pid( keys %$worker_lsns )
         {
             my $last_lsn = $worker_lsns->{$pid};
-            next unless( $last_lsn );
+
+            unless( $last_lsn )
+            {
+                # Note - we WILL NOT ack any LSNs iff a worker hasn't completed anything here
+                undef( $last_lsn_applied );
+                last;
+            }
 
             if( !defined( $last_lsn_applied ) )
             {
@@ -222,6 +217,74 @@ sub parent_loop($$$)
     return;
 }
 
+# This sub consolidates caching function to a CACHE_HASH output which is
+# further accessed by subroutines in the main worker loop
+sub worker_cache_refresh($$$$)
+{
+    my(
+        $handle,
+        $pk_maintenance_object,
+        $filter_tables,
+        $cache_hash
+    ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => ARRAYREF },
+        { type => HASHREF | UNDEF },
+    );
+
+    unless( get_ct_definition( $handle, $pk_maintenance_object, $cache_hash ) )
+    {
+        _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
+    }
+
+    $cache_hash->{relcache}      = get_relcache( $handle );
+    $cache_hash->{table_mapping} = {};
+    $cache_hash->{parse_tree}    = &find_table_aliases(
+        $handle,
+        $cache_hash->{relcache},
+        $cache_hash->{definition},
+        $filter_tables,
+        $cache_hash->{table_mapping}
+    );
+
+    # Columns in order of appearance on table
+    $cache_hash->{cache_table_columns} = &get_cache_table_columns(
+        $handle,
+        $cache_hash->{schema},
+        $cache_hash->{name}
+    );
+    # Array of uniques (index/constraints) containing array of constrained cols
+    $cache_hash->{cache_table_uniques} = &get_cache_table_unique(
+        $handle,
+        $cache_hash->{schema},
+        $cache_hash->{name}
+    );
+
+    # Last pre-flight check - validate TABLE_MAPPING against filter tables
+    foreach my $schema( keys %{$cache_hash->{table_mapping}->{RELS}} )
+    {
+        foreach my $table( keys %{$cache_hash->{table_mapping}->{RELS}->{$schema}} )
+        {
+            my $relname = "${schema}.${table}";
+
+            unless( grep( /^$relname$/, @$filter_tables ) )
+            {
+                # This is mainly for debugging, but we could add this relation to the filter tables array
+                # rather than complaining
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Relation $relname is not present in filter tables provided by parent! Updates may be missed."
+                );
+                return;
+            }
+        }
+    }
+
+    return;
+}
+
 sub worker_entrypoint($$$$)
 {
     my( $wal_level, $filter_tables, $maintenance_channel, $pk_maintenance_object ) = validate_pos(
@@ -232,6 +295,7 @@ sub worker_entrypoint($$$$)
         { type => SCALAR },
     );
 
+    my $CACHE_HASH = {};
     my $WORKER_FILTER_TABLES = {};
     my $WAL_DATA;
     my $WORKER_STATUSES = {};
@@ -312,79 +376,47 @@ sub worker_entrypoint($$$$)
         _log( $LOG_LEVEL_FATAL, "Worker failed to connect to DB" );
     }
 
-    my $table_sth = try_query( $handle, $GET_CACHE_TABLE_DEFINITION, [ $pk_maintenance_object ] );
-
-    unless( $table_sth )
+    unless( get_ct_definition( $handle, $pk_maintenance_object, $CACHE_HASH ) )
     {
-        _log( $LOG_LEVEL_FATAL, "Worker failed to retreive cache table definition" );
+        _log( $LOG_LEVEL_FATAL, "Failed to look up CT '$pk_maintenance_object' definition" );
     }
-
-    my $mo_row = $table_sth->fetchrow_hashref();
-    my $cache_table_definition = $mo_row->{definition};
-    my $cache_table_schema     = $mo_row->{namespace};
-    my $cache_table_name       = $mo_row->{name};
-    my $cache_table_driver     = $mo_row->{driver};
-    $table_sth->finish();
 
     # Table mapping and parse tree are (relatively) static and only change if our query changes underneath us
     # TODO: Add detection and correction for the above
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
 
-    if( $cache_table_driver eq 'postgresql' )
+    if( $CACHE_HASH->{driver} eq 'postgresql' )
     {
         &check_ct_exists(
             $handle,
-            $cache_table_schema,
-            $cache_table_name,
-            $cache_table_definition
-        );
-        my $relcache      = get_relcache( $handle );
-        my $TABLE_MAPPING = {};
-        my $PARSE_TREE    = &find_table_aliases(
-            $handle,
-            $relcache,
-            $cache_table_definition,
-            $filter_tables,
-            $TABLE_MAPPING
+            $CACHE_HASH->{schema},
+            $CACHE_HASH->{name},
+            $CACHE_HASH->{definition}
         );
 
         # Main worker loop
-        my $max_peeked_lsn  = '';
-        my $max_applied_lsn = '';
-
-        # Columns in order of appearance on table
-        my $CACHE_TABLE_COLUMNS = &get_cache_table_columns(
-            $handle,
-            $cache_table_schema,
-            $cache_table_name
-        );
-        # Array of uniques (index/constraints) containing array of constrained cols
-        my $CACHE_TABLE_UNIQUES = &get_cache_table_unique(
-            $handle,
-            $cache_table_schema,
-            $cache_table_name
-        );
-        # Last pre-flight check - validate TABLE_MAPPING against filter tables
-        foreach my $schema( keys %{$TABLE_MAPPING->{RELS}} )
-        {
-            foreach my $table( keys %{$TABLE_MAPPING->{RELS}->{$schema}} )
-            {
-                my $relname = "${schema}.${table}";
-
-                unless( grep( /^$relname$/, @$filter_tables ) )
-                {
-                    # This is mainly for debugging, but we could add this relation to the filter tables array
-                    # rather than complaining
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        "Relation $relname is not present in filter tables provided by parent! Updates may be missed."
-                    );
-                }
-            }
-        }
+        &worker_cache_refresh( $handle, $pk_maintenance_object, $filter_tables, $CACHE_HASH );
 
         while( 1 )
         {
+            # check to see if definition has changed
+            my $max_peeked_lsn;
+            my $max_applied_lsn;
+            my $test_hash = get_ct_digest( $handle, $pk_maintenance_object );
+            if( !defined $test_hash )
+            {
+                _log( $LOG_LEVEL_FATAL, "Failed to check maintenance object for definition change (SHA256)" );
+            }
+
+            if( $test_hash ne $CACHE_HASH->{digest} )
+            {
+                _log( $LOG_LEVEL_INFO, "Cache table definition has changed, replacing the cache table" );
+                &worker_cache_refresh( $handle, $pk_maintenance_object, $filter_tables, $CACHE_HASH );
+                # XXX Replace CT
+
+            }
+
+            # Process changes
             my $changes = {};
 
             foreach my $filter_table( keys %$WAL_DATA )
@@ -432,7 +464,7 @@ sub worker_entrypoint($$$$)
                                 }
                             }
 
-                            if( lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0 )
+                            if( !defined( $max_peeked_lsn ) || lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0 )
                             {
                                 $max_peeked_lsn = $change->{commit_lsn};
                             }
@@ -451,9 +483,9 @@ sub worker_entrypoint($$$$)
                 # now lets apply changes from the array after pop
                 my $query = &apply_filters(
                     $handle,
-                    $PARSE_TREE,
-                    $TABLE_MAPPING,
-                    $cache_table_definition,
+                    $CACHE_HASH->{parse_tree},
+                    $CACHE_HASH->{table_mapping},
+                    $CACHE_HASH->{definition},
                     $changes
                 );
 
@@ -461,7 +493,7 @@ sub worker_entrypoint($$$$)
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Failed to apply filters to query for cache table '$cache_table_name'"
+                        "Failed to apply filters to query for cache table '$CACHE_HASH->{name}'"
                     );
                     next;
                 }
@@ -473,25 +505,25 @@ sub worker_entrypoint($$$$)
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Failed to generate temp table for updating cache table '$cache_table_name'"
+                        "Failed to generate temp table for updating cache table '$CACHE_HASH->{name}'"
                     );
                     next;
                 }
 
                 my $delete_result = generate_delete_statement(
                     $handle,
-                    $cache_table_definition,
-                    $cache_table_schema,
-                    $cache_table_name,
-                    $CACHE_TABLE_COLUMNS,
-                    $CACHE_TABLE_UNIQUES
+                    $CACHE_HASH->{definition},
+                    $CACHE_HASH->{schema},
+                    $CACHE_HASH->{name},
+                    $CACHE_HASH->{cache_table_columns},
+                    $CACHE_HASH->{cache_table_uniques}
                 );
 
                 unless( $delete_result )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Deleting entries from $cache_table_schema.$cache_table_name failed"
+                        "Deleting entries from $CACHE_HASH->{schema}.$CACHE_HASH->{name} failed"
                     );
                     next;
                 }
@@ -499,17 +531,17 @@ sub worker_entrypoint($$$$)
                 my $update_result = generate_update_statement(
                     $handle,
                     $temp_table,
-                    $cache_table_schema,
-                    $cache_table_name,
-                    $CACHE_TABLE_COLUMNS,
-                    $CACHE_TABLE_UNIQUES
+                    $CACHE_HASH->{schema},
+                    $CACHE_HASH->{name},
+                    $CACHE_HASH->{cache_table_columns},
+                    $CACHE_HASH->{cache_table_uniques}
                 );
 
                 unless( $update_result )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Updating entries in $cache_table_schema.$cache_table_name failed"
+                        "Updating entries in $CACHE_HASH->{schema}.$CACHE_HASH->{name} failed"
                     );
                     next;
                 }
@@ -517,17 +549,17 @@ sub worker_entrypoint($$$$)
                 my $insert_result = generate_insert_statement(
                     $handle,
                     $temp_table,
-                    $cache_table_schema,
-                    $cache_table_name,
-                    $CACHE_TABLE_COLUMNS,
-                    $CACHE_TABLE_UNIQUES
+                    $CACHE_HASH->{schema},
+                    $CACHE_HASH->{name},
+                    $CACHE_HASH->{cache_table_columns},
+                    $CACHE_HASH->{cache_table_uniques}
                 );
 
                 unless( $insert_result )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Inserting entries into $cache_table_schema.$cache_table_name failed"
+                        "Inserting entries into $CACHE_HASH->{schema}.$CACHE_HASH->{name} failed"
                     );
                     next;
                 }
@@ -542,14 +574,15 @@ sub worker_entrypoint($$$$)
                 $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
                 tied( $WORKER_STATUSES )->shunlock();
             }
+   
             sleep( 1 );
-        }
+        } # postgres driver main loop
     }
     else
     {
         _log(
             $LOG_LEVEL_FATAL,
-            "Worker cannot proceed. Driver $cache_table_driver not implemented\n"
+            "Worker cannot proceed. Driver $CACHE_HASH->{driver} not implemented\n"
         );
     }
 
