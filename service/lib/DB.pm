@@ -75,14 +75,14 @@ INNER JOIN pg_catalog.pg_attribute a
         ON a.attrelid = c.oid
        AND a.attnum > 0
        AND a.attisdropped IS FALSE
-       AND a.attnum = ANY( i.indkey ) 
+       AND a.attnum = ANY( i.indkey )
 INNER JOIN pg_catalog.pg_class ci
         ON ci.oid = i.indexrelid
  LEFT JOIN pg_catalog.pg_constraint co
         ON co.contype = 'u'
        AND co.conrelid = c.oid
        AND co.conindid = ci.oid
-     WHERE c.relname::VARCHAR = ? 
+     WHERE c.relname::VARCHAR = ?
        AND co.oid IS NULL
   GROUP BY ci.oid
 END_SQL
@@ -90,7 +90,7 @@ END_SQL
 Readonly::Scalar my $GET_CT_SHA => <<"END_SQL";
     SELECT regexp_replace(
                digest(
-                   mo.definition, 
+                   mo.definition,
                    'sha256'::VARCHAR
                )::VARCHAR,
                '\\\\x',
@@ -174,10 +174,13 @@ Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
     SELECT d.name AS driver,
            mo.namespace,
            mo.name,
-           mo.definition
+           mo.definition,
+           rs.filter
       FROM ${SCHEMA_NAME}.tb_driver d
 INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.driver = d.driver
+INNER JOIN ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
+        ON rs.id = mo.maintenance_object
      WHERE mo.maintenance_object = ?
 END_SQL
 
@@ -199,14 +202,15 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
     if( $ct_sth )
     {
         my $row = $ct_sth->fetchrow_hashref();
-        $cache_hash->{schema}     = $row->{namespace};
-        $cache_hash->{driver}     = $row->{driver};
-        $cache_hash->{name}       = $row->{name};
-        $cache_hash->{definition} = $row->{definition};
+        $cache_hash->{schema}        = $row->{namespace};
+        $cache_hash->{driver}        = $row->{driver};
+        $cache_hash->{name}          = $row->{name};
+        $cache_hash->{definition}    = $row->{definition};
+        $cache_hash->{filter_tables} = $row->{filter};
         $ct_sth->finish();
-       
-        $cache_hash->{digest} = get_ct_digest( $handle, $pk_maintenance_object ); 
-        
+
+        $cache_hash->{digest} = get_ct_digest( $handle, $pk_maintenance_object );
+
         if( !defined( $cache_hash->{digest} ) )
         {
             _log( $LOG_LEVEL_FATAL, "Failed to get SHA256 checksum for cache_table" );
@@ -225,7 +229,47 @@ sub replace_cache_table($$)
         { type => SCALAR },
     );
 
-    #my $mo_sth = try_query( $handle,  );
+    my $ct_hash = {};
+
+    unless( &get_ct_definition( $handle, $pk_maintenance_object, $ct_hash ) )
+    {
+        _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
+        return 0;
+    }
+
+    my $name          = $ct_hash->{name};
+    $ct_hash->{name} .= '_temp';
+    my $temp_name     = $ct_hash->{name};
+    my $schema        = $ct_hash->{schema};
+    my $definition    = $ct_hash->{definition};
+
+    $handle->do( 'BEGIN' );
+    &create_cache_table( $handle, $ct_hash );
+    my $sth = &try_query( $handle, "DROP TABLE $schema.$name" );
+
+    unless( $sth )
+    {
+        $handle->do( 'ROLLBACK' );
+        _log( $LOG_LEVEL_FATAL, "Cache table replacement failed - could not drop old definition" );
+    }
+
+    $sth = &try_query( $handle, "ALTER TABLE $schema.$temp_name RENAME TO $schema.$name" );
+
+    unless( $sth )
+    {
+        $handle->do( 'ROLLBACK' );
+        _log( $LOG_LEVEL_FATAL, "Cache table replacement failed - could not rename new table" );
+    }
+
+    unless( $handle->do( "ANALYZE $schema.$name" ) )
+    {
+        $handle->do( 'ROLLBACK' );
+        _log( $LOG_LEVEL_FATAL, "Failed to analyze replacement cache table" );
+    }
+
+    $handle->do( 'COMMIT' );
+
+    return;
 }
 
 sub try_query($$;$) :Export( :MANDATORY )
@@ -608,11 +652,28 @@ sub check_ct_exists($$$$) :Export( :MANDATORY )
         return;
     }
 
+    $sth->finish();
+    &create_cache_table( $handle, { name => $name, definition => $definition, schema => $schema } );
+
+    return;
+}
+
+sub create_cache_table($$)
+{
+    my( $handle, $ct_hash ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => HASHREF },
+    );
+
+    my $schema     = $ct_hash->{schema};
+    my $name       = $ct_hash->{name};
+    my $definition = $ct_hash->{definition};
     my $create_query = $CREATE_CACHE_TABLE;
     $create_query =~ s/__TABLE__/${schema}.${name}/;
     $create_query =~ s/__DEFINITION__/$definition/;
 
-    $sth = try_query( $handle, $create_query, undef );
+    my $sth = try_query( $handle, $create_query, undef );
 
     unless( $sth )
     {

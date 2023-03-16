@@ -31,7 +31,7 @@ use QueryParser;
 # - This can read queries but is relatively untested against all the possible variations and expressiveness of SQL
 #   therefore, the simpler and less deeply nested a query can be, the better. There are safety checks to prevent bad
 #   queries from executing
-# - This requires, like matviews, that a unique expression exists on the table, though this can support multiple 
+# - This requires, like matviews, that a unique expression exists on the table, though this can support multiple
 # NOTE: IPC::Shareable keys seeem to be extremely short (4-8 chars) and may collide!
 
 $OUTPUT_AUTOFLUSH = 1;
@@ -234,12 +234,12 @@ sub worker_cache_refresh($$$$)
         { type => HASHREF | UNDEF },
     );
 
-    unless( get_ct_definition( $handle, $pk_maintenance_object, $cache_hash ) )
+    unless( &get_ct_definition( $handle, $pk_maintenance_object, $cache_hash ) )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
     }
 
-    $cache_hash->{relcache}      = get_relcache( $handle );
+    $cache_hash->{relcache}      = &get_relcache( $handle );
     $cache_hash->{table_mapping} = {};
     $cache_hash->{parse_tree}    = &find_table_aliases(
         $handle,
@@ -376,7 +376,7 @@ sub worker_entrypoint($$$$)
         _log( $LOG_LEVEL_FATAL, "Worker failed to connect to DB" );
     }
 
-    unless( get_ct_definition( $handle, $pk_maintenance_object, $CACHE_HASH ) )
+    unless( &get_ct_definition( $handle, $pk_maintenance_object, $CACHE_HASH ) )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to look up CT '$pk_maintenance_object' definition" );
     }
@@ -402,7 +402,7 @@ sub worker_entrypoint($$$$)
             # check to see if definition has changed
             my $max_peeked_lsn;
             my $max_applied_lsn;
-            my $test_hash = get_ct_digest( $handle, $pk_maintenance_object );
+            my $test_hash = &get_ct_digest( $handle, $pk_maintenance_object );
             if( !defined $test_hash )
             {
                 _log( $LOG_LEVEL_FATAL, "Failed to check maintenance object for definition change (SHA256)" );
@@ -412,8 +412,7 @@ sub worker_entrypoint($$$$)
             {
                 _log( $LOG_LEVEL_INFO, "Cache table definition has changed, replacing the cache table" );
                 &worker_cache_refresh( $handle, $pk_maintenance_object, $filter_tables, $CACHE_HASH );
-                # XXX Replace CT
-
+                &replace_cache_table( $handle, $pk_maintenance_object );
             }
 
             # Process changes
@@ -574,7 +573,7 @@ sub worker_entrypoint($$$$)
                 $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
                 tied( $WORKER_STATUSES )->shunlock();
             }
-   
+
             sleep( 1 );
         } # postgres driver main loop
     }
