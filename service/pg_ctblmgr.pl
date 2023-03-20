@@ -214,11 +214,21 @@ sub parent_loop($$$)
             }
         }
 
-        if( defined( $last_lsn_applied ) && lsn_cmp( $last_lsn_applied, $last_last_lsn_applied ) > 0 )
+        if(
+                defined( $last_lsn_applied )
+             && (
+                  (
+                      defined( $last_last_lsn_applied )
+                   && lsn_cmp( $last_lsn_applied, $last_last_lsn_applied ) > 0
+                  )
+               || ( !defined( $last_last_lsn_applied ) )
+                )
+          )
         {
             if( &replication_seek( $handle, $last_lsn_applied ) )
             {
                 print "Parent seeked changes to $last_lsn_applied\n";
+                $last_last_lsn_applied = $last_lsn_applied;
             }
         }
 
