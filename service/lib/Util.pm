@@ -4,6 +4,7 @@ use Perl6::Export::Attrs;
 use Readonly;
 use IO::Interactive qw( is_interactive );
 use Params::Validate qw( :all );
+use English qw( -no_match_vars );
 
 Readonly::Scalar our $DEBUG                  :Export( :MANDATORY ) => 1;
 Readonly::Scalar our $CLEAN_UP               :Export( :MANDATORY ) => 0; # Emergency shm cleanup
