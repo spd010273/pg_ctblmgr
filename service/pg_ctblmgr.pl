@@ -28,11 +28,15 @@ use DB;
 use QueryParser;
 
 # DEV NOTES:
-# - This can read queries but is relatively untested against all the possible variations and expressiveness of SQL
-#   therefore, the simpler and less deeply nested a query can be, the better. There are safety checks to prevent bad
-#   queries from executing
-# - This requires, like matviews, that a unique expression exists on the table, though this can support multiple
+# - This can read queries but is relatively untested against all the possible
+#   variations and expressiveness of SQL. Therefore, the simpler and less
+#   deeply nested a query can be, the better. There are safety checks to
+#   prevent bad queries from executing.
+# - This requires, like matviews, that a unique expression exists on the table,
+#   though this can support multiple unique indicies.
 # NOTE: IPC::Shareable keys seeem to be extremely short (4-8 chars) and may collide!
+
+Readonly my $SLEEP_TIMER => 1; # seconds for main loop
 
 $OUTPUT_AUTOFLUSH = 1;
 
@@ -56,19 +60,34 @@ sub _terminate()
 }
 
 $SIG{INT} = \&_terminate;
+$SIG{__DIE__} = \&_terminate;
 
 sub shm_cleanup()
 {
+    # Note: This cleans up shared memory and semaphore arrays. These
+    # will not be automatically be cleaned up by the kernel. This can be
+    # done manually with ipcs / ipcrm
     my $WORKER_FILTER_TABLES;
     my $WORKER_STATUSES;
-    tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
-    tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } );
+
+    tie(
+        $WORKER_FILTER_TABLES,
+        'IPC::Shareable',
+        { key => 'WORKER_FILTER_TABLES' }
+    );
+    tie(
+        $WORKER_STATUSES,
+        'IPC::Shareable',
+        { key => 'STATUSES' }
+    );
 
     tied( $WORKER_FILTER_TABLES )->clean_up_all();
     tied( $WORKER_STATUSES )->clean_up_all();
 
     my $sigwarn = $SIG{__WARN__};
     local $SIG{__WARN__} = sub {};
+
+    # Attempt to remove buffer PINs
     my $test;
     for( my $i = 0; $i < 1000; $i++ )
     {
@@ -87,7 +106,7 @@ sub shm_cleanup()
     }
 
     $SIG{__WARN__} = $sigwarn;
-    exit( 0 );
+    return;
 }
 
 sub parent_loop($$$)
@@ -238,8 +257,9 @@ sub parent_loop($$$)
             &replication_seek( $handle, $max_idle_lsn );
             $last_lsn_applied = $max_idle_lsn;
         }
+
         $last_max_idle_lsn = $max_idle_lsn;
-        sleep( 5 );
+        sleep( $SLEEP_TIMER );
 
         #TODO: Check in on children
 
@@ -596,7 +616,14 @@ sub worker_entrypoint($$$$)
 
                 # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
                 # Check here to see if the table definition has changed
-                &drop_temp_table( $handle, $temp_table );
+                unless( &drop_temp_table( $handle, $temp_table ) )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Failed to drop temporary table used to maintain cache table $CACHE_HASH->{schema}.$CACHE_HASH->{name}"
+                    );
+                    next;
+                }
 
                 print "Applied $max_peeked_lsn\n";
                 $max_applied_lsn = $max_peeked_lsn;
@@ -605,7 +632,7 @@ sub worker_entrypoint($$$$)
                 tied( $WORKER_STATUSES )->shunlock();
             }
 
-            sleep( 1 );
+            sleep( $SLEEP_TIMER );
         } # postgres driver main loop
     }
     else

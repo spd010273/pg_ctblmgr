@@ -222,12 +222,19 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
         $cache_hash->{filter_tables} = $row->{filter};
         $ct_sth->finish();
 
-        $cache_hash->{digest} = get_ct_digest( $handle, $pk_maintenance_object );
+        $cache_hash->{digest} = get_ct_digest(
+            $handle,
+            $pk_maintenance_object
+        );
 
         if( !defined( $cache_hash->{digest} ) )
         {
-            _log( $LOG_LEVEL_FATAL, "Failed to get SHA256 checksum for cache_table" );
+            _log(
+                $LOG_LEVEL_FATAL,
+                'Failed to get SHA256 checksum for cache_table'
+            );
         }
+
         return 1;
     }
 
@@ -263,15 +270,24 @@ sub replace_cache_table($$)
     unless( $sth )
     {
         $handle->do( 'ROLLBACK' );
-        _log( $LOG_LEVEL_FATAL, "Cache table replacement failed - could not drop old definition" );
+        _log(
+            $LOG_LEVEL_FATAL,
+            'Cache table replacement failed - could not drop old definition'
+        );
     }
 
-    $sth = &try_query( $handle, "ALTER TABLE $schema.$temp_name RENAME TO $schema.$name" );
+    $sth = &try_query(
+        $handle,
+        "ALTER TABLE $schema.$temp_name RENAME TO $schema.$name"
+    );
 
     unless( $sth )
     {
         $handle->do( 'ROLLBACK' );
-        _log( $LOG_LEVEL_FATAL, "Cache table replacement failed - could not rename new table" );
+        _log(
+            $LOG_LEVEL_FATAL,
+            'Cache table replacement failed - could not rename new table'
+        );
     }
 
     unless( $handle->do( "ANALYZE $schema.$name" ) )
@@ -308,7 +324,14 @@ sub try_query($$;$) :Export( :MANDATORY )
 
     until( defined( $handle ) && $handle->pg_ping > 0 )
     {
-        _log( $LOG_LEVEL_INFO, 'Not connected to DB, attempting to reconnect...' ) if( $DEBUG );
+        if( $DEBUG )
+        {
+            _log(
+                $LOG_LEVEL_INFO,
+                'Not connected to DB, attempting to reconnect...'
+            );
+        }
+
         $try_count++;
         sleep( $sleep_backoff );
         $handle = DBI->connect(
@@ -331,7 +354,10 @@ sub try_query($$;$) :Export( :MANDATORY )
     {
         unless( check_extension_running( $handle ) )
         {
-            _log( $LOG_LEVEL_FATAL, "Failed to acquire lock after reconnecting to database" );
+            _log(
+                $LOG_LEVEL_FATAL,
+                'Failed to acquire lock after reconnecting to database'
+            );
         }
     }
 
@@ -364,7 +390,13 @@ sub try_query($$;$) :Export( :MANDATORY )
 
     until( $sth->execute() )
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to execute statement, retrying...' ) if( $DEBUG );
+        if( $DEBUG )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Failed to execute statement, retrying...'
+            );
+        }
 
         $try_count++;
         goto RETRY_CONN if( $handle->pg_ping <= 0 );
@@ -372,11 +404,17 @@ sub try_query($$;$) :Export( :MANDATORY )
 
         if( $query_state eq $SQL_STATE_ADMIN_CANC )
         {
-            _log( $LOG_LEVEL_ERROR, 'Query canceled by administrator. Retrying...' );
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Query canceled by administrator. Retrying...'
+            );
         }
         elsif( $query_state eq $SQL_STATE_ADMIN_TERM )
         {
-            _log( $LOG_LEVEL_ERROR, 'Query terminated by administrator. Retrying...' );
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Query terminated by administrator. Retrying...'
+            );
         }
 
         sleep( $sleep_backoff );
@@ -593,17 +631,9 @@ sub replication_peek($$$) :Export( :MANDATORY )
         {
             my $lsn  = $row->{lsn};
 
-            if( !defined $$max_lsn )
+            if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
             {
                 $$max_lsn = $lsn;
-            }
-            else
-            {
-                # if( $$max_lsn < $lsn )
-                if( lsn_cmp( $$max_lsn, $lsn ) < 0 )
-                {
-                    $$max_lsn = $lsn;
-                }
             }
 
             my $xid  = $row->{xid};
@@ -634,6 +664,8 @@ sub replication_peek($$$) :Export( :MANDATORY )
         $sth->finish();
 
         my $out_data = [];
+        # Step through transactional data and only output DML if we detect both a valid
+        # BEGIN and COMMIT for the DML's XID
         foreach my $xid( @$xids )
         {
             if(
@@ -673,7 +705,11 @@ sub check_ct_exists($$$$) :Export( :MANDATORY )
         { type => SCALAR },
     );
 
-    my $sth = try_query( $handle, $CHECK_CACHE_TABLE_EXISTS, [ $schema, $name ] );
+    my $sth = try_query(
+        $handle,
+        $CHECK_CACHE_TABLE_EXISTS,
+        [ $schema, $name ]
+    );
 
     unless( $sth )
     {
@@ -688,7 +724,14 @@ sub check_ct_exists($$$$) :Export( :MANDATORY )
     }
 
     $sth->finish();
-    &create_cache_table( $handle, { name => $name, definition => $definition, schema => $schema } );
+    &create_cache_table(
+        $handle,
+        {
+            name       => $name,
+            definition => $definition,
+            schema     => $schema
+        }
+    );
 
     return;
 }
@@ -701,12 +744,12 @@ sub create_cache_table($$)
         { type => HASHREF },
     );
 
-    my $schema     = $ct_hash->{schema};
-    my $name       = $ct_hash->{name};
-    my $definition = $ct_hash->{definition};
+    my $schema       = $ct_hash->{schema};
+    my $name         = $ct_hash->{name};
+    my $definition   = $ct_hash->{definition};
     my $create_query = $CREATE_CACHE_TABLE;
-    $create_query =~ s/__TABLE__/${schema}.${name}/;
-    $create_query =~ s/__DEFINITION__/$definition/;
+    $create_query    =~ s/__TABLE__/${schema}.${name}/;
+    $create_query    =~ s/__DEFINITION__/$definition/;
 
     my $sth = try_query( $handle, $create_query, undef );
 
@@ -770,15 +813,12 @@ sub drop_temp_table($$) :Export( :MANDATORY )
     );
 
     my $query = "DROP TABLE $temp_table";
-    my $sth = try_query( $handle, $query );
+    my $sth   = try_query( $handle, $query );
 
-    if( $sth )
-    {
-        $sth->finish();
-        return;
-    }
+    return 0 unless( $sth );
 
-    return;
+    $sth->finish();
+    return 1;
 }
 
 sub get_cache_table_columns($$$) :Export( :MANDATORY )
@@ -790,7 +830,11 @@ sub get_cache_table_columns($$$) :Export( :MANDATORY )
         { type => SCALAR },
     );
 
-    my $sth = &try_query( $handle, $CACHE_TABLE_COLUMNS, [ $cache_table_schema, $cache_table_name ] );
+    my $sth = &try_query(
+        $handle,
+        $CACHE_TABLE_COLUMNS,
+        [ $cache_table_schema, $cache_table_name ]
+    );
 
     return unless( $sth );
     my $columns = [];
@@ -839,7 +883,14 @@ sub get_cache_table_unique($$$) :Export( :MANDATORY )
 
 sub generate_update_statement($$$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $temp_table, $cache_table_schema, $cache_table_name, $table_columns, $uniques ) = validate_pos(
+    my(
+        $handle,
+        $temp_table,
+        $cache_table_schema,
+        $cache_table_name,
+        $table_columns,
+        $uniques
+      ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => SCALAR },
@@ -856,8 +907,16 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join( ' AND ', map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns );
-        my $where_clause = join( ' AND ', map { "ct.$_ IS NOT DISTINCT FROM tt.$_" } @$unique_columns );
+        my $join_clause  = join(
+            ' AND ',
+            map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns
+        );
+
+        my $where_clause = join(
+            ' AND ',
+            map { "ct.$_ IS NOT DISTINCT FROM tt.$_" } @$unique_columns
+        );
+
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
 
@@ -897,10 +956,7 @@ END_SQL
 
     my $sth = &try_query( $handle, $UPDATE_Q, [] );
 
-    unless( $sth )
-    {
-        return 0;
-    }
+    return 0 unless( $sth );
 
     $sth->finish();
     return 1;
@@ -908,7 +964,14 @@ END_SQL
 
 sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $temp_table, $cache_table_schema, $cache_table_name, $table_columns, $uniques ) = validate_pos(
+    my(
+        $handle,
+        $temp_table,
+        $cache_table_schema,
+        $cache_table_name,
+        $table_columns,
+        $uniques
+      ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => SCALAR },
@@ -923,8 +986,14 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join( ' AND ', map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns );
-        my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
+        my $join_clause  = join(
+            ' AND ',
+            map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns
+        );
+        my $where_clause = join(
+            ' AND ',
+            map { "tt.$_ IS NULL" } @$unique_columns
+        );
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
     }
@@ -949,10 +1018,7 @@ END_SQL
 
     my $sth = &try_query( $handle, $INSERT_Q, [] );
 
-    unless( $sth )
-    {
-        return 0;
-    }
+    return 0 unless( $sth );
 
     $sth->finish();
     return 1;
@@ -960,7 +1026,14 @@ END_SQL
 
 sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $definition, $cache_table_schema, $cache_table_name, $table_columns, $uniques ) = validate_pos(
+    my(
+        $handle,
+        $definition,
+        $cache_table_schema,
+        $cache_table_name,
+        $table_columns,
+        $uniques
+      ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => SCALAR },
@@ -975,8 +1048,14 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join( ' AND ', map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns );
-        my $where_clause = join( ' AND ', map { "tt.$_ IS NULL" } @$unique_columns );
+        my $join_clause  = join(
+            ' AND ',
+            map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns
+        );
+        my $where_clause = join(
+            ' AND ',
+            map { "tt.$_ IS NULL" } @$unique_columns
+        );
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
     }
@@ -1006,10 +1085,7 @@ END_SQL
     print "$DELETE_Q\n";
     my $sth = &try_query( $handle, $DELETE_Q, [] );
 
-    unless( $sth )
-    {
-        return 0;
-    }
+    return 0 unless( $sth );
 
     $sth->finish();
     return 1;

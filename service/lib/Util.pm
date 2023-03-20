@@ -86,7 +86,18 @@ sub _log($$) :Export( :MANDATORY )
     }
 
     my $pid  = $PROCESS_ID;
-    my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $is_dst ) = localtime( time );
+    my(
+        $sec,
+        $min,
+        $hour,
+        $mday,
+        $mon,
+        $year,
+        $wday,
+        $yday,
+        $is_dst
+      ) = localtime( time );
+
     my $time_stamp = sprintf(
         '%04d-%02d-%02d %02d:%02d:%02d',
         $year + 1900,
@@ -137,12 +148,14 @@ sub usage($) :Export( :MANDATORY )
 }
 
 # lsn_cmp( A, B ):
-#  Compares two LSNs (Log Sequence Number) and determines which is greater
+#  Compares two LSNs (Log Sequence Number)
+#  and determines which is greater
 #  Returns:
 #   - -1 if( A < B )
 #   - 0 if( A == B )
 #   - 1 if( A > B )
-#  LSNs are a 64-bit integer represented as two 32-bit values (expressed in hex),
+#  LSNs are a 64-bit integer represented as two
+#  32-bit values (expressed in hex),
 #  separated by a slash IE:
 #  XXXXXXXX/YYYYYYYY
 sub lsn_cmp($$) :Export( :MANDATORY )

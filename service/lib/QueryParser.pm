@@ -54,7 +54,9 @@ INNER JOIN pg_namespace n
 END_SQL
 
 Readonly::Scalar my $GET_PARSE_TREE => <<"END_SQL";
-    SELECT ${SCHEMA_NAME}.fn_get_parse_tree( \$_\$__DEFINITION__\$_\$ )::JSONB AS tree
+    SELECT ${SCHEMA_NAME}.fn_get_parse_tree(
+        \$_\$__DEFINITION__\$_\$
+    )::JSONB AS tree
 END_SQL
 
 sub get_query_parsetree($$) :Export( :MANDATORY )
@@ -252,10 +254,13 @@ sub add_table_mapping($$$$$$$;$)
 
     if( defined $is_cte && $is_cte )
     {
-        $table_mapping->{CTES}->{$obj_name} = { parent => $parent, location => $location };
+        $table_mapping->{CTES}->{$obj_name} = {
+            parent   => $parent,
+            location => $location
+        };
 
-        # CTEs get added to the rellist because we recurse before adding table mapping for them
-        # this cleans up rels that were added to the cte list
+        # CTEs get added to the rellist because we recurse before adding table
+        # mapping for them. this cleans up rels that were added to the cte list
         if( defined( $table_mapping->{RELS}->{$obj_name} ) )
         {
             delete $table_mapping->{RELS}->{$obj_name};
@@ -272,12 +277,18 @@ sub add_table_mapping($$$$$$$;$)
 
     if( defined $is_function && $is_function )
     {
+        my $target = $table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name};
         if(
-               !defined( $table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name} )
-            && !defined( $table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name}->{$obj_alias} )
+               !defined( $target )
+            && !defined( $target->{$obj_alias} )
           )
         {
-            $table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name}->{$obj_alias} = [ { parent=> $parent, location => $location } ];
+            $target->{$obj_alias} = [
+                {
+                    parent   => $parent,
+                    location => $location
+                }
+            ];
             return;
         }
 
@@ -285,12 +296,12 @@ sub add_table_mapping($$$$$$$;$)
                defined( $parent )
             && not grep(
                    /^$parent$/,
-                   @{$table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name}->{$obj_alias}}
+                   @{$target->{$obj_alias}}
                )
           )
         {
             push(
-                @{$table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name}->{$obj_alias}},
+                @{$target->{$obj_alias}},
                 { parent=> $parent, location => $location }
             );
         }
@@ -303,12 +314,18 @@ sub add_table_mapping($$$$$$$;$)
         return;
     }
 
+    my $reltarg = $table_mapping->{RELS}->{$obj_schema}->{$obj_name};
     if(
-           !defined( $table_mapping->{RELS}->{$obj_schema}->{$obj_name} )
-        && !defined( $table_mapping->{RELS}->{$obj_schema}->{$obj_name}->{$obj_alias} )
+           !defined( $reltarg )
+        && !defined( $reltarg->{$obj_alias} )
       )
     {
-        $table_mapping->{RELS}->{$obj_schema}->{$obj_name}->{$obj_alias} = [ { parent => $parent, location => $location } ];
+        $reltarg->{$obj_alias} = [
+            {
+                parent   => $parent,
+                location => $location
+            }
+        ];
         return;
     }
 
@@ -316,13 +333,13 @@ sub add_table_mapping($$$$$$$;$)
             defined( $parent )
          && not grep(
                 /^$parent$/,
-                @{$table_mapping->{RELS}->{$obj_schema}->{$obj_name}->{$obj_alias}}
+                @{$reltarg->{$obj_alias}}
             )
       )
     {
         push(
-            @{$table_mapping->{RELS}->{$obj_schema}->{$obj_name}->{$obj_alias}},
-            { parent=>$parent, location => $location }
+            @{$reltarg->{$obj_alias}},
+            { parent => $parent, location => $location }
         );
         return;
     }
@@ -332,7 +349,13 @@ sub add_table_mapping($$$$$$$;$)
 
 sub get_joined_rels($$$$;$)
 {
-    my( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) = validate_pos(
+    my(
+        $json_fragment,
+        $parent,
+        $table_mapping,
+        $relcache,
+        $union_flag
+      ) = validate_pos(
         @_,
         { type => HASHREF },
         { type => SCALAR | UNDEF },
@@ -342,10 +365,11 @@ sub get_joined_rels($$$$;$)
     );
 
     #NOTE: We parse location to determine where the WHERE clause should go
-    #Location parsing here is important if our parent statement does not possess
-    #a WHERE clause. Chris note: Currently our location parsing gets us CLOSE but it still includee
-    #fragments of the join predicate, and we need to possibly move the location 'forward' to skip past boolean
-    #predicate expressions
+    # Location parsing here is important if our parent statement does not
+    # possess a WHERE clause. Chris note: Currently our location parsing gets
+    # us CLOSE but it still include fragments of the join predicate, and we
+    # need to possibly move the location 'forward' to skip past boolean
+    # predicate expressions
     my $location = 0;
     if( defined( $json_fragment->{location} ) )
     {
@@ -358,13 +382,20 @@ sub get_joined_rels($$$$;$)
     {
         my $old_warn = $SIG{__WARN__};
         $SIG{__WARN__} = sub { };
-        my @locs = datasearch( data => $json_fragment->{quals}, search => 'keys', find => qr/location/ );
+        my @locs = datasearch(
+            data   => $json_fragment->{quals},
+            search => 'keys',
+            find   => qr/location/
+        );
         $SIG{__WARN__} = $old_warn;
         if( scalar( @locs ) > 0 )
         {
             foreach my $loc( @locs )
             {
-                if( !defined( $supplemental_location ) || $supplemental_location < $loc )
+                if(
+                      !defined( $supplemental_location )
+                   || $supplemental_location < $loc
+                  )
                 {
                     $supplemental_location = $loc;
                 }
@@ -372,7 +403,10 @@ sub get_joined_rels($$$$;$)
         }
     }
 
-    if( defined( $supplemental_location ) && $supplemental_location > $location )
+    if(
+          defined( $supplemental_location )
+       && $supplemental_location > $location
+      )
     {
         $location = $supplemental_location;
     }
@@ -392,10 +426,13 @@ sub get_joined_rels($$$$;$)
 
             if( $json_fragment->{rarg}->{name} eq 'RANGEFUNCTION' )
             { # SRF Function
-                # According to parsenodes.h - each element of this List is a two element sublist
+                # According to parsenodes.h - each element of this List is a
+                # two element sublist:
                 #   - first element being the untransformed function call tree
-                #   -  second element being a possibly-empty list of ColumnDef nodes representing
-                #      any columndef list attached to that function within the ROWS FROM() syntax
+                #   -  second element being a possibly-empty list of ColumnDef
+                #      nodes representing any columndef list attached to that
+                #      function within the ROWS FROM() syntax
+
                 my $function_call = $json_fragment->{rarg}->{functions}->[0]->[0];
                 my $function_name = $function_call->{funcname}->[0];
 
@@ -467,6 +504,7 @@ sub get_joined_rels($$$$;$)
                         }
                     }
                 );
+
                 add_table_mapping(
                     $relcache,
                     $table_mapping,
