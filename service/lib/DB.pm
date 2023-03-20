@@ -137,6 +137,19 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
   ORDER BY lsn ASC
 END_SQL
 
+Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
+    SELECT lsn
+      FROM pg_catalog.pg_logical_slot_peek_changes(
+               ?::NAME,
+               NULL::PG_LSN,
+               NULL::INTEGER,
+               'include-transactions'::VARCHAR,
+               'TRUE'::VARCHAR
+           )
+  ORDER BY lsn DESC
+     LIMIT 1
+END_SQL
+
 Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
     SELECT lsn,
            xid,
@@ -528,6 +541,32 @@ sub replication_seek($$) :Export( :MANDATORY )
     return 0;
 }
 
+sub replication_slot_peek_unneeded_changes($$) :Export( :MANDATORY )
+{
+    my( $handle, $lsn ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALARREF },
+    );
+
+    my $sth = try_query(
+        $handle,
+        $REPLICATION_PEEK_FOR_CATCHUP,
+        [ $SLOT_NAME ]
+    );
+
+    if( $sth->rows() == 0 )
+    {
+        $sth->finish();
+        return;
+    }
+
+    my $row = $sth->fetchrow_hashref();
+    $sth->finish();
+    $$lsn = $row->{lsn};
+    return;
+}
+
 sub replication_peek($$$) :Export( :MANDATORY )
 {
     my( $handle, $filter_tables, $max_lsn ) = validate_pos(
@@ -535,7 +574,6 @@ sub replication_peek($$$) :Export( :MANDATORY )
         { type => OBJECT },
         { type => SCALAR },
         { type => SCALARREF },
-        { type => SCALAR | UNDEF, optional => 1 },
     );
 
     my $sth = try_query(
@@ -544,12 +582,8 @@ sub replication_peek($$$) :Export( :MANDATORY )
         [ $SLOT_NAME, 'F', $filter_tables, $$max_lsn, $$max_lsn ]
     );
 
-    unless( $sth )
-    {
-        return 0;
-    }
+    return 0 unless( $sth );
 
-    print "peek got " . $sth->rows() . " rows\n";
     if( $sth->rows() > 0 )
     {
         my $intermediate_data = {};
@@ -565,6 +599,7 @@ sub replication_peek($$$) :Export( :MANDATORY )
             }
             else
             {
+                # if( $$max_lsn < $lsn )
                 if( lsn_cmp( $$max_lsn, $lsn ) < 0 )
                 {
                     $$max_lsn = $lsn;

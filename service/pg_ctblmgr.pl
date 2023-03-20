@@ -131,14 +131,26 @@ sub parent_loop($$$)
 
     my $last_lsn_applied;
     my $last_peeked_lsn;
+    my $max_peeked_lsn;
+    my $max_idle_lsn;
+
+    my $last_last_lsn_applied;
+    my $last_max_idle_lsn;
     my $filter_table_lsns = {};
 
+    # There are two interlocks here:
+    #   - We only ack the 'least' LSN applied by all workers
+    #   - We need to continuously ack LSNs that don't apply to any workers
+    #       - Handles the case where the primary is busy but there is no activity on the
+    #         base tables which 'drive' our cache tables
     while( 1 )
     {
+        my $num_in_flight_changes = 0;
+        #important - get 'idle' changes prior to our filter table changes
+        &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn );
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
         foreach my $filter_table( keys %$WORKER_FILTER_TABLES )
         {
-            print "PArent checking replication slot for table $filter_table\n";
             $last_peeked_lsn = $filter_table_lsns->{$filter_table};
             my $data = replication_peek( $handle, $filter_table, \$last_peeked_lsn );
             $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
@@ -159,6 +171,7 @@ sub parent_loop($$$)
                     push( @$PIN, $change );
                 }
 
+                $num_in_flight_changes += scalar( @$PIN );
                 tied( $PIN )->shunlock();
                 untie( $PIN );
 
@@ -201,7 +214,7 @@ sub parent_loop($$$)
             }
         }
 
-        if( defined( $last_lsn_applied ) )
+        if( defined( $last_lsn_applied ) && lsn_cmp( $last_lsn_applied, $last_last_lsn_applied ) > 0 )
         {
             if( &replication_seek( $handle, $last_lsn_applied ) )
             {
@@ -209,8 +222,16 @@ sub parent_loop($$$)
             }
         }
 
-        undef( $last_lsn_applied );
+        if( $num_in_flight_changes == 0 && defined( $max_idle_lsn ) && lsn_cmp( $last_max_idle_lsn, $max_idle_lsn ) < 0  )
+        {
+            _log( $LOG_LEVEL_DEBUG, "Seeking changes to $max_idle_lsn" );
+            &replication_seek( $handle, $max_idle_lsn );
+            $last_lsn_applied = $max_idle_lsn;
+        }
+        $last_max_idle_lsn = $max_idle_lsn;
         sleep( 5 );
+
+        #TODO: Check in on children
 
     }
 
