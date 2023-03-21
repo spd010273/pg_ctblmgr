@@ -4,8 +4,9 @@ use strict;
 use utf8;
 use warnings;
 
-#use DBI;
-use JSON::XS; # Can't use JSON:PP because it tried to redefine simple bools as a blessed class that other packages aren't aware of
+# Can't use JSON:PP because it tried to redefine simple bools as a blessed
+# class that other packages aren't aware of
+use JSON::XS;
 use Readonly;
 use Params::Validate qw( :all );
 use Data::Dumper;
@@ -438,7 +439,9 @@ sub get_joined_rels($$$$;$)
 
                 if( scalar( @{$function_call->{funcname}} ) > 1 )
                 {
-                    $function_name = $function_name . '.' . $function_call->{funcname}->[1];
+                    $function_name = $function_name
+                                   . '.'
+                                   . $function_call->{funcname}->[1];
                 }
 
                 my $function_alias = $function_name;
@@ -479,7 +482,9 @@ sub get_joined_rels($$$$;$)
 
                 if( defined( $json_fragment->{rarg}->{schemaname} ) )
                 {
-                    $right_relation = $json_fragment->{rarg}->{schemaname} . '.' . $right_relation;
+                    $right_relation = $json_fragment->{rarg}->{schemaname}
+                                    . '.'
+                                    . $right_relation;
                 }
 
                 my $alias = $right_relation;
@@ -542,7 +547,10 @@ sub get_joined_rels($$$$;$)
             }
             else
             {
-                warn( "get_joined_rels: Unknown right RTE $json_fragment->{rarg}->{name}\n" );
+                warn(
+                    'get_joined_rels: Unknown right RTE '
+                  . "$json_fragment->{rarg}->{name}\n"
+                );
                 return;
             }
         }
@@ -558,7 +566,9 @@ sub get_joined_rels($$$$;$)
 
             if( scalar( @{$function_call->{funcname}} ) > 1 )
             {
-                $function_name = $function_name . '.' . $function_call->{funcname}->[1];
+                $function_name = $function_name
+                               . '.'
+                               . $function_call->{funcname}->[1];
             }
 
             my $function_alias = $function_name;
@@ -594,7 +604,9 @@ sub get_joined_rels($$$$;$)
 
             if( defined( $json_fragment->{schemaname} ) )
             {
-                $left_relation = $json_fragment->{schemaname} . '.' . $left_relation;
+                $left_relation = $json_fragment->{schemaname}
+                               . '.'
+                               . $left_relation;
             }
 
             if( defined( $json_fragment->{alias} ) )
@@ -627,7 +639,13 @@ sub get_joined_rels($$$$;$)
             return [
                 {
                     $alias => {
-                        obj      => &parse_select( $json_fragment->{subquery}, $parent, $table_mapping, $relcache, $union_flag ),
+                        obj      => &parse_select(
+                                        $json_fragment->{subquery},
+                                        $parent,
+                                        $table_mapping,
+                                        $relcache,
+                                        $union_flag
+                                     ),
                         type     => 'SUBSELECT',
                         location => -1,
                     }
@@ -636,7 +654,10 @@ sub get_joined_rels($$$$;$)
         }
         else
         {
-            warn( "get_joined_rels: Unknown recursed left RTE $json_fragment->{name}\n" );
+            warn(
+                'get_joined_rels: Unknown recursed left RTE '
+              . "$json_fragment->{name}\n"
+            );
             return;
         }
     }
@@ -650,7 +671,14 @@ sub parse_union($$$$$;$)
     #   rarg => { fromClause => [] ),
     #   larg => ...
     # }
-    my( $json_fragment, $parent, $table_mapping, $relcache, $is_rarg, $union_flag ) = validate_pos(
+    my(
+        $json_fragment,
+        $parent,
+        $table_mapping,
+        $relcache,
+        $is_rarg,
+        $union_flag
+      ) = validate_pos(
         @_,
         { type => HASHREF },
         { type => SCALAR | UNDEF },
@@ -665,15 +693,33 @@ sub parse_union($$$$$;$)
         && $json_fragment->{op} eq 'NONE'
       )
     {
-        # Regular union element - we're likely at an end element in the union tree
+        # Regular union element - we're likely at an end element in the
+        # union tree
         $union_flag = 'NONE' if( !defined( $union_flag ) );
         if( $is_rarg )
         {
-            # for anchoring unions (final where clause) we need to know if this is the last union member
-            return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) ];
+            # for anchoring unions (final where clause) we need to know if this
+            # is the last union member
+            return [
+                &parse_select(
+                    $json_fragment,
+                    $parent,
+                    $table_mapping,
+                    $relcache,
+                    $union_flag
+                )
+            ];
         }
 
-        return [ &parse_select( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) ];
+        return [
+            &parse_select(
+                $json_fragment,
+                $parent,
+                $table_mapping,
+                $relcache,
+                $union_flag
+            )
+        ];
     }
     elsif(
               defined( $json_fragment->{larg} )
@@ -726,7 +772,9 @@ sub parse_union($$$$$;$)
     }
     else
     {
-        warn "parse_union: Invalid structure in $json_fragment->{name} node\n";
+        warn(
+            "parse_union: Invalid structure in $json_fragment->{name} node\n"
+        );
     }
 
     return;
@@ -797,7 +845,13 @@ sub parse_cte($$$$)
 
 sub parse_from_clause($$$$;$)
 {
-    my( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) = validate_pos(
+    my(
+        $json_fragment,
+        $parent,
+        $table_mapping,
+        $relcache,
+        $union_flag
+      ) = validate_pos(
         @_,
         { type => ARRAYREF },
         { type => SCALAR | UNDEF },
@@ -806,14 +860,26 @@ sub parse_from_clause($$$$;$)
         { type => SCALAR | UNDEF, optional => 1 },
     );
 
-    my $result = &get_joined_rels( $json_fragment->[0], $parent, $table_mapping, $relcache, $union_flag );
+    my $result = &get_joined_rels(
+        $json_fragment->[0],
+        $parent,
+        $table_mapping,
+        $relcache,
+        $union_flag
+    );
 
     return $result;
 }
 
 sub parse_select($$$$;$)
 {
-    my( $json_fragment, $parent, $table_mapping, $relcache, $union_flag ) = validate_pos(
+    my(
+        $json_fragment,
+        $parent,
+        $table_mapping,
+        $relcache,
+        $union_flag
+      ) = validate_pos(
         @_,
         { type => HASHREF },
         { type => SCALAR | UNDEF },
@@ -824,8 +890,8 @@ sub parse_select($$$$;$)
 
     my $is_union_member;
     $is_union_member = $union_flag if( defined( $union_flag ) );
-    #The conditionals around location here are to narrow down the location (or possible location)
-    # of a WHERE clause
+    #The conditionals around location here are to narrow down the location
+    # (or possible location) of a WHERE clause
     if( $json_fragment->{name} ne 'SELECTSTMT' )
     {
         warn "parse_select: Invalid node $json_fragment->{name}\n";
@@ -925,13 +991,20 @@ sub parse_select($$$$;$)
                 {
                     my $old_warn = $SIG{__WARN__};
                     $SIG{__WARN__} = sub { };
-                    my @locs = datasearch( data => $json_fragment->{whereClause}, search => 'keys', find => qr/location/ );
+                    my @locs = datasearch(
+                        data   => $json_fragment->{whereClause},
+                        search => 'keys',
+                        find   => qr/location/
+                    );
                     $SIG{__WARN__} = $old_warn;
                     my $new_where_start;
                     foreach my $loc( @locs )
                     {
                         next if( $loc == -1 );
-                        if( !defined( $new_where_start ) || $loc < $new_where_start )
+                        if(
+                               !defined( $new_where_start )
+                            || $loc < $new_where_start
+                          )
                         {
                             $new_where_start = $loc;
                         }
@@ -945,7 +1018,11 @@ sub parse_select($$$$;$)
         {
             my $old_warn = $SIG{__WARN__};
             $SIG{__WARN__} = sub { };
-            my @locs = datasearch( data => $json_fragment->{whereClause}, search => 'keys', find => qr/location/ );
+            my @locs = datasearch(
+                data   => $json_fragment->{whereClause},
+                search => 'keys',
+                find   => qr/location/
+            );
             $SIG{__WARN__} = $old_warn;
             my $new_where_start;
 
@@ -969,7 +1046,8 @@ sub parse_select($$$$;$)
         }
         else
         {
-            # We need to find the END of the from clause to determine where the WHERE clause should go
+            # We need to find the END of the from clause to determine where
+            # the WHERE clause should go
             my $max_location = 0;
             foreach my $from( @{$statement_info->{from}} )
             {
@@ -1107,7 +1185,11 @@ sub parse_select($$$$;$)
     { # we're always expected to enter this
         my $old_warn = $SIG{__WARN__};
         $SIG{__WARN__} = sub { };
-        my @locs = datasearch( data => $json_fragment->{targetList}, search => 'keys', find => qr/location/ );
+        my @locs = datasearch(
+            data   => $json_fragment->{targetList},
+            search => 'keys',
+            find   => qr/location/
+        );
         $SIG{__WARN__} = $old_warn;
 
         foreach my $loc( @locs )
@@ -1159,7 +1241,8 @@ sub parse_select($$$$;$)
         rels            => {},
     };
 
-    # Locate FROM-clause elements nested in $statement_info->{from} and unroll them into table_mapping
+    # Locate FROM-clause elements nested in $statement_info->{from} and unroll
+    # them into table_mapping
     &recursive_from_finder( $relcache, $table_mapping, $statement_info );
 
     return $statement_info;
@@ -1189,12 +1272,19 @@ sub recursive_from_finder($$$)
 
                 if( ref( $obj_name ) eq 'HASH' )
                 {
-                    &recursive_from_finder( $relcache, $table_mapping, $obj_name );
+                    &recursive_from_finder(
+                        $relcache,
+                        $table_mapping,
+                        $obj_name
+                    );
                 }
                 else
                 {
                     $qual = resolve_relation( $relcache, $obj_name );
-                    unless( defined( $qual->{schema} ) && defined( $qual->{name} ) )
+                    unless(
+                               defined( $qual->{schema} )
+                            && defined( $qual->{name} )
+                          )
                     {
                         next;
                     }
@@ -1211,7 +1301,13 @@ sub recursive_from_finder($$$)
 
 sub find_table_aliases($$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $relcache, $definition, $filter_tables, $table_mapping ) = validate_pos(
+    my(
+        $handle,
+        $relcache,
+        $definition,
+        $filter_tables,
+        $table_mapping
+      ) = validate_pos(
         @_,
         { type => OBJECT   },
         { type => HASHREF  },
@@ -1241,14 +1337,25 @@ sub find_table_aliases($$$$$) :Export( :MANDATORY )
 
     my $statement = $parse_tree_obj->{stmt};
     #print Dumper( $statement ) if( $DEBUG );
-    my $query_data = parse_select( $statement, undef, $table_mapping, $relcache );
+    my $query_data = &parse_select(
+        $statement,
+        undef,
+        $table_mapping,
+        $relcache
+    );
 
     return $query_data;
 }
 
 sub apply_filters($$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $query_data, $table_mapping, $definition, $filters ) = validate_pos(
+    my(
+        $handle,
+        $query_data,
+        $table_mapping,
+        $definition,
+        $filters
+      ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => HASHREF },
@@ -1257,9 +1364,11 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
-    # Lets use the filters we've received and search for the tables, their aliases, and the objects they are present in within the query,
-    # then attempt to modify the query such that we habe a filtered query
-    # Phase I will result in a keyed array telling us which CTE or query will need a filter applied
+    # Lets use the filters we've received and search for the tables, their
+    # aliases, and the objects they are present in within the query, then
+    # attempt to modify the query such that we habe a filtered query
+    # Phase I will result in a keyed array telling us which CTE or query will
+    # need a filter applied
     my $where_expressions = {};
 
     foreach my $position( keys %{$table_mapping->{BINDS}} )
@@ -1279,15 +1388,24 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
                     {
                         foreach my $key( keys %{$filters->{$schema}->{$table_name}} )
                         {
-                            my $typmod = get_typmods( $handle, $schema, $table_name, $key );
+                            my $typmod = &get_typmods(
+                                $handle,
+                                $schema,
+                                $table_name,
+                                $key
+                            );
 
                             if( !defined( $typmod ) )
                             {
-                                warn "Invalid column for table $schema.$table_name - $key. Column appears to have no type\n";
+                                warn(
+                                    "Invalid column for table $schema."
+                                  . "$table_name - $key. Column appears "
+                                  . "to have no type\n"
+                                );
                                 next;
                             }
 
-                            my $type = $typmod->{$key};
+                            my $type        = $typmod->{$key};
                             my $where_entry = "${alias}.${key} ";
 
                             if( scalar( @{$filters->{$schema}->{$table_name}->{$key}} ) > 1 )
@@ -1299,7 +1417,9 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
                                     push( @$values, "( '${value}' )::$type" );
                                 }
 
-                                $where_entry .= 'IN( ' . join( ', ', @$values ) .' ) ';
+                                $where_entry .= 'IN( '
+                                              . join( ', ', @$values )
+                                              .' ) ';
                             }
                             elsif( scalar( @{$filters->{$schema}->{$table_name}->{$key}} ) > 0 )
                             {
@@ -1326,11 +1446,15 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         {
             if( $table_mapping->{BINDS}->{$position}->{has_where} )
             {
-                $where_entry = ' AND ( ( ' . join( ' ) OR ( ', @$where_entries ) . ' ) ) ';
+                $where_entry = ' AND ( ( '
+                             . join( ' ) OR ( ', @$where_entries )
+                             . ' ) ) ';
             }
             else
             {
-                $where_entry = ' WHERE ( ( ' . join( ' ) OR ( ', @$where_entries ) . ' ) ) ';
+                $where_entry = ' WHERE ( ( '
+                             . join( ' ) OR ( ', @$where_entries )
+                             . ' ) ) ';
             }
 
             $where_expressions->{$position} = $where_entry;
@@ -1347,8 +1471,11 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     #print Dumper( $where_expressions );
     foreach my $bind_start( @starts )
     {
-        next if( $bind_start < 0 ); # Skip if unbindable (no relevent relations)
-        next if( !defined( $where_expressions->{$bind_start} ) ); # Skip if no filters to be applied
+        # Skip if unbindable (no relevent relations)
+        next if( $bind_start < 0 );
+        # Skip if no filters to be applied
+        next if( !defined( $where_expressions->{$bind_start} ) );
+
         my $bind_end = $table_mapping->{BINDS}->{$bind_start}->{end};
         my $next_cte_name;
 
@@ -1371,42 +1498,71 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
                 $bind_end = $table_mapping->{BINDS}->{$next}->{select_location};
             }
         }
-        my $bind_location = substr( $new_q, $bind_start, $bind_end - $bind_start );
-        # note for union parsing - we need to constrain by adding where_end in select parsing :(
-        # also, we need to corelate against the $table_mapping->binds itself
+
+        my $bind_location = substr(
+            $new_q,
+            $bind_start,
+            $bind_end - $bind_start
+        );
+        # note for union parsing - we need to constrain by adding where_end
+        # in select parsing :( also, we need to corelate against the
+        # $table_mapping->binds itself
 
         # Find the end of the last expression (if has_where) or the last join predicate (if !has_where)
         my $where_expression = $where_expressions->{$bind_start};
-        my $is_in_cte = defined( $table_mapping->{BINDS}->{$bind_start}->{parent} );
+        my $is_in_cte        = defined(
+            $table_mapping->{BINDS}->{$bind_start}->{parent}
+        );
+
         my $where_proceeding_clause_mark;
-        if(    $table_mapping->{BINDS}->{$bind_start}->{has_group}  ) { $where_proceeding_clause_mark = 'group\s+by';                 }
-        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_having} ) { $where_proceeding_clause_mark = 'having';                     }
+        my $BS_HASH = $table_mapping->{BINDS}->{$bind_start};
+        if( $BS_HASH->{has_group} )
+        {
+            $where_proceeding_clause_mark = 'group\s+by';
+        }
+        elsif( $BS_HASH->{has_having} )
+        {
+            $where_proceeding_clause_mark = 'having';
+        }
         # TODO add WINDOW
         elsif(
-                  defined( $table_mapping->{BINDS}->{$bind_start}->{is_union} )
-               && $table_mapping->{BINDS}->{$bind_start}->{is_union} ne 'NONE'
+                  defined( $BS_HASH->{is_union} )
+               && $BS_HASH->{is_union} ne 'NONE'
              )
         {
-            $where_proceeding_clause_mark = '\s+' . lc( $table_mapping->{BINDS}->{$bind_start}->{is_union} );
+            $where_proceeding_clause_mark = '\s+' . lc( $BS_HASH->{is_union} );
         }
-        elsif( # handle case where we union at the end of a CTE def
-                  defined( $table_mapping->{BINDS}->{$bind_start}->{is_union} )
-             )
-        {
+        elsif( defined( $BS_HASH->{is_union} ) )
+        { # handle case where we union at the end of a CTE def
             # NOTE This may need to be expanded - there are many cases where unions can be used / abused and
             # a union can appear in the form of:
             $where_proceeding_clause_mark = '\)';
         }
-        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_sort}   ) { $where_proceeding_clause_mark = 'order\s+by';                 }
-        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_limit}  ) { $where_proceeding_clause_mark = 'limit';                      }
-        elsif( $table_mapping->{BINDS}->{$bind_start}->{has_offset} ) { $where_proceeding_clause_mark = 'offset';                     }
+        elsif( $BS_HASH->{has_sort} )
+        {
+            $where_proceeding_clause_mark = 'order\s+by';
+        }
+        elsif( $BS_HASH->{has_limit} )
+        {
+            $where_proceeding_clause_mark = 'limit';
+        }
+        elsif( $BS_HASH->{has_offset} )
+        {
+            $where_proceeding_clause_mark = 'offset';
+        }
         # TODO add FETCH
         # TODO add FOR <lock statement>
-        elsif( $is_in_cte && defined( $next_cte_name )              ) { $where_proceeding_clause_mark = '\)\s*,\s*' . $next_cte_name; }
-        elsif( $is_in_cte && !defined( $next_cte_name )             ) { $where_proceeding_clause_mark = '\)\s*select';                }
+        elsif( $is_in_cte && defined( $next_cte_name ) )
+        {
+            $where_proceeding_clause_mark = '\)\s*,\s*' . $next_cte_name;
+        }
+        elsif( $is_in_cte && !defined( $next_cte_name ) )
+        {
+            $where_proceeding_clause_mark = '\)\s*select';
+        }
         elsif(
-                 !$table_mapping->{BINDS}->{$bind_start}->{has_where}
-              && !defined( $table_mapping->{BINDS}->{$bind_start}->{parent} )
+                 !$BS_HASH->{has_where}
+              && !defined( $BS_HASH->{parent} )
              )
         {
             $where_proceeding_clause_mark = '$';
@@ -1418,15 +1574,17 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             return;
         }
 
-        #print "Bind start: $bind_start, bind_end: $bind_end\nwhere: $where_expression\nPreceeding mark: '$where_proceeding_clause_mark'\nLOC: $bind_location\n================\n";
-        my $preceeding_query = substr( $new_q, 0, $bind_start );
-        my $proceeding_query = substr( $new_q, $bind_end, length( $new_q ) - $bind_end );
+        my $preceeding_query  = substr( $new_q, 0, $bind_start );
+        my $proceeding_query = substr(
+            $new_q,
+            $bind_end,
+            length( $new_q ) - $bind_end
+        );
         my $substituted_where = $bind_location;
-        #print "---------------POS: $bind_start\n";
-        #print "Binding\n$where_proceeding_clause_mark\nto\n$bind_location\n";
         $substituted_where =~ s/($where_proceeding_clause_mark)/${where_expression}$1/i;
-        #print "---------------\n";
-        $new_q = $preceeding_query . $substituted_where . $proceeding_query;
+        $new_q             = $preceeding_query
+                           . $substituted_where
+                           . $proceeding_query;
 
         $index++;
     }

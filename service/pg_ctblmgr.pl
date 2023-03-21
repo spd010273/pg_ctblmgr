@@ -145,7 +145,11 @@ sub parent_loop($$$)
 
     unless( check_extension_running( $handle ) )
     {
-        _log( $LOG_LEVEL_FATAL, "Failed to obtain lock on database - another $EXTENSION_NAME instance seems to be running" );
+        _log(
+            $LOG_LEVEL_FATAL,
+            'Failed to obtain lock on database - another '
+          . "$EXTENSION_NAME instance seems to be running"
+         );
     }
 
     my $last_lsn_applied;
@@ -160,18 +164,25 @@ sub parent_loop($$$)
     # There are two interlocks here:
     #   - We only ack the 'least' LSN applied by all workers
     #   - We need to continuously ack LSNs that don't apply to any workers
-    #       - Handles the case where the primary is busy but there is no activity on the
-    #         base tables which 'drive' our cache tables
+    #       - Handles the case where the primary is busy but there is no
+    #         activity on the base tables which 'drive' our cache tables.
+
     while( 1 )
     {
         my $num_in_flight_changes = 0;
         #important - get 'idle' changes prior to our filter table changes
+
         &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn );
+
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
         foreach my $filter_table( keys %$WORKER_FILTER_TABLES )
         {
             $last_peeked_lsn = $filter_table_lsns->{$filter_table};
-            my $data = replication_peek( $handle, $filter_table, \$last_peeked_lsn );
+            my $data = &replication_peek(
+                $handle,
+                $filter_table,
+                \$last_peeked_lsn
+            );
             $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
             next unless( $data );
             print Dumper( $data );
@@ -215,7 +226,8 @@ sub parent_loop($$$)
 
             unless( $last_lsn )
             {
-                # Note - we WILL NOT ack any LSNs iff a worker hasn't completed anything here
+                # Note - we WILL NOT ack any LSNs iff a worker hasn't
+                # completed anything here
                 undef( $last_lsn_applied );
                 last;
             }
@@ -226,7 +238,7 @@ sub parent_loop($$$)
             }
             else
             {
-                if( lsn_cmp( $last_lsn_applied, $last_lsn ) < 0 )
+                if( &lsn_cmp( $last_lsn_applied, $last_lsn ) < 0 )
                 {
                     $last_lsn_applied = $last_lsn;
                 }
@@ -238,7 +250,7 @@ sub parent_loop($$$)
              && (
                   (
                       defined( $last_last_lsn_applied )
-                   && lsn_cmp( $last_lsn_applied, $last_last_lsn_applied ) > 0
+                   && &lsn_cmp( $last_lsn_applied, $last_last_lsn_applied ) > 0
                   )
                || ( !defined( $last_last_lsn_applied ) )
                 )
@@ -251,7 +263,11 @@ sub parent_loop($$$)
             }
         }
 
-        if( $num_in_flight_changes == 0 && defined( $max_idle_lsn ) && lsn_cmp( $last_max_idle_lsn, $max_idle_lsn ) < 0  )
+        if(
+                $num_in_flight_changes == 0
+             && defined( $max_idle_lsn )
+             && &lsn_cmp( $last_max_idle_lsn, $max_idle_lsn ) < 0
+          )
         {
             _log( $LOG_LEVEL_DEBUG, "Seeking changes to $max_idle_lsn" );
             &replication_seek( $handle, $max_idle_lsn );
@@ -292,7 +308,7 @@ sub worker_cache_refresh($$$$)
 
     $cache_hash->{relcache}      = &get_relcache( $handle );
     $cache_hash->{table_mapping} = {};
-    $cache_hash->{parse_tree}    = &find_table_aliases(
+    $cache_hash->{parse_tree} = &find_table_aliases(
         $handle,
         $cache_hash->{relcache},
         $cache_hash->{definition},
@@ -322,11 +338,12 @@ sub worker_cache_refresh($$$$)
 
             unless( grep( /^$relname$/, @$filter_tables ) )
             {
-                # This is mainly for debugging, but we could add this relation to the filter tables array
-                # rather than complaining
+                # This is mainly for debugging, but we could add this relation
+                # to the filter tables array rather than complaining
                 _log(
                     $LOG_LEVEL_ERROR,
-                    "Relation $relname is not present in filter tables provided by parent! Updates may be missed."
+                    "Relation $relname is not present in filter tables "
+                  . 'provided by parent! Updates may be missed.'
                 );
                 return;
             }
@@ -338,7 +355,12 @@ sub worker_cache_refresh($$$$)
 
 sub worker_entrypoint($$$$)
 {
-    my( $wal_level, $filter_tables, $maintenance_channel, $pk_maintenance_object ) = validate_pos(
+    my(
+        $wal_level,
+        $filter_tables,
+        $maintenance_channel,
+        $pk_maintenance_object
+      ) = validate_pos(
         @_,
         { type => SCALAR },
         { type => ARRAYREF },
@@ -346,21 +368,30 @@ sub worker_entrypoint($$$$)
         { type => SCALAR },
     );
 
-    my $CACHE_HASH = {};
+    my $CACHE_HASH           = {};
     my $WORKER_FILTER_TABLES = {};
     my $WAL_DATA;
-    my $WORKER_STATUSES = {};
+    my $WORKER_STATUSES      = {};
 
     my $worker_pid  = $PROCESS_ID;
     my $array_index = 0;
     my $index_found = 0;
 
-    tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } );
-    tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
+    tie(
+        $WORKER_STATUSES,
+        'IPC::Shareable',
+        { key => 'STATUSES' }
+    );
+    tie(
+        $WORKER_FILTER_TABLES,
+        'IPC::Shareable',
+        { key => 'WORKER_FILTER_TABLES' }
+    );
 
     foreach my $filter_table( @$filter_tables )
     {
-        # CRITICAL Section - check main filter_tables structure and find our index
+        # CRITICAL Section - check main filter_tables structure and find
+        # our index
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
 
         if(
@@ -369,7 +400,10 @@ sub worker_entrypoint($$$$)
           )
         {
             tied( $WORKER_FILTER_TABLES )->shunlock();
-            _log( $LOG_LEVEL_FATAL, "Shared memory doesn't appear to be mapped" );
+            _log(
+                $LOG_LEVEL_FATAL,
+                'Shared memory doesn\'t appear to be mapped'
+            );
             exit( 1 );
         }
 
@@ -396,7 +430,13 @@ sub worker_entrypoint($$$$)
 
             until( tied( $PIN ) )
             {
-                eval{ tie( $PIN, 'IPC::Shareable', { key => "P${worker_pid}${filter_table}" } ) };
+                eval{
+                    tie(
+                        $PIN,
+                        'IPC::Shareable',
+                        { key => "P${worker_pid}${filter_table}" }
+                    )
+                };
                 sleep( 1 ) if( $OS_ERROR );
             }
 
@@ -408,7 +448,10 @@ sub worker_entrypoint($$$$)
 
     until( tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB ) )
     {
-        _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid waiting to enter running state" );
+        _log(
+            $LOG_LEVEL_DEBUG,
+            "Worker $worker_pid waiting to enter running state"
+        );
         sleep( 1 );
     }
 
@@ -422,17 +465,18 @@ sub worker_entrypoint($$$$)
         undef
     );
 
-    unless( $handle )
-    {
-        _log( $LOG_LEVEL_FATAL, "Worker failed to connect to DB" );
-    }
+    _log( $LOG_LEVEL_FATAL, 'Worker failed to connect to DB' ) unless( $handle );
 
     unless( &get_ct_definition( $handle, $pk_maintenance_object, $CACHE_HASH ) )
     {
-        _log( $LOG_LEVEL_FATAL, "Failed to look up CT '$pk_maintenance_object' definition" );
+        _log(
+            $LOG_LEVEL_FATAL,
+            "Failed to look up CT '$pk_maintenance_object' definition"
+        );
     }
 
-    # Table mapping and parse tree are (relatively) static and only change if our query changes underneath us
+    # Table mapping and parse tree are (relatively) static and only change if
+    # our query changes underneath us
     # TODO: Add detection and correction for the above
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
 
@@ -446,7 +490,12 @@ sub worker_entrypoint($$$$)
         );
 
         # Main worker loop
-        &worker_cache_refresh( $handle, $pk_maintenance_object, $filter_tables, $CACHE_HASH );
+        &worker_cache_refresh(
+            $handle,
+            $pk_maintenance_object,
+            $filter_tables,
+            $CACHE_HASH
+        );
 
         while( 1 )
         {
@@ -454,15 +503,30 @@ sub worker_entrypoint($$$$)
             my $max_peeked_lsn;
             my $max_applied_lsn;
             my $test_hash = &get_ct_digest( $handle, $pk_maintenance_object );
+
             if( !defined $test_hash )
             {
-                _log( $LOG_LEVEL_FATAL, "Failed to check maintenance object for definition change (SHA256)" );
+                _log(
+                    $LOG_LEVEL_FATAL,
+                    'Failed to check maintenance object '
+                  . 'for definition change (SHA256)'
+                );
             }
 
             if( $test_hash ne $CACHE_HASH->{digest} )
             {
-                _log( $LOG_LEVEL_INFO, "Cache table definition has changed, replacing the cache table" );
-                &worker_cache_refresh( $handle, $pk_maintenance_object, $filter_tables, $CACHE_HASH );
+                _log(
+                    $LOG_LEVEL_INFO,
+                    'Cache table definition has changed, replacing the '
+                  . 'cache table'
+                );
+
+                &worker_cache_refresh(
+                    $handle,
+                    $pk_maintenance_object,
+                    $filter_tables,
+                    $CACHE_HASH
+                );
                 &replace_cache_table( $handle, $pk_maintenance_object );
             }
 
@@ -475,9 +539,18 @@ sub worker_entrypoint($$$$)
 
                 if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
                 {
-                    unless( tie( $WAL_DATA->{$filter_table}->{pin}, 'IPC::Shareable', { key => $pin_keyname } ) )
+                    unless(
+                            tie(
+                                $WAL_DATA->{$filter_table}->{pin},
+                                'IPC::Shareable',
+                                { key => $pin_keyname }
+                            )
+                          )
                     {
-                        _log( $LOG_LEVEL_WARNING, "Failed to tie shared memory $pin_keyname" );
+                        _log(
+                            $LOG_LEVEL_WARNING,
+                            "Failed to tie shared memory $pin_keyname"
+                        );
                     }
                 }
 
@@ -510,11 +583,17 @@ sub worker_entrypoint($$$$)
                                 }
                                 else
                                 {
-                                    push( @{$changes->{$schema}->{$table}->{$key}}, $val );
+                                    push(
+                                        @{$changes->{$schema}->{$table}->{$key}},
+                                        $val
+                                    );
                                 }
                             }
 
-                            if( !defined( $max_peeked_lsn ) || lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0 )
+                            if(
+                                    !defined( $max_peeked_lsn )
+                                 || &lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0
+                              )
                             {
                                 $max_peeked_lsn = $change->{commit_lsn};
                             }
@@ -543,19 +622,22 @@ sub worker_entrypoint($$$$)
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Failed to apply filters to query for cache table '$CACHE_HASH->{name}'"
+                        'Failed to apply filters to query for cache '
+                      . "table '$CACHE_HASH->{name}'"
                     );
                     next;
                 }
 
-                # At this point we're ready to execute the table into a temp table
+                # At this point we're ready to execute the table into a temp
+                # table
                 my $temp_table = &generate_temp_table( $handle, $query );
 
                 if( !defined( $temp_table ) )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Failed to generate temp table for updating cache table '$CACHE_HASH->{name}'"
+                        'Failed to generate temp table for updating cache '
+                      . "table '$CACHE_HASH->{name}'"
                     );
                     next;
                 }
@@ -573,7 +655,8 @@ sub worker_entrypoint($$$$)
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Deleting entries from $CACHE_HASH->{schema}.$CACHE_HASH->{name} failed"
+                        "Deleting entries from $CACHE_HASH->{schema}."
+                      . "$CACHE_HASH->{name} failed"
                     );
                     next;
                 }
@@ -591,7 +674,8 @@ sub worker_entrypoint($$$$)
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Updating entries in $CACHE_HASH->{schema}.$CACHE_HASH->{name} failed"
+                        "Updating entries in $CACHE_HASH->{schema}."
+                      . "$CACHE_HASH->{name} failed"
                     );
                     next;
                 }
@@ -609,18 +693,21 @@ sub worker_entrypoint($$$$)
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Inserting entries into $CACHE_HASH->{schema}.$CACHE_HASH->{name} failed"
+                        "Inserting entries into $CACHE_HASH->{schema}."
+                      . "$CACHE_HASH->{name} failed"
                     );
                     next;
                 }
 
-                # If we make it here we can signal that we've applied up to $max_peeked_lsn changes
-                # Check here to see if the table definition has changed
+                # If we make it here we can signal that we've applied up to
+                # $max_peeked_lsn changes Check here to see if the table
+                # definition has changed
                 unless( &drop_temp_table( $handle, $temp_table ) )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
-                        "Failed to drop temporary table used to maintain cache table $CACHE_HASH->{schema}.$CACHE_HASH->{name}"
+                        'Failed to drop temporary table used to maintain cache '
+                      . "table $CACHE_HASH->{schema}.$CACHE_HASH->{name}"
                     );
                     next;
                 }
@@ -639,7 +726,7 @@ sub worker_entrypoint($$$$)
     {
         _log(
             $LOG_LEVEL_FATAL,
-            "Worker cannot proceed. Driver $CACHE_HASH->{driver} not implemented\n"
+            "Worker cannot proceed. Driver $CACHE_HASH->{driver} not implemented"
         );
     }
 
@@ -661,10 +748,26 @@ my $user   = $opt_U;
 $DAEMONIZE = $opt_D;
 
 $port = 5432 unless( defined( $port ) );
-usage( 'Invalid port'          ) if( defined( $port ) and ( $port !~ /^\d+$/ or $port < 1 or $port > 65535 ) );
-usage( 'Invalid database name' ) unless( defined( $dbname ) && length( $dbname ) > 0 );
-usage( 'Invalid username'      ) unless( defined( $user ) && length( $user ) > 0 );
-usage( 'Invalid host name'     ) unless( defined( $host ) && length( $host ) > 0 );
+
+if( defined( $port ) && ( $port !~ /^\d+$/ || $port < 1 || $port > 65535 ) )
+{
+    usage( 'Invalid port' );
+}
+
+unless( defined( $dbname ) && length( $dbname ) > 0 )
+{
+    usage( 'Invalid database name' );
+}
+
+unless( defined( $user ) && length( $user ) > 0 )
+{
+    usage( 'Invalid username' );
+}
+
+unless( defined( $host ) && length( $host ) > 0 )
+{
+    usage( 'Invalid host name' );
+}
 
 my $conn_string = "dbi:Pg:dbname=${dbname};host=${host};port=${port}";
 $CONNECTION_MAP->{connection_string} = $conn_string;
@@ -683,7 +786,10 @@ unless( check_extension( $handle ) )
 
 if( !check_extension_running( $handle ) )
 {
-    croak( "There appears to be another instance of $EXTENSION_NAME running on this database" );
+    croak(
+        'There appears to be another instance of '
+      . "$EXTENSION_NAME running on this database\n"
+    );
 }
 
 my $worker_data = get_worker_list( $handle );
@@ -694,8 +800,24 @@ undef( $handle );
 my $WORKER_FILTER_TABLES = {};
 my $WORKER_STATUSES      = {};
 
-tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES', create => 1, destroy => 1 } );
-tie( $WORKER_STATUSES,      'IPC::Shareable', { key => 'STATUSES', create => 1, destroy => 1 } );
+tie(
+    $WORKER_FILTER_TABLES,
+    'IPC::Shareable',
+    {
+        key     => 'WORKER_FILTER_TABLES',
+        create  => 1,
+        destroy => 1
+    }
+);
+tie(
+    $WORKER_STATUSES,
+    'IPC::Shareable',
+    {
+        key     => 'STATUSES',
+        create  => 1,
+        destroy => 1
+    }
+);
 
 shm_cleanup() if( $CLEAN_UP );
 
@@ -747,8 +869,19 @@ foreach my $worker_entry( @$worker_data )
             # by the parent and popped later by the workers
             my $PIN = [];
             tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-            push( @{$WORKER_FILTER_TABLES->{$filter_table}->{pids}}, $child_pid );
-            tie( $PIN, 'IPC::Shareable', { key => "P${child_pid}${filter_table}", create => 1, destroy => 1 } );
+            push(
+                @{$WORKER_FILTER_TABLES->{$filter_table}->{pids}},
+                $child_pid
+            );
+            tie(
+                $PIN,
+                'IPC::Shareable',
+                {
+                    key     => "P${child_pid}${filter_table}",
+                    create  => 1,
+                    destroy => 1
+                }
+            );
             push( @{$WORKER_FILTER_TABLES->{$filter_table}->{pins}}, $PIN );
             tied( $WORKER_FILTER_TABLES )->shunlock();
             push( @$PINS, $PIN );
