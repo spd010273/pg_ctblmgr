@@ -388,6 +388,19 @@ sub worker_entrypoint($$$$)
         { key => 'WORKER_FILTER_TABLES' }
     );
 
+    until( tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB ) )
+    {
+        _log(
+            $LOG_LEVEL_DEBUG,
+            "Worker $worker_pid waiting to enter running state"
+        );
+        sleep( 1 );
+    }
+
+    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
+    tied( $WORKER_STATUSES )->shunlock();
+
     foreach my $filter_table( @$filter_tables )
     {
         # CRITICAL Section - check main filter_tables structure and find
@@ -445,20 +458,6 @@ sub worker_entrypoint($$$$)
     }
 
     _log( $LOG_LEVEL_DEBUG, "Got worker index $array_index" );
-
-    until( tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB ) )
-    {
-        _log(
-            $LOG_LEVEL_DEBUG,
-            "Worker $worker_pid waiting to enter running state"
-        );
-        sleep( 1 );
-    }
-
-    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-    sleep( 1 );
-    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
-    tied( $WORKER_STATUSES )->shunlock();
     my $handle = DBI->connect(
         $CONNECTION_MAP->{connection_string},
         $CONNECTION_MAP->{user_name},
