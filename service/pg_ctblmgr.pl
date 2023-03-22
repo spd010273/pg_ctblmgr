@@ -374,8 +374,6 @@ sub worker_entrypoint($$$$)
     my $WORKER_STATUSES      = {};
 
     my $worker_pid  = $PROCESS_ID;
-    my $array_index = 0;
-    my $index_found = 0;
 
     tie(
         $WORKER_STATUSES,
@@ -403,40 +401,6 @@ sub worker_entrypoint($$$$)
 
     foreach my $filter_table( @$filter_tables )
     {
-        # CRITICAL Section - check main filter_tables structure and find
-        # our index
-        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
-
-        if(
-               !defined( $WORKER_FILTER_TABLES->{$filter_table} )
-            || !defined( $WORKER_FILTER_TABLES->{$filter_table}->{pins} )
-          )
-        {
-            tied( $WORKER_FILTER_TABLES )->shunlock();
-            _log(
-                $LOG_LEVEL_FATAL,
-                'Shared memory doesn\'t appear to be mapped'
-            );
-            exit( 1 );
-        }
-
-        unless( $index_found )
-        {
-            foreach my $item( @{$WORKER_FILTER_TABLES->{$filter_table}->{pids}} )
-            {
-                if( $item == $worker_pid )
-                {
-                    $index_found = 1;
-                    last;
-                }
-
-                $array_index++ if( !$index_found );
-            }
-        }
-
-        tied( $WORKER_FILTER_TABLES )->shunlock();
-        # End critical section
-
         if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
         {
             my $PIN = [];
@@ -457,7 +421,6 @@ sub worker_entrypoint($$$$)
         }
     }
 
-    _log( $LOG_LEVEL_DEBUG, "Got worker index $array_index" );
     my $handle = DBI->connect(
         $CONNECTION_MAP->{connection_string},
         $CONNECTION_MAP->{user_name},
