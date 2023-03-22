@@ -47,7 +47,6 @@ $LOG_FILE    = '';
 $LOG_FH      = undef;
 $DAEMONIZE   = 0;
 my $CHILDREN = [];
-my $PINS     = [];
 
 sub _terminate()
 {
@@ -177,12 +176,11 @@ sub shm_cleanup()
     return;
 }
 
-sub parent_loop($$$)
+sub parent_loop($$)
 {
-    my( $WORKER_STATUSES, $PINS, $WORKER_FILTER_TABLES ) = validate_pos(
+    my( $WORKER_STATUSES, $WORKER_FILTER_TABLES ) = validate_pos(
         @_,
         { type => HASHREF },
-        { type => ARRAYREF },
         { type => HASHREF },
     );
 
@@ -907,7 +905,6 @@ foreach my $worker_entry( @$worker_data )
                 }
             );
             push( @{$WORKER_FILTER_TABLES->{$filter_table}->{pins}}, $PIN );
-            push( @$PINS, $PIN );
         }
         tied( $WORKER_FILTER_TABLES )->shunlock();
 
@@ -924,14 +921,7 @@ foreach my $worker_entry( @$worker_data )
 # We've started workers, lets start processing WAL
 _log( $LOG_LEVEL_DEBUG, "All workers started" );
 tied( $WORKER_STATUSES )->shunlock();
-parent_loop( $WORKER_STATUSES, $PINS, $WORKER_FILTER_TABLES );
+parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
-
-foreach my $pin( @$PINS )
-{
-    next unless( defined( $pin ) );
-    tied( $pin )->clean_up_all;
-}
-
-tied( $WORKER_FILTER_TABLES )->clean_up_all;
+shm_cleanup();
 exit( 0 );
