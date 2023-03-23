@@ -123,6 +123,28 @@ sub shm_cleanup()
     return;
 }
 
+sub get_distinct_filter_tables()
+{
+    my $WORKER_FILTER_TABLES;
+    tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
+
+    my $DISTINCT_FILTER_TABLES = [];
+    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+    foreach my $pid( keys %$WORKER_FILTER_TABLES )
+    {
+        foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$pid}} )
+        {
+            unless( grep /^$filter_table$/, @$DISTINCT_FILTER_TABLES )
+            {
+                push( @$DISTINCT_FILTER_TABLES, $filter_table );
+            }
+        }
+    }
+    tied( $WORKER_FILTER_TABLES )->shunlock();
+
+    return $DISTINCT_FILTER_TABLES;
+}
+
 sub parent_loop($$)
 {
     my( $WORKER_STATUSES, $WORKER_FILTER_TABLES ) = validate_pos(
@@ -180,15 +202,16 @@ sub parent_loop($$)
     #       - Handles the case where the primary is busy but there is no
     #         activity on the base tables which 'drive' our cache tables.
 
+    my $DISTINCT_FILTER_TABLES = get_distinct_filter_tables();
     while( 1 )
     {
         my $num_in_flight_changes = 0;
         #important - get 'idle' changes prior to our filter table changes
 
         &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn );
+        my $WT_LOCKED = 0;
 
-        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-        foreach my $filter_table( keys %$WORKER_FILTER_TABLES )
+        foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
         {
             $last_peeked_lsn = $filter_table_lsns->{$filter_table};
             my $data = &replication_peek(
@@ -198,6 +221,12 @@ sub parent_loop($$)
             );
             $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
             next unless( $data );
+
+            if( !$WT_LOCKED )
+            {
+                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+                $WT_LOCKED = 1;
+            }
 
             foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
             {
@@ -214,7 +243,11 @@ sub parent_loop($$)
             }
         }
 
-        tied( $WORKER_FILTER_TABLES )->shunlock();
+        if( $WT_LOCKED )
+        {
+            tied( $WORKER_FILTER_TABLES )->shunlock();
+            $WT_LOCKED = 0;
+        }
         # Get worker applied LSNs and ack up to the smallest LSN
 
         my $worker_lsns = {};
@@ -404,7 +437,6 @@ sub worker_entrypoint($$$$)
     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
     tied( $WORKER_STATUSES )->shunlock();
 
-    _log( $LOG_LEVEL_DEBUG, "All pins tied for $worker_pid" );
     my $handle = DBI->connect(
         $CONNECTION_MAP->{connection_string},
         $CONNECTION_MAP->{user_name},
@@ -729,6 +761,13 @@ if( !check_extension_running( $handle ) )
     croak(
         'There appears to be another instance of '
       . "$EXTENSION_NAME running on this database\n"
+    );
+}
+
+if( !create_replication_slot( $handle ) )
+{
+    croak(
+        'Failed to create replication slot'
     );
 }
 

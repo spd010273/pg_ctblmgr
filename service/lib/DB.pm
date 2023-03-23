@@ -18,6 +18,21 @@ use Util;
 
 our $CONNECTION_MAP :Export( :MANDATORY );
 
+Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<'END_SQL';
+    SELECT *
+      FROM pg_catalog.pg_create_logical_replication_slot(
+               ?,
+               'pg_ctblmgr'
+           );
+END_SQL
+
+Readonly::Scalar my $CHECK_REPLICATION_SLOT => <<'END_SQL';
+    SELECT plugin,
+           slot_type
+      FROM pg_catalog.pg_replication_slots
+     WHERE slot_name = ?
+END_SQL
+
 Readonly::Scalar my $CHECK_EXTENSION_RUNNING_QUERY => <<"END_SQL";
     SELECT pg_try_advisory_lock(
                c.oid::BIGINT
@@ -473,6 +488,43 @@ sub check_extension($) :Export( :MANDATORY )
 
     $sth->finish();
     return 0;
+}
+
+sub create_replication_slot($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $check_sth = &try_query(
+        $handle,
+        $CHECK_REPLICATION_SLOT,
+        [ $SLOT_NAME ]
+    );
+
+    return 0 unless( $check_sth );
+
+    if( $check_sth->rows() == 0 )
+    {
+        my $create_sth = &try_query(
+            $handle,
+            $CREATE_REPLICATION_SLOT,
+            [ $SLOT_NAME ]
+        );
+
+        if( !$create_sth )
+        {
+            $check_sth->finish();
+            return 0;
+        }
+
+        $create_sth->finish();
+    }
+
+    $check_sth->finish();
+
+    return 1;
 }
 
 sub check_extension_running($) :Export( :MANDATORY )
