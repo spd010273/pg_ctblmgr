@@ -3838,7 +3838,7 @@ static void NestPath_out( StringInfo str, NestPath * node )
 
 static void Node_out( StringInfo string, void * object )
 {
-    if( object == NULL )
+    if( object == NULL || object == NIL )
     {
         appendStringInfo( string, "null" );
     }

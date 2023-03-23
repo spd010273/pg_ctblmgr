@@ -60,59 +60,6 @@ sub _terminate()
 
 $SIG{INT} = \&_terminate;
 $SIG{__DIE__} = \&_terminate;
-sub get_pin_key($$)
-{
-    my( $pid, $filter_table ) = validate_pos(
-        @_,
-        { type => SCALAR },
-        { type => SCALAR },
-    );
-
-    my $DATA;
-    my $index;
-    unless( tie( $DATA, 'IPC::Shareable', { key => 'PINT', 'create' => 1, 'destroy' => 1 } ) )
-    {
-        print "FAILED TO ATTACH PIN TABLE\n";
-        _log( $LOG_LEVEL_FATAL, "Failed to attach to pin key table" );
-    }
-
-    tied( $DATA )->shlock( LOCK_EX );
-    if( !defined $DATA->{ind} )
-    {
-        $DATA->{ind} = 0;
-    }
-
-    if( !defined( $DATA->{$pid} ) )
-    {
-        $DATA->{$pid}->{$filter_table} = $DATA->{ind};
-        $index = $DATA->{ind};
-        $DATA->{ind} = $index + 1;
-    }
-    else
-    {
-       if( !defined( $DATA->{$pid}->{$filter_table} ) )
-       {
-           $DATA->{$pid}->{$filter_table} = $DATA->{ind};
-           $index = $DATA->{ind};
-           $DATA->{ind} = $index + 1;
-       }
-       else
-       {
-           $index = $DATA->{$pid}->{$filter_table};
-       }
-    }
-
-    tied( $DATA )->shunlock();
-
-    my $ind_hex = sprintf( '%X', $index );
-    $index = "P$ind_hex";
-    if( length( $index ) > 4 )
-    {
-        _log( $LOG_LEVEL_ERROR, "worker pid index overrun" );
-    }
-    print "Issued '$index' for $pid, $filter_table\n";
-    return $index;
-}
 
 sub shm_cleanup()
 {
@@ -149,7 +96,7 @@ sub shm_cleanup()
     {
         foreach my $filter_table( keys %{$DATA->{$pid}} )
         {
-            my $index = 'P' . sprintf( '%X', $DATA->{$pid}->{$filter_table} );
+            my $index = '_' . sprintf( '%03X', $DATA->{$pid}->{$filter_table} );
             my $test;
             eval { tie( $test, 'IPC::Shareable', { key => $index } ) };
             if( $OS_ERROR )
@@ -240,7 +187,7 @@ sub parent_loop($$)
 
         &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn );
 
-        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
+        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
         foreach my $filter_table( keys %$WORKER_FILTER_TABLES )
         {
             $last_peeked_lsn = $filter_table_lsns->{$filter_table};
@@ -251,27 +198,19 @@ sub parent_loop($$)
             );
             $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
             next unless( $data );
-            print Dumper( $data );
-            my $index = 0;
 
-            foreach my $PIN( @{$WORKER_FILTER_TABLES->{$filter_table}->{pins}} )
+            foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
             {
-                my $pid = $WORKER_FILTER_TABLES->{$filter_table}->{pids}->[$index];
-                my $keyname = get_pin_key( $pid, $filter_table );
-
-                tie( $PIN, 'IPC::Shareable', { key => $keyname } );
-                tied( $PIN )->shlock( LOCK_EX );
-
-                foreach my $change( @$data )
+                if(
+                        defined( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} )
+                     && ref( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} ) eq 'ARRAY'
+                  )
                 {
-                    push( @$PIN, $change );
+                    foreach my $change( @$data )
+                    {
+                        push( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}}, $change );
+                    }
                 }
-
-                $num_in_flight_changes += scalar( @$PIN );
-                tied( $PIN )->shunlock();
-                untie( $PIN );
-
-                $index++;
             }
         }
 
@@ -465,25 +404,6 @@ sub worker_entrypoint($$$$)
     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
     tied( $WORKER_STATUSES )->shunlock();
 
-    foreach my $filter_table( @$filter_tables )
-    {
-        if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
-        {
-            until( tied( $WAL_DATA->{$filter_table}->{pin} ) )
-            {
-                my $keyname = get_pin_key( $worker_pid, $filter_table );
-                eval{
-                    tie(
-                        $WAL_DATA->{$filter_table}->{pin},
-                        'IPC::Shareable',
-                        { key => $keyname }
-                    )
-                };
-                sleep( 1 ) if( $OS_ERROR );
-            }
-        }
-    }
-
     _log( $LOG_LEVEL_DEBUG, "All pins tied for $worker_pid" );
     my $handle = DBI->connect(
         $CONNECTION_MAP->{connection_string},
@@ -558,76 +478,71 @@ sub worker_entrypoint($$$$)
 
             # Process changes
             my $changes = {};
+            my $WAL_DATA = {};
+
+            # Quickly dequeue items to hold ex lock for minimum time
+            tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+            foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$worker_pid}} )
+            {
+                $WAL_DATA->{$filter_table} = [];
+                if(
+                       defined( $WORKER_FILTER_TABLES->{$worker_pid}->{$filter_table} )
+                    && ref( $WORKER_FILTER_TABLES->{$worker_pid}->{$filter_table} ) eq 'ARRAY'
+                    && scalar( @{$WORKER_FILTER_TABLES->{$worker_pid}->{$filter_table}} ) > 0
+                  )
+                {
+                    while( scalar( @{$WORKER_FILTER_TABLES->{$worker_pid}->{$filter_table}} ) > 0 )
+                    {
+                        my $change = pop( @{$WORKER_FILTER_TABLES->{$worker_pid}->{$filter_table}} );
+                        
+                        push( @{$WAL_DATA->{$filter_table}}, $change );
+                    }
+                }
+            }
+
+            tied( $WORKER_FILTER_TABLES )->shunlock();
 
             foreach my $filter_table( keys %$WAL_DATA )
             {
-                if( !tied( $WAL_DATA->{$filter_table}->{pin} ) )
-                {
-                    my $pin_keyname = get_pin_key( $worker_pid, $filter_table );
-                    unless(
-                            tie(
-                                $WAL_DATA->{$filter_table}->{pin},
-                                'IPC::Shareable',
-                                { key => $pin_keyname }
-                            )
-                          )
-                    {
-                        _log(
-                            $LOG_LEVEL_WARNING,
-                            "Failed to tie shared memory $pin_keyname"
-                        );
-                    }
-                }
-
-                tied( $WAL_DATA->{$filter_table}->{pin} )->shlock( LOCK_SH );
                 my $change;
 
-                if(
-                        defined( $WAL_DATA )
-                     && defined( $WAL_DATA->{$filter_table} )
-                     && defined( $WAL_DATA->{$filter_table}->{pin} )
-                  )
+                while( scalar( @{$WAL_DATA->{$filter_table}} ) > 0 )
                 {
-                    while( scalar( @{$WAL_DATA->{$filter_table}->{pin}} ) > 0 )
+                    $change = pop( @{$WAL_DATA->{$filter_table}} );
+                    print "Worker got change: \n";
+                    print Dumper( $change );
+                    if( $change )
                     {
-                        $change = pop( @{$WAL_DATA->{$filter_table}->{pin}} );
-                        print "Worker got change: \n";
-                        print Dumper( $change );
-                        if( $change )
+                        my $schema = $change->{data}->{schema_name};
+                        my $table  = $change->{data}->{table_name};
+
+                        foreach my $key( keys %{$change->{data}->{key}} )
                         {
-                            my $schema = $change->{data}->{schema_name};
-                            my $table  = $change->{data}->{table_name};
+                            my $val = $change->{data}->{key}->{$key};
 
-                            foreach my $key( keys %{$change->{data}->{key}} )
+                            if( !defined( $changes->{$schema}->{$table}->{$key} ) )
                             {
-                                my $val = $change->{data}->{key}->{$key};
-
-                                if( !defined( $changes->{$schema}->{$table}->{$key} ) )
-                                {
-                                    $changes->{$schema}->{$table}->{$key} = [ $val ];
-                                }
-                                else
-                                {
-                                    push(
-                                        @{$changes->{$schema}->{$table}->{$key}},
-                                        $val
-                                    );
-                                }
+                                $changes->{$schema}->{$table}->{$key} = [ $val ];
                             }
-
-                            if(
-                                    !defined( $max_peeked_lsn )
-                                 || &lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0
-                              )
+                            else
                             {
-                                $max_peeked_lsn = $change->{commit_lsn};
+                                push(
+                                    @{$changes->{$schema}->{$table}->{$key}},
+                                    $val
+                                );
                             }
                         }
 
+                        if(
+                                !defined( $max_peeked_lsn )
+                             || &lsn_cmp( $max_peeked_lsn, $change->{commit_lsn} ) < 0
+                          )
+                        {
+                            $max_peeked_lsn = $change->{commit_lsn};
+                        }
                     }
                 }
 
-                tied( $WAL_DATA->{$filter_table}->{pin} )->shunlock();
                 # Digest changes for this filter table
             }
 
@@ -879,32 +794,13 @@ foreach my $worker_entry( @$worker_data )
 
         foreach my $filter_table( @$filter_tables )
         {
-            if( !defined( $WORKER_FILTER_TABLES->{$filter_table} ) )
+            if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
             {
-                $WORKER_FILTER_TABLES->{$filter_table} = {
-                    pins     => [],
-                    pids     => [],
-                };
+                $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} = [];
             }
             # Setup the pins (parsed XLOG queue) for each filter table
             # changes relevent to said changes will be pushed into this queue
             # by the parent and popped later by the workers
-            my $PIN = [];
-            push(
-                @{$WORKER_FILTER_TABLES->{$filter_table}->{pids}},
-                $child_pid
-            );
-            my $pinkey = get_pin_key( $child_pid, $filter_table );
-            tie(
-                $PIN,
-                'IPC::Shareable',
-                {
-                    key     => $pinkey,
-                    create  => 1,
-                    destroy => 1
-                }
-            );
-            push( @{$WORKER_FILTER_TABLES->{$filter_table}->{pins}}, $PIN );
         }
         tied( $WORKER_FILTER_TABLES )->shunlock();
 
