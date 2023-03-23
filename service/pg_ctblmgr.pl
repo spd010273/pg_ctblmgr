@@ -87,38 +87,6 @@ sub shm_cleanup()
     my $sigwarn = $SIG{__WARN__};
     local $SIG{__WARN__} = sub {};
 
-    # Attempt to remove buffer PINs
-    my $DATA;
-
-    tie( $DATA, 'IPC::Shareable', { key => 'PINT' } );
-    tied( $DATA )->shlock( LOCK_EX );
-    foreach my $pid( keys %$DATA )
-    {
-        foreach my $filter_table( keys %{$DATA->{$pid}} )
-        {
-            my $index = '_' . sprintf( '%03X', $DATA->{$pid}->{$filter_table} );
-            my $test;
-            eval { tie( $test, 'IPC::Shareable', { key => $index } ) };
-            if( $OS_ERROR )
-            {
-                print "Failed to remove PIN '$index'\n";
-            }
-            else
-            {
-                if( tied( $test ) )
-                {
-                    tied( $test )->clean_up_all();
-                }
-                else
-                {
-                    print "Could not tie PIN '$index'\n";
-                }
-            }
-        }
-    }
-    tied( $DATA )->shunlock();
-    tied( $DATA )->clean_up_all();
-
     $SIG{__WARN__} = $sigwarn;
     return;
 }

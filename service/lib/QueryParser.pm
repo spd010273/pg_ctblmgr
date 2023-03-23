@@ -60,6 +60,8 @@ Readonly::Scalar my $GET_PARSE_TREE => <<"END_SQL";
     )::JSONB AS tree
 END_SQL
 
+my $PARSE_ERROR = 0;
+
 sub get_query_parsetree($$) :Export( :MANDATORY )
 {
     my( $handle, $definition ) = validate_pos(
@@ -551,6 +553,8 @@ sub get_joined_rels($$$$;$)
                     'get_joined_rels: Unknown right RTE '
                   . "$json_fragment->{rarg}->{name}\n"
                 );
+                $PARSE_ERROR = 1;
+                print Dumper( $json_fragment->{rarg} );
                 return;
             }
         }
@@ -658,6 +662,7 @@ sub get_joined_rels($$$$;$)
                 'get_joined_rels: Unknown recursed left RTE '
               . "$json_fragment->{name}\n"
             );
+            $PARSE_ERROR = 1;
             return;
         }
     }
@@ -775,6 +780,7 @@ sub parse_union($$$$$;$)
         warn(
             "parse_union: Invalid structure in $json_fragment->{name} node\n"
         );
+        $PARSE_ERROR = 1;
     }
 
     return;
@@ -895,6 +901,7 @@ sub parse_select($$$$;$)
     if( $json_fragment->{name} ne 'SELECTSTMT' )
     {
         warn "parse_select: Invalid node $json_fragment->{name}\n";
+        $PARSE_ERROR = 1;
         return;
     }
 
@@ -1318,6 +1325,7 @@ sub find_table_aliases($$$$$) :Export( :MANDATORY )
 
     my $parse_tree_obj = get_query_parsetree( $handle, $definition );
 
+    $PARSE_ERROR = 0;
     return unless( defined $parse_tree_obj );
 
     # Sanity check top-level-node
@@ -1343,6 +1351,13 @@ sub find_table_aliases($$$$$) :Export( :MANDATORY )
         $table_mapping,
         $relcache
     );
+
+    if( $PARSE_ERROR )
+    {
+        print "There was an error parsing the following query's parse tree:\n";
+        print "$definition\n";
+        $PARSE_ERROR = 0;
+    }
 
     return $query_data;
 }
@@ -1570,6 +1585,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         else
         {
             warn "Could not determine proceeding where clause mark\n";
+            $PARSE_ERROR = 1;
             print Dumper( $table_mapping );
             return;
         }
