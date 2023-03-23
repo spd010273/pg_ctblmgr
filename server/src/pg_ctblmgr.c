@@ -3483,41 +3483,43 @@ static void List_out( StringInfo str, List * node )
         // Note - we need to properly iterate over list members
         // New code
         cell = ( Node * ) lfirst( lc );
-
-        if( IsA( cell, List ) )
+        if( ( void * ) cell != NIL && ( void * ) cell != NULL )
         {
-            first_two = 1;
-            appendStringInfoChar( str, '[' );
-            foreach( k, ( List * ) cell )
+            if( IsA( cell, List ) )
             {
-                if( first_two )
-                    first_two = 0;
-                else
-                    appendStringInfoChar( str, ',' );
-                Node_out( str, ( Node * ) lfirst( k ) );
+                first_two = 1;
+                appendStringInfoChar( str, '[' );
+                foreach( k, ( List * ) cell )
+                {
+                    if( first_two )
+                        first_two = 0;
+                    else
+                        appendStringInfoChar( str, ',' );
+                    Node_out( str, ( Node * ) lfirst( k ) );
+                }
+                appendStringInfoChar( str, ']' );
             }
-            appendStringInfoChar( str, ']' );
-        }
-        else if( IsA( node, IntList ) )
-        {
-            appendStringInfo( str, "%d", lfirst_int( lc ) );
-        }
-        else if( IsA( node, OidList ) )
-        {
-            appendStringInfo( str, "%u", lfirst_oid( lc ) );
-        }
-        else if( IsA( node, List ) )
-        {
-            Node_out( str, cell );
-        }
-        else
-        {
-            elog(
-                ERROR,
-                "Unknown list node type %d (%s)",
-                ( int ) node->type,
-                enum_NodeTag( node->type )
-            );
+            else if( IsA( node, IntList ) )
+            {
+                appendStringInfo( str, "%d", lfirst_int( lc ) );
+            }
+            else if( IsA( node, OidList ) )
+            {
+                appendStringInfo( str, "%u", lfirst_oid( lc ) );
+            }
+            else if( IsA( node, List ) )
+            {
+                Node_out( str, cell );
+            }
+            else
+            {
+                elog(
+                    ERROR,
+                    "Unknown list node type %d (%s)",
+                    ( int ) node->type,
+                    enum_NodeTag( node->type )
+                );
+            }
         }
     }
 
