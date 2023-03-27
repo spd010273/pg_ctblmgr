@@ -547,6 +547,24 @@ sub get_joined_rels($$$$;$)
                     }
                 );
             }
+            elsif( $json_fragment->{rarg}->{name} eq 'JOINEXPR' )
+            {
+                my $sub_join = &get_joined_rels(
+                    $json_fragment->{rarg},
+                    $parent,
+                    $table_mapping,
+                    $relcache,
+                    $union_flag
+                );
+
+                foreach my $rel( @$sub_join )
+                {
+                    push(
+                        @$from_list,
+                        $rel
+                    );
+                }
+            }
             else
             {
                 warn(
@@ -873,7 +891,7 @@ sub parse_from_clause($$$$;$)
         $relcache,
         $union_flag
     );
-
+    print Dumper( $result );
     return $result;
 }
 
@@ -1293,6 +1311,7 @@ sub recursive_from_finder($$$)
                             && defined( $qual->{name} )
                           )
                     {
+                        _log( $LOG_LEVEL_DEBUG, "Removing unresolvable relation $obj_name" );
                         next;
                     }
                     my $schema = $qual->{schema};
@@ -1388,6 +1407,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
     foreach my $position( keys %{$table_mapping->{BINDS}} )
     {
+        print "P: $position\n";
         next if( $position < 0 );
 
         my $RELS          = $table_mapping->{BINDS}->{$position}->{rels};
@@ -1395,14 +1415,18 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
         foreach my $schema( keys %$RELS )
         {
+            print "S: $schema\n";
             foreach my $alias( keys %{$RELS->{$schema}} )
             {
+                print "A: $alias\n";
                 foreach my $table_name( keys %{$RELS->{$schema}->{$alias}} )
                 {
+                    print "T: $table_name\n";
                     if( defined( $filters->{$schema}->{$table_name} ) )
                     {
                         foreach my $key( keys %{$filters->{$schema}->{$table_name}} )
                         {
+                            print "K: $key\n";
                             my $typmod = &get_typmods(
                                 $handle,
                                 $schema,
@@ -1480,7 +1504,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     # Assmple where expressions structure keyed based on the bind position
     # for much easier substitution later
 
-    #print Dumper( $where_expressions ) if( $DEBUG );
+    print Dumper( $where_expressions ) if( $DEBUG );
     my $new_q = $definition;
     my $index = 0;
     #print Dumper( $where_expressions );
@@ -1531,6 +1555,8 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
         my $where_proceeding_clause_mark;
         my $BS_HASH = $table_mapping->{BINDS}->{$bind_start};
+        my $replace_where = 0;
+
         if( $BS_HASH->{has_group} )
         {
             $where_proceeding_clause_mark = 'group\s+by';
@@ -1582,11 +1608,18 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         {
             $where_proceeding_clause_mark = '$';
         }
+        elsif( $BS_HASH->{has_where} )
+        {
+            $where_proceeding_clause_mark = 'where';
+            $replace_where = 1;
+        }
         else
         {
             warn "Could not determine proceeding where clause mark\n";
+            print "Query fragment info:\n";
+            print Dumper( $BS_HASH );
             $PARSE_ERROR = 1;
-            print Dumper( $table_mapping );
+            #print Dumper( $table_mapping );
             return;
         }
 
@@ -1597,7 +1630,21 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             length( $new_q ) - $bind_end
         );
         my $substituted_where = $bind_location;
-        $substituted_where =~ s/($where_proceeding_clause_mark)/${where_expression}$1/i;
+        if( $replace_where )
+        {
+            if( $substituted_where =~ m/where/i )
+            {
+                $substituted_where =~ s/($where_proceeding_clause_mark)/$1${where_expression}/i;
+            }
+            else
+            {   # We've likly latched on a where clause element
+                $substituted_where .= $where_expression;
+            }
+        }
+        else
+        {
+            $substituted_where =~ s/($where_proceeding_clause_mark)/${where_expression}$1/i;
+        }
         $new_q             = $preceeding_query
                            . $substituted_where
                            . $proceeding_query;
