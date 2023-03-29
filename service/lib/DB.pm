@@ -16,6 +16,7 @@ use Data::Dumper;
 use lib "$FindBin::Bin";
 use Util;
 
+$OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<'END_SQL';

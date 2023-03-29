@@ -20,6 +20,8 @@ use lib "$FindBin::Bin";
 use DB;
 use Util;
 
+$OUTPUT_AUTOFLUSH = 1;
+
 Readonly::Scalar my $OID_CACHE => <<END_SQL;
     SELECT n.nspname::VARCHAR AS schema_name,
            c.relname::VARCHAR AS obj_name,
@@ -891,7 +893,7 @@ sub parse_from_clause($$$$;$)
         $relcache,
         $union_flag
     );
-    print Dumper( $result );
+
     return $result;
 }
 
@@ -1504,10 +1506,10 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     # Assmple where expressions structure keyed based on the bind position
     # for much easier substitution later
 
-    print Dumper( $where_expressions ) if( $DEBUG );
+    #print Dumper( $where_expressions ) if( $DEBUG );
     my $new_q = $definition;
     my $index = 0;
-    #print Dumper( $where_expressions );
+
     foreach my $bind_start( @starts )
     {
         # Skip if unbindable (no relevent relations)
@@ -1630,6 +1632,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             length( $new_q ) - $bind_end
         );
         my $substituted_where = $bind_location;
+
         if( $replace_where )
         {
             if( $substituted_where =~ m/where/i )
@@ -1645,9 +1648,10 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         {
             $substituted_where =~ s/($where_proceeding_clause_mark)/${where_expression}$1/i;
         }
-        $new_q             = $preceeding_query
-                           . $substituted_where
-                           . $proceeding_query;
+
+        $new_q = $preceeding_query
+               . $substituted_where
+               . $proceeding_query;
 
         $index++;
     }

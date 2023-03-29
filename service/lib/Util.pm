@@ -6,6 +6,8 @@ use IO::Interactive qw( is_interactive );
 use Params::Validate qw( :all );
 use English qw( -no_match_vars );
 
+$OUTPUT_AUTOFLUSH = 1;
+
 Readonly::Scalar our $DEBUG                  :Export( :MANDATORY ) => 1;
 Readonly::Scalar our $CLEAN_UP               :Export( :MANDATORY ) => 0; # Emergency shm cleanup
 Readonly::Scalar our $LOG_LEVEL_FATAL        :Export( :MANDATORY ) => 5;

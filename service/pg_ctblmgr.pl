@@ -19,6 +19,7 @@ use POSIX qw( strftime setsid :sys_wait_h );
 use Cwd qw( abs_path );
 use IPC::Shareable qw( :lock );
 use Data::Dumper;
+use Carp;
 
 use FindBin;
 use lib "$FindBin::Bin/lib";
@@ -38,7 +39,8 @@ use QueryParser;
 
 Readonly my $SLEEP_TIMER => 1; # seconds for main loop
 
-$OUTPUT_AUTOFLUSH = 1;
+our $OUTPUT_AUTOFLUSH = 1;
+our $| = 1;
 
 ## GLOBAL VARIABLES
 $PARENT_PID  = $PROCESS_ID;
@@ -48,17 +50,36 @@ $LOG_FH      = undef;
 $DAEMONIZE   = 0;
 my $CHILDREN = [];
 
-sub _terminate()
+sub _terminate_sigint()
 {
+    # Wrapper to mask errors
+    _terminate();
+}
+
+sub _terminate(;$$$)
+{
+    my( $package, $file, $line ) = validate_pos(
+        @_,
+        { type => SCALAR | UNDEF, optional => 1 },
+        { type => SCALAR | UNDEF, optional => 1 },
+        { type => SCALAR | UNDEF, optional => 1 },
+    );
+
     if( $PROCESS_ID == $PARENT_PID )
     {
         #this is crucial to prevent running out of shm after crashes / terminations
         &shm_cleanup();
     }
+
+    if( @_ )
+    {
+        CORE::die( @_ );
+    }
+
     exit( 0 );
 }
 
-$SIG{INT} = \&_terminate;
+$SIG{INT} = \&_terminate_sigint;
 $SIG{__DIE__} = \&_terminate;
 
 sub shm_cleanup()
@@ -171,6 +192,7 @@ sub parent_loop($$)
     #         activity on the base tables which 'drive' our cache tables.
 
     my $DISTINCT_FILTER_TABLES = get_distinct_filter_tables();
+
     while( 1 )
     {
         my $num_in_flight_changes = 0;
@@ -264,7 +286,6 @@ sub parent_loop($$)
         {
             if( &replication_seek( $handle, $last_lsn_applied ) )
             {
-                print "Parent seeked changes to $last_lsn_applied\n";
                 $last_last_lsn_applied = $last_lsn_applied;
             }
         }
@@ -272,6 +293,7 @@ sub parent_loop($$)
         if(
                 $num_in_flight_changes == 0
              && defined( $max_idle_lsn )
+             && defined( $last_max_idle_lsn )
              && &lsn_cmp( $last_max_idle_lsn, $max_idle_lsn ) < 0
           )
         {
@@ -282,7 +304,6 @@ sub parent_loop($$)
 
         $last_max_idle_lsn = $max_idle_lsn;
         sleep( $SLEEP_TIMER );
-
         #TODO: Check in on children
 
     }
@@ -401,6 +422,8 @@ sub worker_entrypoint($$$$)
         sleep( 1 );
     }
 
+    tied( $WORKER_STATUSES )->shunlock();
+
     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
     tied( $WORKER_STATUSES )->shunlock();
@@ -509,8 +532,6 @@ sub worker_entrypoint($$$$)
                 while( scalar( @{$WAL_DATA->{$filter_table}} ) > 0 )
                 {
                     $change = pop( @{$WAL_DATA->{$filter_table}} );
-                    print "Worker got change: \n";
-                    print Dumper( $change );
                     if( $change )
                     {
                         my $schema = $change->{data}->{schema_name};
