@@ -559,14 +559,26 @@ sub check_extension_running($) :Export( :MANDATORY )
     return 0;
 }
 
-sub get_worker_list($) :Export( :MANDATORY )
+sub get_worker_list($;$) :Export( :MANDATORY )
 {
-    my( $handle ) = validate_pos(
+    my( $handle, $pk_maintenance_object ) = validate_pos(
         @_,
         { type => OBJECT },
+        { type => SCALAR, optional => 1 },
     );
 
-    my $sth = try_query( $handle, $GET_WORKER_LIST );
+    my $query = $GET_WORKER_LIST;
+    my $sth;
+
+    if( defined $pk_maintenance_object )
+    {
+        $query .= ' WHERE mo.maintenance_object = ?';
+        $sth = try_query( $handle, $query, [ $pk_maintenance_object] );
+    }
+    else
+    {
+        $sth = try_query( $handle, $query );
+    }
 
     unless( $sth )
     {

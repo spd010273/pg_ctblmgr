@@ -40,7 +40,7 @@ use QueryParser;
 Readonly my $SLEEP_TIMER => 1; # seconds for main loop
 
 our $OUTPUT_AUTOFLUSH = 1;
-our $| = 1;
+our $|=1;
 
 ## GLOBAL VARIABLES
 $PARENT_PID  = $PROCESS_ID;
@@ -48,11 +48,11 @@ $SLOT_NAME   = '__pg_ctblmgr';
 $LOG_FILE    = '';
 $LOG_FH      = undef;
 $DAEMONIZE   = 0;
-my $CHILDREN = [];
 
 sub _terminate_sigint()
 {
     # Wrapper to mask errors
+    print "Caught sigint $PROCESS_ID\n";
     _terminate();
 }
 
@@ -87,7 +87,7 @@ sub shm_cleanup()
     # Note: This cleans up shared memory and semaphore arrays. These
     # will not be automatically be cleaned up by the kernel. This can be
     # done manually with ipcs / ipcrm
-    exit( 1 ) unless( $PROCESS_ID != $PARENT_PID );
+    return unless( $PROCESS_ID != $PARENT_PID );
     my $WORKER_FILTER_TABLES;
     my $WORKER_STATUSES;
 
@@ -134,12 +134,95 @@ sub get_distinct_filter_tables()
     return $DISTINCT_FILTER_TABLES;
 }
 
-sub parent_loop($$)
+sub populate_worker_data($$)
 {
-    my( $WORKER_STATUSES, $WORKER_FILTER_TABLES ) = validate_pos(
+    my( $handle, $WORKER_DATA ) = validate_pos(
         @_,
+        { type => OBJECT },
+        { type => HASHREF | UNDEF },
+    );
+
+    my $worker_data = get_worker_list( $handle ); 
+    
+    if( $worker_data )
+    {
+        foreach my $worker_entry( @$worker_data )
+        {
+            my $pk_maintenance_object = $worker_entry->{maintenance_object};
+            my $filter_tables         = $worker_entry->{filter_tables};
+            my $ct_hash               = &get_ct_digest( $handle, $pk_maintenance_object ); 
+
+            unless( $ct_hash )
+            {
+                _log( $LOG_LEVEL_ERROR, "Failed to get digest for cache table $pk_maintenance_object" );
+                next;
+            }
+
+            $WORKER_DATA->{$pk_maintenance_object} = $ct_hash;
+        }
+    }
+    else
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to get updated worker list' );
+    }
+
+    return $WORKER_DATA;
+}
+
+sub check_for_new_cache_tables($$$)
+{
+    my( $handle, $current_workers, $new_workers ) = validate_pos(
+        @_,
+        { type => OBJECT },
         { type => HASHREF },
         { type => HASHREF },
+    );
+
+    my $diff = {
+        new    => {},
+        change => {},
+        old    => {},
+    };
+
+    foreach my $pk_maintenance_object( keys %$new_workers )
+    {
+        if( defined( $current_workers->{$pk_maintenance_object} ) )
+        {
+            next if( $current_workers->{$pk_maintenance_object} eq $new_workers->{$pk_maintenance_object} );
+            #indicate a change to a CT
+            $diff->{change}->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
+            $current_workers->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
+        }
+        else
+        {
+            #indicate a new CT has been added
+            $diff->{new}->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
+            $current_workers->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
+        }
+    }
+
+    foreach my $pk_maintenance_object( keys %$current_workers )
+    {
+        next if( defined( $new_workers->{$pk_maintenance_object} ) );
+        #indicate a removed CT
+        $diff->{old}->{$pk_maintenance_object} = $current_workers->{$pk_maintenance_object};
+    }
+   
+    foreach my $pk_maintenance_object( keys %{$diff->{old}} )
+    {
+        delete( $current_workers->{$pk_maintenance_object} );    
+    }
+
+    return $diff;
+}
+
+sub parent_loop($$$)
+{
+    my( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping ) = validate_pos(
+        @_,
+        { type => HASHREF }, # shm status hash
+        { type => HASHREF }, # shm WAL hash
+        { type => HASHREF }, # local mapping of pk_maint_obj -> pid
     );
 
     #print Dumper( $WORKER_STATUSES );
@@ -192,9 +275,105 @@ sub parent_loop($$)
     #         activity on the base tables which 'drive' our cache tables.
 
     my $DISTINCT_FILTER_TABLES = get_distinct_filter_tables();
-
+    my $WORKER_DATA = {};
+    $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
     while( 1 )
     {
+        ## CACHE TABLE MANAGEMENT
+        my $tmp_worker_data = {};
+        $tmp_worker_data = populate_worker_data( $handle, $tmp_worker_data );
+        my $diff = check_for_new_cache_tables( $handle, $WORKER_DATA, $tmp_worker_data );
+        if(
+               scalar( keys %{$diff->{new}} ) > 0
+            || scalar( keys %{$diff->{change}} ) > 0
+            || scalar( keys %{$diff->{old}} ) > 0
+          )
+        {
+            # Cache table changes detected
+            _log( $LOG_LEVEL_INFO, 'Detected changes to cache table definitions' );
+            # Remove old children
+            foreach my $pk_maintenance_object( keys %{$diff->{old}} )
+            {
+                my $target_pid = $worker_mapping->{$pk_maintenance_object};
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                _log( $LOG_LEVEL_DEBUG, "Parent terminating child $target_pid" );
+                $WORKER_STATUSES->{$target_pid}->{shutdown} = 1;
+                tied( $WORKER_STATUSES )->shunlock();
+                # Unlock, wait for child to exit
+                my $kid;
+                
+                do
+                {
+                    sleep( 1 );
+                    _log( $LOG_LEVEL_DEBUG, "Waiting on child $target_pid to exit..." );
+                    $kid = waitpid( $target_pid, WNOHANG );
+                } while( $kid > 0 );
+               
+                waitpid( $target_pid, 0 );  # reap child
+                _log( $LOG_LEVEL_DEBUG, "Child $target_pid exited!" ); 
+                delete( $worker_mapping->{$pk_maintenance_object} );
+                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+                delete( $WORKER_FILTER_TABLES->{$target_pid} );
+                tied( $WORKER_FILTER_TABLES )->shunlock();
+
+            }
+
+            # Add new children
+            foreach my $pk_maintenance_object( keys %{$diff->{new}} )
+            {
+                # XXX new worker code - NEED TO ADD FT changes to WFT
+                my $worker_data = get_worker_list( $handle, $pk_maintenance_object );
+                unless( $worker_data )
+                {
+                    _log( $LOG_LEVEL_ERROR, 'Need to spin up new child but could not locate maintenance object' );
+                    next;
+                }
+
+                $worker_data            = $worker_data->[0];
+                my $wal_level           = $worker_data->{wal_level};
+                my $filter_tables       = $worker_data->{filter_tables};
+                my $maintenance_channel = $worker_data->{maintenance_channel};
+                my $child_pid = fork();
+
+                if( defined( $child_pid ) and $child_pid == 0 )
+                {
+                    &worker_entrypoint(
+                        $wal_level,
+                        $filter_tables,
+                        $maintenance_channel,
+                        $pk_maintenance_object
+                    );
+                    exit( 0 );
+                }
+                elsif( defined( $child_pid ) and $child_pid > 0 )
+                {
+                    $worker_mapping->{$pk_maintenance_object} = $child_pid;
+                    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+
+                    foreach my $filter_table( @$filter_tables )
+                    {
+                        if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
+                        {
+                            $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} = [];
+                        }
+                        # Setup the pins (parsed XLOG queue) for each filter table
+                        # changes relevent to said changes will be pushed into this queue
+                        # by the parent and popped later by the workers
+                    }
+                    tied( $WORKER_FILTER_TABLES )->shunlock();
+
+                    $WORKER_STATUSES->{$child_pid}->{status}   = $WORKER_STATUS_STARTUP;
+                    $WORKER_STATUSES->{$child_pid}->{shutdown} = 0;
+                    $WORKER_STATUSES->{$child_pid}->{last_lsn} = undef;
+                    _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
+                }
+                else
+                {
+                    _log( $LOG_LEVEL_FATAL, "Failed to fork worker process" );
+                }
+            }
+        }
+        ## CHANGE MANAGEMENT
         my $num_in_flight_changes = 0;
         #important - get 'idle' changes prior to our filter table changes
 
@@ -214,6 +393,7 @@ sub parent_loop($$)
 
             if( !$WT_LOCKED )
             {
+                print "Attempting to lock FT\n";
                 tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
                 $WT_LOCKED = 1;
             }
@@ -304,8 +484,8 @@ sub parent_loop($$)
 
         $last_max_idle_lsn = $max_idle_lsn;
         sleep( $SLEEP_TIMER );
-        #TODO: Check in on children
-
+        
+        ## WORKER HEALTH CHECKS
     }
 
     return;
@@ -413,13 +593,20 @@ sub worker_entrypoint($$$$)
         { key => 'WORKER_FILTER_TABLES' }
     );
 
+    my $count = 0;
+    my $lim = 15;
     until( tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB ) )
     {
+        if( $count > $lim )
+        {
+            _log( $LOG_LEVEL_FATAL, "Parent took > $lim seconds to start!" );
+        }
         _log(
             $LOG_LEVEL_DEBUG,
             "Worker $worker_pid waiting to enter running state"
         );
         sleep( 1 );
+        $count++;
     }
 
     tied( $WORKER_STATUSES )->shunlock();
@@ -468,6 +655,30 @@ sub worker_entrypoint($$$$)
 
         while( 1 )
         {
+            # Check for commanded exit
+            my $exit = 0;
+            tied( $WORKER_STATUSES )->shlock( LOCK_SH );
+            if( defined( $WORKER_STATUSES ) && defined( $WORKER_STATUSES->{$worker_pid} ) )
+            {
+                $exit = $WORKER_STATUSES->{$worker_pid}->{shutdown} if( defined( $WORKER_STATUSES->{$worker_pid}->{shutdown} ) );
+            }
+            tied( $WORKER_STATUSES )->shunlock();
+
+            if( defined $exit && $exit == 1 )
+            {
+                _log( $LOG_LEVEL_INFO, "PID $worker_pid commanded to shutdown" );
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_EXITED;
+                tied( $WORKER_STATUSES )->shunlock();
+
+                my $dct = try_query( $handle, "DROP TABLE $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
+                unless( $dct )
+                {
+                    _log( $LOG_LEVEL_ERROR, "Failed to drop cache table $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
+                }
+                exit( 0 );
+            }
+
             # check to see if definition has changed
             my $max_peeked_lsn;
             my $max_applied_lsn;
@@ -476,27 +687,29 @@ sub worker_entrypoint($$$$)
             if( !defined $test_hash )
             {
                 _log(
-                    $LOG_LEVEL_FATAL,
+                    $LOG_LEVEL_ERROR,
                     'Failed to check maintenance object '
                   . 'for definition change (SHA256)'
                 );
             }
-
-            if( $test_hash ne $CACHE_HASH->{digest} )
+            else
             {
-                _log(
-                    $LOG_LEVEL_INFO,
-                    'Cache table definition has changed, replacing the '
-                  . 'cache table'
-                );
+                if( $test_hash ne $CACHE_HASH->{digest} )
+                {
+                    _log(
+                        $LOG_LEVEL_INFO,
+                        'Cache table definition has changed, replacing the '
+                      . 'cache table'
+                    );
 
-                &worker_cache_refresh(
-                    $handle,
-                    $pk_maintenance_object,
-                    $filter_tables,
-                    $CACHE_HASH
-                );
-                &replace_cache_table( $handle, $pk_maintenance_object );
+                    &worker_cache_refresh(
+                        $handle,
+                        $pk_maintenance_object,
+                        $filter_tables,
+                        $CACHE_HASH
+                    );
+                    &replace_cache_table( $handle, $pk_maintenance_object );
+                }
             }
 
             # Process changes
@@ -505,6 +718,20 @@ sub worker_entrypoint($$$$)
 
             # Quickly dequeue items to hold ex lock for minimum time
             tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+            if( !defined $WORKER_FILTER_TABLES || ref( $WORKER_FILTER_TABLES ) ne 'HASH' )
+            {
+                _log( $LOG_LEVEL_ERROR, 'WFT is not defined or not a hash!' );
+                tied( $WORKER_FILTER_TABLES )->shunlock();
+                sleep( 5 );
+
+                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+                if( !defined $WORKER_FILTER_TABLES || ref( $WORKER_FILTER_TABLES ) ne 'HASH' )
+                {
+                    tied( $WORKER_FILTER_TABLES )->shunlock();
+                    exit( 1 );
+                }
+            }
+
             foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$worker_pid}} )
             {
                 $WAL_DATA->{$filter_table} = [];
@@ -524,7 +751,7 @@ sub worker_entrypoint($$$$)
             }
 
             tied( $WORKER_FILTER_TABLES )->shunlock();
-
+            
             foreach my $filter_table( keys %$WAL_DATA )
             {
                 my $change;
@@ -569,6 +796,10 @@ sub worker_entrypoint($$$$)
 
             if( scalar( keys %$changes ) > 0 )
             {
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid} = $WORKER_STATUS_UPDATING;
+                tied( $WORKER_STATUSES )->shunlock();
+
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
                 # now lets apply changes from the array after pop
                 my $query = &apply_filters(
@@ -676,6 +907,7 @@ sub worker_entrypoint($$$$)
                 print "Applied $max_peeked_lsn\n";
                 $max_applied_lsn = $max_peeked_lsn;
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{statuse}  = $WORKER_STATUS_RUNNING;
                 $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
                 tied( $WORKER_STATUSES )->shunlock();
             }
@@ -761,6 +993,7 @@ if( !create_replication_slot( $handle ) )
 }
 
 my $worker_data = get_worker_list( $handle );
+
 $handle->disconnect();
 undef( $handle );
 
@@ -787,9 +1020,14 @@ tie(
     }
 );
 
-shm_cleanup() if( $CLEAN_UP );
+if( $CLEAN_UP )
+{
+    shm_cleanup();
+    exit( 0 );
+}
 
 # Wipe and start fresh if we crashed previously
+my $worker_mapping = {};
 $WORKER_STATUSES = {};
 $WORKER_FILTER_TABLES = {};
 # Time to fork workers
@@ -817,7 +1055,7 @@ foreach my $worker_entry( @$worker_data )
     }
     elsif( defined( $child_pid ) and $child_pid > 0 )
     {
-        push( @$CHILDREN, $child_pid );        
+        $worker_mapping->{$pk_maintenance_object} = $child_pid;
         tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
 
         foreach my $filter_table( @$filter_tables )
@@ -833,6 +1071,7 @@ foreach my $worker_entry( @$worker_data )
         tied( $WORKER_FILTER_TABLES )->shunlock();
 
         $WORKER_STATUSES->{$child_pid}->{status}   = $WORKER_STATUS_STARTUP;
+        $WORKER_STATUSES->{$child_pid}->{shutdown} = 0;
         $WORKER_STATUSES->{$child_pid}->{last_lsn} = undef;
         _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
     }
@@ -845,7 +1084,7 @@ foreach my $worker_entry( @$worker_data )
 # We've started workers, lets start processing WAL
 _log( $LOG_LEVEL_DEBUG, "All workers started" );
 tied( $WORKER_STATUSES )->shunlock();
-parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES );
+parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
 shm_cleanup();
 exit( 0 );
