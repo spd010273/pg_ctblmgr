@@ -80,8 +80,7 @@ const char * transaction_boundary_reduced = "{\
 }";
 
 const char * transaction_boundary_minimal = "{\
-\"x\":\"%u\"\
-}";
+\"x\":\"%u\",\"b\":\"%s\"}";
 
 const char * dml_preamble_full = "{\
 \"type\":\"%s\",\

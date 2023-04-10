@@ -277,7 +277,8 @@ static void pg_ctblmgr_decode_begin_tx(
             appendStringInfo(
                 context->out,
                 transaction_boundary_minimal,
-                txn->xid
+                txn->xid,
+                "B"
             );
             break;
         default:
@@ -328,7 +329,8 @@ static void pg_ctblmgr_decode_commit_tx(
             appendStringInfo(
                 context->out,
                 transaction_boundary_minimal,
-                txn->xid
+                txn->xid,
+                "C"
             );
             break;
         default:

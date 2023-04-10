@@ -277,6 +277,7 @@ sub parent_loop($$$)
     my $DISTINCT_FILTER_TABLES = get_distinct_filter_tables();
     my $WORKER_DATA = {};
     $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
+    my $wal_level = 'M';
     while( 1 )
     {
         ## CACHE TABLE MANAGEMENT
@@ -386,6 +387,7 @@ sub parent_loop($$$)
             my $data = &replication_peek(
                 $handle,
                 $filter_table,
+                $wal_level,
                 \$last_peeked_lsn
             );
             $filter_table_lsns->{$filter_table} = $last_peeked_lsn;

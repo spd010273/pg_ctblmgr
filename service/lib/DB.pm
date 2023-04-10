@@ -626,7 +626,7 @@ sub replication_seek($$) :Export( :MANDATORY )
     my $sth = try_query(
         $handle,
         $REPLICATION_SEEK_QUERY,
-        [ $SLOT_NAME, $lsn, 'F' ]
+        [ $SLOT_NAME, $lsn, 'M' ]
     );
 
     unless( $sth )
@@ -670,11 +670,12 @@ sub replication_slot_peek_unneeded_changes($$) :Export( :MANDATORY )
     return;
 }
 
-sub replication_peek($$$) :Export( :MANDATORY )
+sub replication_peek($$$$) :Export( :MANDATORY )
 {
-    my( $handle, $filter_tables, $max_lsn ) = validate_pos(
+    my( $handle, $filter_tables, $wal_level, $max_lsn ) = validate_pos(
         @_,
         { type => OBJECT },
+        { type => SCALAR },
         { type => SCALAR },
         { type => SCALARREF },
     );
@@ -682,7 +683,7 @@ sub replication_peek($$$) :Export( :MANDATORY )
     my $sth = try_query(
         $handle,
         $REPLICATION_PEEK_QUERY,
-        [ $SLOT_NAME, 'F', $filter_tables, $$max_lsn, $$max_lsn ]
+        [ $SLOT_NAME, $wal_level, $filter_tables, $$max_lsn, $$max_lsn ]
     );
 
     return 0 unless( $sth );
@@ -694,6 +695,8 @@ sub replication_peek($$$) :Export( :MANDATORY )
 
         while( my $row = $sth->fetchrow_hashref() )
         {
+            use Data::Dumper;
+            print Dumper( $row );
             my $lsn  = $row->{lsn};
 
             if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
@@ -701,10 +704,34 @@ sub replication_peek($$$) :Export( :MANDATORY )
                 $$max_lsn = $lsn;
             }
 
-            my $xid  = $row->{xid};
+            my $xid;
+            if( $wal_level eq 'M' )
+            {
+                $xid = $row->{x};
+            }
+            elsif( $wal_level eq 'F' )
+            {
+                $xid = $row->{xid};
+            }
             my $data;
             $data = decode_json( $row->{data} ) if( $row->{data} );
-            my $out  = { lsn => $lsn, xid => $xid, data => $data };
+            my $out  = { lsn => $lsn, xid => $xid };
+            
+            if( $wal_level eq 'F' )
+            {
+                $out->{data} = $data;
+            }
+            elsif( $wal_level eq 'F' )
+            {   
+                #inflate data
+                $out->{data}->{table_name} = $data->{t};
+                $out->{data}->{schema_name} = $data->{s};
+                $out->{data}->{key} = $data->{key};
+                $out->{data}->{xid} = $data->{x};
+                $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
+                $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
+                $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
+            }
 
             unless( $xid ~~ @$xids )
             {
@@ -712,9 +739,18 @@ sub replication_peek($$$) :Export( :MANDATORY )
             }
 
             if(
-                  $data->{type} ne 'COMMIT'
-               && $data->{type} ne 'BEGIN'
-               && $data->{type} ne 'ROLLBACK'
+                  (
+                    $wal_level eq 'F'
+                 && $data->{type} ne 'COMMIT'
+                 && $data->{type} ne 'BEGIN'
+                 && $data->{type} ne 'ROLLBACK'
+                  )
+               || (
+                    $wal_level eq 'M'
+                 && $data->{b} ne 'C'
+                 && $data->{b} ne 'B'
+                 && $data->{b} ne 'R'
+                  )
               )
             {
                 push( @{$intermediate_data->{$xid}->{DML}}, $out );
