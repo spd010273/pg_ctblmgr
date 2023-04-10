@@ -692,10 +692,10 @@ sub replication_peek($$$$) :Export( :MANDATORY )
     {
         my $intermediate_data = {};
         my $xids              = [];
+        use Data::Dumper;
 
         while( my $row = $sth->fetchrow_hashref() )
         {
-            use Data::Dumper;
             print Dumper( $row );
             my $lsn  = $row->{lsn};
 
@@ -704,15 +704,7 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                 $$max_lsn = $lsn;
             }
 
-            my $xid;
-            if( $wal_level eq 'M' )
-            {
-                $xid = $row->{x};
-            }
-            elsif( $wal_level eq 'F' )
-            {
-                $xid = $row->{xid};
-            }
+            my $xid = $row->{xid};
             my $data;
             $data = decode_json( $row->{data} ) if( $row->{data} );
             my $out  = { lsn => $lsn, xid => $xid };
@@ -721,32 +713,37 @@ sub replication_peek($$$$) :Export( :MANDATORY )
             {
                 $out->{data} = $data;
             }
-            elsif( $wal_level eq 'F' )
+            elsif( $wal_level eq 'M' )
             {   
-                #inflate data
-                $out->{data}->{table_name} = $data->{t};
-                $out->{data}->{schema_name} = $data->{s};
-                $out->{data}->{key} = $data->{key};
+                if( defined( $data->{d} ) )
+                {
+                    #inflate data
+                    $out->{data}->{table_name} = $data->{t};
+                    $out->{data}->{schema_name} = $data->{s};
+                    $out->{data}->{key} = $data->{key};
+                    $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
+                    $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
+                    $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
+                }
                 $out->{data}->{xid} = $data->{x};
-                $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
-                $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
-                $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
             }
 
             unless( $xid ~~ @$xids )
             {
                 push( @$xids, $xid );
             }
-
+            print "Wal level: '$wal_level'\n";
             if(
                   (
                     $wal_level eq 'F'
+                 && defined( $data->{type} )
                  && $data->{type} ne 'COMMIT'
                  && $data->{type} ne 'BEGIN'
                  && $data->{type} ne 'ROLLBACK'
                   )
                || (
                     $wal_level eq 'M'
+                 && !defined( $data->{b} )
                  && $data->{b} ne 'C'
                  && $data->{b} ne 'B'
                  && $data->{b} ne 'R'
@@ -758,10 +755,22 @@ sub replication_peek($$$$) :Export( :MANDATORY )
             else
             {
                 # Assume transaction demarcation
-                $intermediate_data->{$xid}->{$data->{type}} = $out->{lsn};
+                my $type;
+                if( $wal_level eq 'F' )
+                {
+                    $type = $data->{type};
+                }
+                elsif( $wal_level eq 'M' )
+                {
+                    $type = 'COMMIT' if( $data->{b} eq 'C' );
+                    $type = 'ROLLBACK' if( $data->{b} eq 'R' );
+                    $type = 'BEGIN' if( $data->{b} eq 'B' );
+                }
+                $intermediate_data->{$xid}->{$type} = $out->{lsn};
             }
         }
 
+        print Dumper( $intermediate_data );
         $sth->finish();
 
         my $out_data = [];
