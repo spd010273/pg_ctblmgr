@@ -159,7 +159,7 @@ Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
                ?::NAME,
                NULL::PG_LSN,
                NULL::INTEGER,
-               'include-transactions'::VARCHAR,
+               'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR
            )
   ORDER BY lsn DESC

@@ -245,7 +245,7 @@ static void pg_ctblmgr_decode_begin_tx(
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = false;
 
-    if( !data->include_transaction || data->wal_level == PGC_WAL_MINIMAL )
+    if( !data->include_transaction ) //|| data->wal_level == PGC_WAL_MINIMAL )
     {
         return;
     }
@@ -299,7 +299,7 @@ static void pg_ctblmgr_decode_commit_tx(
     data = ( decode_data * ) context->output_plugin_private;
     data->wrote_tx_changes = true;
 
-    if( !data->include_transaction || data->wal_level == PGC_WAL_MINIMAL )
+    if( !data->include_transaction ) // || data->wal_level == PGC_WAL_MINIMAL )
     {
         return;
     }
