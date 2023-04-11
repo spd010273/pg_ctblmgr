@@ -1365,7 +1365,6 @@ sub find_table_aliases($$$$$) :Export( :MANDATORY )
     }
 
     my $statement = $parse_tree_obj->{stmt};
-    #print Dumper( $statement ) if( $DEBUG );
     my $query_data = &parse_select(
         $statement,
         undef,
@@ -1625,6 +1624,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             return;
         }
 
+        print "Proceeding mark: '$where_proceeding_clause_mark'\n";
         my $preceeding_query  = substr( $new_q, 0, $bind_start );
         my $proceeding_query = substr(
             $new_q,
@@ -1637,7 +1637,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         {
             if( $substituted_where =~ m/where/i )
             {
-                $substituted_where =~ s/($where_proceeding_clause_mark)/$1${where_expression}/i;
+                $substituted_where =~ s/($where_proceeding_clause_mark)/$1 TRUE ${where_expression} AND /i;
             }
             else
             {   # We've likly latched on a where clause element
@@ -1656,6 +1656,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         $index++;
     }
 
+    print "$new_q\n";
     return $new_q;
 }
 

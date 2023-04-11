@@ -204,7 +204,8 @@ Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
            mo.namespace,
            mo.name,
            mo.definition,
-           rs.filter
+           rs.filter,
+           mo.indexes
       FROM ${SCHEMA_NAME}.tb_driver d
 INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.driver = d.driver
@@ -236,6 +237,7 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
         $cache_hash->{name}          = $row->{name};
         $cache_hash->{definition}    = $row->{definition};
         $cache_hash->{filter_tables} = $row->{filter};
+        $cache_hash->{indexes}       = $row->{indexes};
         $ct_sth->finish();
 
         $cache_hash->{digest} = get_ct_digest(
@@ -412,6 +414,7 @@ sub try_query($$;$) :Export( :MANDATORY )
                 $LOG_LEVEL_ERROR,
                 'Failed to execute statement, retrying...'
             );
+            print "$query\n";
         }
 
         $try_count++;
@@ -692,11 +695,9 @@ sub replication_peek($$$$) :Export( :MANDATORY )
     {
         my $intermediate_data = {};
         my $xids              = [];
-        use Data::Dumper;
 
         while( my $row = $sth->fetchrow_hashref() )
         {
-            print Dumper( $row );
             my $lsn  = $row->{lsn};
 
             if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
@@ -732,7 +733,7 @@ sub replication_peek($$$$) :Export( :MANDATORY )
             {
                 push( @$xids, $xid );
             }
-            print "Wal level: '$wal_level'\n";
+
             if(
                   (
                     $wal_level eq 'F'
@@ -744,9 +745,6 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                || (
                     $wal_level eq 'M'
                  && !defined( $data->{b} )
-                 && $data->{b} ne 'C'
-                 && $data->{b} ne 'B'
-                 && $data->{b} ne 'R'
                   )
               )
             {
@@ -762,15 +760,14 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                 }
                 elsif( $wal_level eq 'M' )
                 {
+                    $type = 'BEGIN' if( $data->{b} eq 'B' );
                     $type = 'COMMIT' if( $data->{b} eq 'C' );
                     $type = 'ROLLBACK' if( $data->{b} eq 'R' );
-                    $type = 'BEGIN' if( $data->{b} eq 'B' );
                 }
                 $intermediate_data->{$xid}->{$type} = $out->{lsn};
             }
         }
 
-        print Dumper( $intermediate_data );
         $sth->finish();
 
         my $out_data = [];
@@ -805,42 +802,36 @@ sub replication_peek($$$$) :Export( :MANDATORY )
     return 0;
 }
 
-sub check_ct_exists($$$$) :Export( :MANDATORY )
+sub check_ct_exists($) :Export( :MANDATORY )
 {
-    my( $handle, $schema, $name, $definition ) = validate_pos(
+    my( $handle, $ct_hash ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
+        { type => HASHREF },
     );
 
     my $sth = try_query(
         $handle,
         $CHECK_CACHE_TABLE_EXISTS,
-        [ $schema, $name ]
+        [ $ct_hash->{schema}, $ct_hash->{name} ]
     );
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_FATAL, "Failed to verify that $schema.$name exists" );
+        _log( $LOG_LEVEL_FATAL, "Failed to verify that $ct_hash->{schema}.$ct_hash->{name} exists" );
     }
 
     if( $sth->rows() > 0 )
     {
         $sth->finish();
-        _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name already exists" );
+        _log( $LOG_LEVEL_DEBUG, "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists" );
         return;
     }
 
     $sth->finish();
     &create_cache_table(
         $handle,
-        {
-            name       => $name,
-            definition => $definition,
-            schema     => $schema
-        }
+        $ct_hash
     );
 
     return;
@@ -870,6 +861,9 @@ sub create_cache_table($$)
 
     _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
     $sth->finish();
+    print "IND cols:\n";
+    print Dumper( $ct_hash->{indexes} );
+    #$sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$ct_hash->{name} ON \"$ct_hash->{schema}.$ct_hash->{name}\"( )" );
     return;
 }
 
@@ -1192,7 +1186,6 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
           WHERE $join_predicate
 END_SQL
 
-    print "$DELETE_Q\n";
     my $sth = &try_query( $handle, $DELETE_Q, [] );
 
     return 0 unless( $sth );

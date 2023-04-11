@@ -12,6 +12,7 @@ BEGIN
                 NEW.definition IS NOT DISTINCT FROM OLD.definition
             AND NEW.namespace IS NOT DISTINCT FROM OLD.namespace
             AND NEW.name IS NOT DISTINCT FROM OLD.name
+            AND NEW.indexes::VARCHAR IS NOT DISTINCT FROM OLD::VARCHAR
           ) THEN
             -- Avoid dummy updates
             RETURN NEW;
@@ -27,6 +28,11 @@ BEGIN
                             ' need to drop this object then create it',
                             NEW.namespace,
                             NEW.name;
+        END IF;
+
+        IF( NEW.indexes::VARCHAR IS DISTINCT FROM OLD::VARCHAR ) THEN
+            EXECUTE 'DROP INDEX ix_' || OLD.name;
+            EXECUTE 'CREATE UNIQUE INDEX ix_' || NEW.name || ' ON "' || NEW.namespace || '.' || NEW.name || '" ( ' || array_to_string( NEW.indexes, ',' ) || ')';
         END IF;
     ELSIF( TG_OP = 'DELETE' ) THEN
         PERFORM @extschema@.fn_notify_maintenance_channel(

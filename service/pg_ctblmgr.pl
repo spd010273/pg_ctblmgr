@@ -642,9 +642,7 @@ sub worker_entrypoint($$$$)
     {
         &check_ct_exists(
             $handle,
-            $CACHE_HASH->{schema},
-            $CACHE_HASH->{name},
-            $CACHE_HASH->{definition}
+            $CACHE_HASH
         );
 
         # Main worker loop

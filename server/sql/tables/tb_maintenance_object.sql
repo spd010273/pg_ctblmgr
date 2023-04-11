@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS @extschema@.tb_maintenance_object
     name               VARCHAR NOT NULL,
     driver             INTEGER NOT NULL,
     location           INTEGER NOT NULL,
-    datamap            JSONB NOT NULL
+    indexes            VARCHAR[] NOT NULL
 );
 
 COMMENT ON TABLE @extschema@.tb_maintenance_object IS 'Definition of object which pg_ctblmgr is maintaining';
@@ -19,3 +19,4 @@ COMMENT ON COLUMN @extschema@.tb_maintenance_object.namespace IS 'Which namespac
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.name IS 'Canonical name of the object within its respective store';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.driver IS 'Driver used to maintain this object';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.location IS 'The location of this object';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.indexes IS 'Specifies column(s) participating in the required unique index';
