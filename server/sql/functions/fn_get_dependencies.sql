@@ -93,13 +93,6 @@ BEGIN
         SELECT tt.schema_name AS schema_name,
                tt.table_name AS table_name
           FROM tt_pk_locator tt
-         UNION
-        SELECT COALESCE( ( jet.value::JSONB )->>'schema', 'public' ) AS schema_name,
-               jet.key AS table_name
-          FROM @extschema@.tb_maintenance_object mo
-    INNER JOIN pg_catalog.jsonb_each_text( mo.datamap ) jet
-            ON TRUE
-         WHERE mo.maintenance_object = in_maintenance_object
     )
         SELECT schema_name,
                table_name
