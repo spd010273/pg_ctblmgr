@@ -414,16 +414,18 @@ static void pg_ctblmgr_decode_change(
         )
     );
 
-    if( strncmp( schema_name, "pgctblmgr", 9 ) == 0 )
-    { // Disregard changes to ext schema
-        return;
-    }
-
     if( strncmp( table_name, "pg_temp_", 8 ) == 0 )
     { // Disregard changes to temp schema
         return;
     }
 
+    if( strncmp( schema_name, "pgctblmgr", 9 ) == 0 )
+    { // Disregard changes to ext schema
+        return;
+    }
+
+    old_context = MemoryContextSwitchTo( data->context );
+    RelationGetIndexList( relation );
     // Check if our WAL'd table is in the list of tables we care about
     if( list_length( data->filter_tables ) > 0 )
     {
@@ -460,9 +462,6 @@ static void pg_ctblmgr_decode_change(
         MemoryContextReset( data->context );
         return;
     }
-
-    old_context = MemoryContextSwitchTo( data->context );
-    RelationGetIndexList( relation );
 
     switch( change->action )
     {
