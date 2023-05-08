@@ -275,6 +275,8 @@ sub parent_loop($$$)
     #         activity on the base tables which 'drive' our cache tables.
 
     my $DISTINCT_FILTER_TABLES = get_distinct_filter_tables();
+    my $all_filter_tables = join( ',', @$DISTINCT_FILTER_TABLES );
+    print "Filtering for all:\n'$all_filter_tables'\n";
     my $WORKER_DATA = {};
     $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
     my $wal_level = 'M';
@@ -316,12 +318,12 @@ sub parent_loop($$$)
                 tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
                 delete( $WORKER_FILTER_TABLES->{$target_pid} );
                 tied( $WORKER_FILTER_TABLES )->shunlock();
-
             }
 
             # Add new children
             foreach my $pk_maintenance_object( keys %{$diff->{new}} )
             {
+                print( "Adding new worker for pk $pk_maintenance_object\n" );
                 # XXX new worker code - NEED TO ADD FT changes to WFT
                 my $worker_data = get_worker_list( $handle, $pk_maintenance_object );
                 unless( $worker_data )
@@ -378,7 +380,7 @@ sub parent_loop($$$)
         my $num_in_flight_changes = 0;
         #important - get 'idle' changes prior to our filter table changes
 
-        &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn );
+        &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn, $all_filter_tables );
         my $WT_LOCKED = 0;
 
         foreach my $filter_table( @$DISTINCT_FILTER_TABLES )

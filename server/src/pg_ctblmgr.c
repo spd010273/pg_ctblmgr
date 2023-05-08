@@ -414,8 +414,50 @@ static void pg_ctblmgr_decode_change(
         )
     );
 
+    if( strncmp( schema_name, "pgctblmgr", 9 ) == 0 )
+    { // Disregard changes to ext schema
+        return;
+    }
+
     if( strncmp( table_name, "pg_temp_", 8 ) == 0 )
+    { // Disregard changes to temp schema
+        return;
+    }
+
+    // Check if our WAL'd table is in the list of tables we care about
+    if( list_length( data->filter_tables ) > 0 )
     {
+        foreach( cell, data->filter_tables )
+        {
+            table = ( struct pgc_table * ) lfirst( cell );
+
+            if(
+                  (
+                      table->all_schemas
+                   || strcmp( table->schema_name, schema_name ) == 0
+                  )
+               && (
+                      table->all_tables
+                   || strcmp( table->table_name, table_name   ) == 0
+                  )
+              )
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+    else
+    {
+        elog( DEBUG1, "Filter tables list empty" );
+        return;
+    }
+
+    if( found == false )
+    {
+        // Table is not in our filter list
+        MemoryContextSwitchTo( old_context );
+        MemoryContextReset( data->context );
         return;
     }
 
@@ -468,41 +510,6 @@ static void pg_ctblmgr_decode_change(
             break;
         default:
             dml_type = "UNKNOWN";
-    }
-
-    // Check if our WAL'd table is in the list of tables we care about
-    if( list_length( data->filter_tables ) > 0 )
-    {
-        foreach( cell, data->filter_tables )
-        {
-            table = ( struct pgc_table * ) lfirst( cell );
-
-            if(
-                  (
-                      table->all_schemas
-                   || strcmp( table->schema_name, schema_name ) == 0
-                  )
-               && (
-                      table->all_tables
-                   || strcmp( table->table_name, table_name   ) == 0
-                  )
-              )
-            {
-                found = true;
-            }
-        }
-    }
-    else
-    {
-        elog( DEBUG1, "Filter tables list empty" );
-    }
-
-    if( found == false )
-    {
-        // Table is not in our filter list
-        MemoryContextSwitchTo( old_context );
-        MemoryContextReset( data->context );
-        return;
     }
 
     OutputPluginPrepareWrite( context, true );

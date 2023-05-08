@@ -160,7 +160,9 @@ Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
                NULL::PG_LSN,
                NULL::INTEGER,
                'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR
+               'TRUE'::VARCHAR,
+               'filter-tables'::VARCHAR,
+               ?::VARCHAR
            )
   ORDER BY lsn DESC
      LIMIT 1
@@ -647,18 +649,19 @@ sub replication_seek($$) :Export( :MANDATORY )
     return 0;
 }
 
-sub replication_slot_peek_unneeded_changes($$) :Export( :MANDATORY )
+sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
 {
-    my( $handle, $lsn ) = validate_pos(
+    my( $handle, $lsn, $all_filter_tables ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => SCALARREF },
+        { type => SCALAR },
     );
 
     my $sth = try_query(
         $handle,
         $REPLICATION_PEEK_FOR_CATCHUP,
-        [ $SLOT_NAME ]
+        [ $SLOT_NAME, $all_filter_tables ]
     );
 
     if( $sth->rows() == 0 )
@@ -729,7 +732,7 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                 $out->{data}->{xid} = $data->{x};
             }
 
-            unless( $xid ~~ @$xids )
+            unless( grep /^$xid$/, @$xids )
             {
                 push( @$xids, $xid );
             }
