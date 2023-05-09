@@ -19,6 +19,7 @@ use Util;
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 
+Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<'END_SQL';
     SELECT *
       FROM pg_catalog.pg_create_logical_replication_slot(
@@ -141,7 +142,7 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
       FROM pg_catalog.pg_logical_slot_peek_changes(
                ?::NAME,
                NULL::PG_LSN,
-               NULL::INTEGER,
+               ${DEFAULT_SEEK_COUNT}::INTEGER,
                'wal-level'::VARCHAR,
                ?::VARCHAR,
                'filter-tables'::VARCHAR,
@@ -179,7 +180,9 @@ Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
                'wal-level'::VARCHAR,
                ?::VARCHAR,
                'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR
+               'TRUE'::VARCHAR,
+               'filter-tables'::VARCHAR,
+               ?
            )
   ORDER BY lsn ASC
 END_SQL
@@ -620,18 +623,19 @@ sub get_worker_list($;$) :Export( :MANDATORY )
     return undef;
 }
 
-sub replication_seek($$) :Export( :MANDATORY )
+sub replication_seek($$$) :Export( :MANDATORY )
 {
-    my( $handle, $lsn ) = validate_pos(
+    my( $handle, $lsn, $all_filter_tables ) = validate_pos(
         @_,
         { type => OBJECT },
+        { type => SCALAR },
         { type => SCALAR },
     );
 
     my $sth = try_query(
         $handle,
         $REPLICATION_SEEK_QUERY,
-        [ $SLOT_NAME, $lsn, 'M' ]
+        [ $SLOT_NAME, $lsn, 'M', $all_filter_tables ]
     );
 
     unless( $sth )
@@ -767,12 +771,14 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                     $type = 'COMMIT' if( $data->{b} eq 'C' );
                     $type = 'ROLLBACK' if( $data->{b} eq 'R' );
                 }
+
                 $intermediate_data->{$xid}->{$type} = $out->{lsn};
             }
         }
 
         $sth->finish();
 
+        print Dumper( $intermediate_data );
         my $out_data = [];
         # Step through transactional data and only output DML if we detect both a valid
         # BEGIN and COMMIT for the DML's XID
@@ -791,6 +797,7 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                     foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
                     {
                         $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT};
+                        $dml->{begin_lsn}  = $intermediate_data->{$xid}->{BEGIN};
                         push( @$out_data, $dml )
                     }
                 }
@@ -864,10 +871,29 @@ sub create_cache_table($$)
 
     _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
     $sth->finish();
-    print "IND cols:\n";
-    print Dumper( $ct_hash->{indexes} );
-    #$sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$ct_hash->{name} ON \"$ct_hash->{schema}.$ct_hash->{name}\"( )" );
     return;
+}
+
+sub create_cache_table_unique($$) :Export( :MANDATORY )
+{
+    my( $handle, $ct_hash ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => HASHREF },
+    );
+
+    my $index_columns = join( ',', @{$ct_hash->{indexes}} );
+    my $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$ct_hash->{name} ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )" );
+
+    return 0 unless( $sth );
+
+    foreach my $col( $ct_hash->{indexes} )
+    {
+        push( @{$ct_hash->{cache_table_uniques}}, $col );
+    }
+
+    $sth->finish();
+    return 1;
 }
 
 sub test_query($$) :Export( :MANDATORY )
@@ -1153,6 +1179,7 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
     my $join_clauses  = [];
     my $where_clauses = [];
 
+    print Dumper( @$uniques );
     foreach my $unique_columns( @$uniques )
     {
         my $join_clause  = join(

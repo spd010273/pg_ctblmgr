@@ -377,78 +377,177 @@ sub parent_loop($$$)
             }
         }
         ## CHANGE MANAGEMENT
-        my $num_in_flight_changes = 0;
-        #important - get 'idle' changes prior to our filter table changes
-
-        &replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn, $all_filter_tables );
+        my $num_in_flight_changes = 0; # number of changes we're queueing
+        my $num_outstanding_changes = 0; # number of changes we've queued previously
+        #print "Peeking uneeded changes\n";
+        #&replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn, $all_filter_tables );
+        #print "Uneeded changes peeked\n";
         my $WT_LOCKED = 0;
 
-        foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
-        {
-            $last_peeked_lsn = $filter_table_lsns->{$filter_table};
-            my $data = &replication_peek(
-                $handle,
-                $filter_table,
-                $wal_level,
-                \$last_peeked_lsn
-            );
-            $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
-            next unless( $data );
+        ### LSN / Change Management
+        # Here we peek changes (get them but do not change the slot's LSN). These changes are then passed to child processes and,
+        # after the relevent change is acknowledged, we 'seek' these changes, in that we acknowledge them with respect to
+        # the replication slot.
+        print "Peeking from '$last_peeked_lsn'\n";
+        my $data = &replication_peek(
+            $handle,
+            $all_filter_tables,
+            $wal_level,
+            \$last_peeked_lsn
+        );
+        print "Peeded to '$last_peeked_lsn'\n";
 
-            if( !$WT_LOCKED )
+        if( $data )
+        {
+            # iterate over each change in outer loop - one change may go to one or more workers
+            foreach my $change( @$data )
             {
-                print "Attempting to lock FT\n";
-                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-                $WT_LOCKED = 1;
+                $num_in_flight_changes++;
+                print Dumper( $change );
+                if( !$WT_LOCKED )
+                {
+                    print "Attempting to lock FT\n";
+                    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+                    $WT_LOCKED = 1;
+                }
+
+                foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
+                {
+                    my $filter_table = $change->{data}->{schema_name} . '.' . $change->{data}->{table_name};
+
+                    if(
+                            defined( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} )
+                         && ref( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} ) eq 'ARRAY'
+                      )
+                    {
+
+                        push( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}}, $change );
+                        my $change_lsn = $change->{begin_lsn};
+                        print "Parsed out change lsn '$change_lsn'\n";
+                        if(
+                               !defined( $filter_table_lsns->{$filter_table} )
+                            || lsn_cmp( $filter_table_lsns->{$filter_table}, $change_lsn ) < 0
+                          )
+                        {
+                            $filter_table_lsns->{$filter_table} = $change_lsn;
+                        }
+                    }
+                }
             }
 
-            foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
+            # These are changes that are still considered in-flight
+            foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
             {
+                my $lsn = $filter_table_lsns->{$filter_table};
+
+                next unless( defined( $lsn ) );
+
                 if(
-                        defined( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} )
-                     && ref( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} ) eq 'ARRAY'
+                      !defined( $max_idle_lsn )
+                   || lsn_cmp( $lsn, $max_idle_lsn ) < 0
                   )
                 {
-                    foreach my $change( @$data )
-                    {
-                        push( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}}, $change );
-                    }
+                    $max_idle_lsn = $lsn;
+                }
+            }
+        }
+        
+        print "last_peeked_lsn: '$last_peeked_lsn', max_idle_lsn: '$max_idle_lsn'\n";
+        ## XXX
+#        foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
+#        {
+#            $last_peeked_lsn = $filter_table_lsns->{$filter_table};
+#            my $data = &replication_peek(
+#                $handle,
+#                $filter_table,
+#                $wal_level,
+#                \$last_peeked_lsn
+#            );
+#            $filter_table_lsns->{$filter_table} = $last_peeked_lsn;
+#            next unless( $data );
+#
+#            if( !$WT_LOCKED )
+#            {
+#                print "Attempting to lock FT\n";
+#                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+#                $WT_LOCKED = 1;
+#            }
+
+#            foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
+#            {
+#                if(
+#                        defined( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} )
+#                     && ref( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} ) eq 'ARRAY'
+#                  )
+#                {
+#                    foreach my $change( @$data )
+#                    {
+#                        push( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}}, $change );
+#                    }
+#                }
+#            }
+#        }
+
+        # Idle WT check
+        if( !$WT_LOCKED )
+        {
+            tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH );
+            $WT_LOCKED = 1;
+        }
+
+        foreach my $pid( keys %$WORKER_FILTER_TABLES )
+        {
+            foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$pid}} )
+            {
+                if( 
+                       defined( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} )
+                    && ref( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} ) eq 'ARRAY'
+                  )
+                {
+                    $num_outstanding_changes += scalar( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}} );
                 }
             }
         }
 
-        if( $WT_LOCKED )
-        {
+		if( $WT_LOCKED )
+		{
             tied( $WORKER_FILTER_TABLES )->shunlock();
             $WT_LOCKED = 0;
         }
         # Get worker applied LSNs and ack up to the smallest LSN
 
         my $worker_lsns = {};
-        tied( $WORKER_STATUSES )->shlock( LOCK_SH );
-        foreach my $pid( keys %$WORKER_STATUSES )
+        tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB );
+        foreach my $pid( keys( %$WORKER_STATUSES ) )
         {
-            $worker_lsns->{$pid} = $WORKER_STATUSES->{$pid}->{last_lsn};
+            if(
+                   defined( $WORKER_STATUSES->{$pid} )
+                && defined( $WORKER_STATUSES->{$pid}->{last_lsn} )
+              )
+            {
+                $worker_lsns->{$pid} = $WORKER_STATUSES->{$pid}->{last_lsn};
+            }
         }
         tied( $WORKER_STATUSES )->shunlock();
 
+        print "Current LSN stats: outstanding: $num_outstanding_changes, in_flight: $num_in_flight_changes\n";
+        print "Worker LSNs:\n";
         foreach my $pid( keys %$worker_lsns )
         {
             my $last_lsn = $worker_lsns->{$pid};
-
+            print "$pid  -  '$last_lsn'\n";
             unless( $last_lsn )
             {
                 # Note - we WILL NOT ack any LSNs iff a worker hasn't
                 # completed anything here
                 undef( $last_lsn_applied );
-                last;
             }
 
-            if( !defined( $last_lsn_applied ) )
+            if( !defined( $last_lsn_applied ) && defined( $last_lsn ) )
             {
                 $last_lsn_applied = $last_lsn;
             }
-            else
+            elsif( defined( $last_lsn_applied ) && defined( $last_lsn ) )
             {
                 if( &lsn_cmp( $last_lsn_applied, $last_lsn ) < 0 )
                 {
@@ -468,21 +567,38 @@ sub parent_loop($$$)
                 )
           )
         {
-            if( &replication_seek( $handle, $last_lsn_applied ) )
+            print "Seeking changes to '$last_lsn_applied'\n";
+            if( &replication_seek( $handle, $last_lsn_applied, $all_filter_tables ) )
             {
                 $last_last_lsn_applied = $last_lsn_applied;
             }
         }
 
+        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
+        {
+            if( !defined( $max_idle_lsn ) )
+            {
+                $max_idle_lsn = $last_peeked_lsn;
+            }
+        }
+
         if(
-                $num_in_flight_changes == 0
-             && defined( $max_idle_lsn )
-             && defined( $last_max_idle_lsn )
-             && &lsn_cmp( $last_max_idle_lsn, $max_idle_lsn ) < 0
+              (
+                   $num_in_flight_changes == 0
+                && defined( $max_idle_lsn )
+                && defined( $last_max_idle_lsn )
+                && &lsn_cmp( $last_max_idle_lsn, $max_idle_lsn ) < 0
+              )
+           || (
+                  $num_in_flight_changes == 0
+               && $num_outstanding_changes == 0
+               && defined( $max_idle_lsn )
+               && !defined( $last_lsn_applied )
+              )
           )
         {
             _log( $LOG_LEVEL_DEBUG, "Seeking changes to $max_idle_lsn" );
-            &replication_seek( $handle, $max_idle_lsn );
+            &replication_seek( $handle, $max_idle_lsn, $all_filter_tables );
             $last_lsn_applied = $max_idle_lsn;
         }
 
@@ -539,6 +655,22 @@ sub worker_cache_refresh($$$$)
         $cache_hash->{schema},
         $cache_hash->{name}
     );
+
+    if(
+          !defined( $cache_hash->{cache_table_uniques} )
+       || ref( $cache_hash->{cache_table_uniques} ) ne 'ARRAY'
+       || scalar( @{$cache_hash->{cache_table_uniques}} ) == 0
+      )
+    {
+        print "Generating unique index\n";
+        unless( create_cache_table_unique( $handle, $cache_hash ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to generate cache table unique index"
+            );
+        }
+    }
 
     # Last pre-flight check - validate TABLE_MAPPING against filter tables
     foreach my $schema( keys %{$cache_hash->{table_mapping}->{RELS}} )
@@ -799,7 +931,7 @@ sub worker_entrypoint($$$$)
             if( scalar( keys %$changes ) > 0 )
             {
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid} = $WORKER_STATUS_UPDATING;
+                $WORKER_STATUSES->{$worker_pid}->{statuses} = $WORKER_STATUS_UPDATING;
                 tied( $WORKER_STATUSES )->shunlock();
 
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
@@ -835,7 +967,6 @@ sub worker_entrypoint($$$$)
                     );
                     next;
                 }
-
                 my $delete_result = generate_delete_statement(
                     $handle,
                     $CACHE_HASH->{definition},
@@ -909,8 +1040,9 @@ sub worker_entrypoint($$$$)
                 print "Applied $max_peeked_lsn\n";
                 $max_applied_lsn = $max_peeked_lsn;
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{statuse}  = $WORKER_STATUS_RUNNING;
+                $WORKER_STATUSES->{$worker_pid}->{statuses} = $WORKER_STATUS_RUNNING;
                 $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
+                print Dumper( $WORKER_STATUSES );
                 tied( $WORKER_STATUSES )->shunlock();
             }
 

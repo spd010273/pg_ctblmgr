@@ -455,7 +455,7 @@ sub get_joined_rels($$$$;$)
                     $function_alias = $json_fragment->{rarg}->{alias}->{aliasname};
                 }
 
-                if( $location < $function_call->{rarg}->{location} )
+                if( defined( $function_call->{rarg}->{location} ) && $location < $function_call->{rarg}->{location} )
                 {
                     $location = $function_call->{rarg}->{location};
                 }
