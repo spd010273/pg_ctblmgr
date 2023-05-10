@@ -1405,10 +1405,9 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     # Phase I will result in a keyed array telling us which CTE or query will
     # need a filter applied
     my $where_expressions = {};
-
     foreach my $position( keys %{$table_mapping->{BINDS}} )
     {
-        print "P: $position\n";
+        #print "P: $position\n";
         next if( $position < 0 );
 
         my $RELS          = $table_mapping->{BINDS}->{$position}->{rels};
@@ -1416,18 +1415,18 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
         foreach my $schema( keys %$RELS )
         {
-            print "S: $schema\n";
+            #print "S: $schema\n";
             foreach my $alias( keys %{$RELS->{$schema}} )
             {
-                print "A: $alias\n";
+                #print "A: $alias\n";
                 foreach my $table_name( keys %{$RELS->{$schema}->{$alias}} )
                 {
-                    print "T: $table_name\n";
+                    #print "T: $table_name\n";
                     if( defined( $filters->{$schema}->{$table_name} ) )
                     {
                         foreach my $key( keys %{$filters->{$schema}->{$table_name}} )
                         {
-                            print "K: $key\n";
+                            #print "K: $key\n";
                             my $typmod = &get_typmods(
                                 $handle,
                                 $schema,
@@ -1508,13 +1507,22 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     #print Dumper( $where_expressions ) if( $DEBUG );
     my $new_q = $definition;
     my $index = 0;
-
+    
     foreach my $bind_start( @starts )
     {
         # Skip if unbindable (no relevent relations)
-        next if( $bind_start < 0 );
+        
+        if( $bind_start < 0 )
+        {
+            $index++;
+            next;
+        }
         # Skip if no filters to be applied
-        next if( !defined( $where_expressions->{$bind_start} ) );
+        if( !defined( $where_expressions->{$bind_start} ) )
+        {
+            $index++;
+            next;
+        }
 
         my $bind_end = $table_mapping->{BINDS}->{$bind_start}->{end};
         my $next_cte_name;
@@ -1524,6 +1532,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             $next_cte_name = $table_mapping->{BINDS}->{$starts[$index-1]}->{parent};
         }
 
+    
         if( !defined( $bind_end ) )
         {
             my $parent = $table_mapping->{BINDS}->{$bind_start}->{parent};
@@ -1618,19 +1627,19 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         {
             warn "Could not determine proceeding where clause mark\n";
             print "Query fragment info:\n";
-            print Dumper( $BS_HASH );
             $PARSE_ERROR = 1;
             #print Dumper( $table_mapping );
             return;
         }
 
-        print "Proceeding mark: '$where_proceeding_clause_mark'\n";
+        #print "Proceeding mark: '$where_proceeding_clause_mark'\n";
         my $preceeding_query  = substr( $new_q, 0, $bind_start );
         my $proceeding_query = substr(
             $new_q,
             $bind_end,
             length( $new_q ) - $bind_end
         );
+
         my $substituted_where = $bind_location;
 
         if( $replace_where )

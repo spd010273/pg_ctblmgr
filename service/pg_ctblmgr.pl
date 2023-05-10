@@ -287,9 +287,9 @@ sub parent_loop($$$)
         $tmp_worker_data = populate_worker_data( $handle, $tmp_worker_data );
         my $diff = check_for_new_cache_tables( $handle, $WORKER_DATA, $tmp_worker_data );
         if(
-               scalar( keys %{$diff->{new}} ) > 0
+               scalar( keys %{$diff->{new}}    ) > 0
             || scalar( keys %{$diff->{change}} ) > 0
-            || scalar( keys %{$diff->{old}} ) > 0
+            || scalar( keys %{$diff->{old}}    ) > 0
           )
         {
             # Cache table changes detected
