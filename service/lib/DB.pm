@@ -419,7 +419,7 @@ sub try_query($$;$) :Export( :MANDATORY )
                 $LOG_LEVEL_ERROR,
                 'Failed to execute statement, retrying...'
             );
-            print "$query\n";
+            #print "$query\n";
         }
 
         $try_count++;
@@ -778,7 +778,6 @@ sub replication_peek($$$$) :Export( :MANDATORY )
 
         $sth->finish();
 
-        print Dumper( $intermediate_data );
         my $out_data = [];
         # Step through transactional data and only output DML if we detect both a valid
         # BEGIN and COMMIT for the DML's XID
@@ -915,12 +914,13 @@ sub test_query($$) :Export( :MANDATORY )
     return 1;
 }
 
-sub generate_temp_table($$) :Export( :MANDATORY )
+sub generate_temp_table($$$) :Export( :MANDATORY )
 {
-    my( $handle, $query ) = validate_pos(
+    my( $handle, $query, $ct_hash ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => SCALAR },
+        { type => HASHREF },
     );
 
     my $temp_table_name = 'tt_foo';
@@ -931,6 +931,22 @@ sub generate_temp_table($$) :Export( :MANDATORY )
     if( $sth )
     {
         $sth->finish();
+        my $uniques = join( ',', @{$ct_hash->{indexes}} );
+        $sth = try_query( $handle, "CREATE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
+
+        if( $sth )
+        {
+            $sth->finish();
+        }
+        else
+        {
+            _log(
+                $LOG_LEVEL_WARNING,
+                "Failed to create unique index on comparrison table. "
+              . "Please verify the cardinality of this index provided!"
+            );
+        }
+        
         return $temp_table_name;
     }
 
@@ -1179,7 +1195,6 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
     my $join_clauses  = [];
     my $where_clauses = [];
 
-    print Dumper( @$uniques );
     foreach my $unique_columns( @$uniques )
     {
         my $join_clause  = join(
@@ -1199,7 +1214,7 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
     my $where_clause   = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
 
     my $DELETE_Q = <<"END_SQL";
-    WITH tt_base_data AS
+    WITH tt_base_data AS MATERIALIZED
     (
         $definition
     ),
@@ -1215,11 +1230,10 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
           USING tt_rows_to_delete vw
           WHERE $join_predicate
 END_SQL
-
+    _log( $LOG_LEVEL_DEBUG, "DELETE BEGIN" );
     my $sth = &try_query( $handle, $DELETE_Q, [] );
-
+    _log( $LOG_LEVEL_DEBUG, "Delete done" );
     return 0 unless( $sth );
-
     $sth->finish();
     return 1;
 }

@@ -1665,7 +1665,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         $index++;
     }
 
-    print "$new_q\n";
+    #print "$new_q\n";
     return $new_q;
 }
 
