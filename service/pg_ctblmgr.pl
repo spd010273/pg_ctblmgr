@@ -43,6 +43,11 @@ Readonly my $MAX_XID_LENGTH     => 10;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 1; # seconds for main loop
 
+Readonly my $TCP_KEEPALIVE          => 60;
+Readonly my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
+Readonly my $TCP_KEEPALIVE_COUNT    => 720;
+Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
+
 our $OUTPUT_AUTOFLUSH = 1;
 our $|=1;
 
@@ -257,6 +262,10 @@ sub new_xid_placeholder($$$)
 
     $$new_handle->do( "SET application_name = 'pg_ctblmgr fast delete'" );
     $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
+    $$new_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+    $$new_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+    $$new_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+    $$new_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
     $$new_handle->do( 'BEGIN' );
 
     my $sth = $$new_handle->prepare( 'SELECT txid_current() AS xid' );
@@ -323,6 +332,11 @@ sub parent_loop($$$)
         undef
     );
 
+    $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+    $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+    $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+    $handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+
     if( !tied( $WORKER_FILTER_TABLES ) )
     {
         _log( $LOG_LEVEL_DEBUG, "SHM not tied" );
@@ -357,13 +371,9 @@ sub parent_loop($$$)
          );
     }
 
-    my $last_lsn_applied;
     my $last_peeked_lsn;
     my $max_peeked_lsn;
     my $max_idle_lsn;
-    my $earliest_used_lsn;
-    my $earliest_used_lsns = {}; #contains the COMMIT lsn for each filter_table in use. We CANNOT seek past
-    # the min() of these until we acknowledge past that point
 
     my $last_seeked_lsn;
     my $filter_table_lsns = {}; # contains the BEGIN lsn for each filter - the max() of all of these
@@ -380,6 +390,8 @@ sub parent_loop($$$)
     my $WORKER_DATA = {};
     $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
     my $wal_level = 'M';
+    my $dispatched_changes = {};
+
     while( 1 )
     {
         # Each loop we determine what LSN we can seek to, if any, and seek to that point
@@ -526,6 +538,7 @@ sub parent_loop($$$)
 
                         my $commit_lsn = $change->{commit_lsn};
                         my $change_lsn = $change->{begin_lsn};
+                        
                         if(
                                !defined( $filter_table_lsns->{$filter_table} )
                             || lsn_cmp( $filter_table_lsns->{$filter_table}, $change_lsn ) < 0
@@ -534,12 +547,14 @@ sub parent_loop($$$)
                             $filter_table_lsns->{$filter_table} = $change_lsn;
                         }
 
-                        if(
-                               !defined( $earliest_used_lsns->{$filter_table} )
-                            || lsn_cmp( $earliest_used_lsns->{$filter_table}, $commit_lsn ) < 0
-                          )
+                        if( !defined( $dispatched_changes->{$pid} ) )
                         {
-                            $earliest_used_lsns->{$filter_table} = $commit_lsn;
+                            $dispatched_changes->{$pid} = [];
+                        }
+                   
+                        unless( grep( /^$commit_lsn$/, @{$dispatched_changes->{$pid}} ) ) 
+                        {
+                            push( @{$dispatched_changes->{$pid}}, $commit_lsn );
                         }
                     }
                 }
@@ -558,21 +573,6 @@ sub parent_loop($$$)
                   )
                 {
                     $max_idle_lsn = $lsn;
-                }
-            }
-
-            foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
-            {
-                my $lsn = $earliest_used_lsns->{$filter_table};
-
-                next unless( defined( $lsn ) );
-
-                if(
-                       !defined( $earliest_used_lsn )
-                    || lsn_cmp( $lsn, $earliest_used_lsn ) < 0
-                  )
-                {
-                    $earliest_used_lsn = $lsn;
                 }
             }
         }
@@ -617,27 +617,62 @@ sub parent_loop($$$)
                 $worker_lsns->{$pid} = $WORKER_STATUSES->{$pid}->{last_lsn};
             }
         }
+
         tied( $WORKER_STATUSES )->shunlock();
+        # maintain dispatched_changes list relative to last_lsn reported by each worker.
+        # Post this loop, dispatched_changes will reflect outstanding lsn changes for each worker
+        # meaning that we cannot seek past the youngest lsn
+        my $youngest_in_flight_lsn;
 
         foreach my $pid( keys %$worker_lsns )
         {
             my $last_lsn = $worker_lsns->{$pid};
-            unless( $last_lsn )
+            
+            # here we will maintain the local diaptched_changes versus the global applied lsns
+            # if we find a dispatched change for this PID that is <= the PID's last lsn, we remove it
+            # such that dispatched changes contains a list of outstanding (in-flight) LSNs
+            if( defined( $dispatched_changes->{$pid} ) && scalar( @{$dispatched_changes->{$pid}} ) > 0 )
             {
-                # Note - we WILL NOT ack any LSNs iff a worker hasn't
-                # completed anything here
-                undef( $last_lsn_applied );
-            }
-
-            if( !defined( $last_lsn_applied ) && defined( $last_lsn ) )
-            {
-                $last_lsn_applied = $last_lsn;
-            }
-            elsif( defined( $last_lsn_applied ) && defined( $last_lsn ) )
-            {
-                if( &lsn_cmp( $last_lsn_applied, $last_lsn ) < 0 )
+                my @ordered_changes = sort lsn_cmp @{$dispatched_changes->{$pid}};
+                print Dumper( @ordered_changes );
+                my $remove_lsns = [];
+                foreach my $dispatched_lsn( @ordered_changes )
                 {
-                    $last_lsn_applied = $last_lsn;
+                    if( lsn_cmp( $dispatched_lsn, $last_lsn ) <= 0 )
+                    {
+                        push( @$remove_lsns, $dispatched_lsn );
+                    }
+                }
+
+                foreach my $remove_lsn( @$remove_lsns )
+                {
+                    my $index = 0;
+                    $index++ until( $dispatched_changes->{$pid}->[$index] eq $remove_lsn );
+                    if( defined( $dispatched_changes->{$pid}->[$index] ) && $dispatched_changes->{$pid}->[$index] eq $remove_lsn )
+                    {
+                        splice( @{$dispatched_changes->{$pid}}, $index, 1 );
+                        print "Removed $remove_lsn from $pid\n";
+                    }
+                }
+            }
+        }
+
+        foreach my $pid( keys %$dispatched_changes )
+        {
+            if( defined $dispatched_changes->{$pid} && scalar( @{$dispatched_changes->{$pid}} ) > 0 )
+            {
+                print "Dispatched changes for $pid\n";
+                print Dumper( $dispatched_changes->{$pid} );
+                if(
+                    !defined( $youngest_in_flight_lsn )
+                 || (
+                        defined( $dispatched_changes->{$pid}->[0] )
+                     && lsn_cmp( $youngest_in_flight_lsn, $dispatched_changes->{$pid}->[0] ) > 0
+                    )
+                  )
+                {
+                    $youngest_in_flight_lsn = $dispatched_changes->{$pid}->[0];
+                    $num_outstanding_changes++;
                 }
             }
         }
@@ -656,22 +691,22 @@ sub parent_loop($$$)
         print "max_idle_lsn: NULL\n" unless( $max_idle_lsn );
         print "last_peeked_lsn: $last_peeked_lsn\n" if( $last_peeked_lsn );
         print "last_peeked_lsn: NULL\n" unless( $last_peeked_lsn );
-        print "earliest_used_lsn: $earliest_used_lsn\n" if( $earliest_used_lsn );
-        print "earliest_used_lsn: NULL\n" unless( $earliest_used_lsn );
         print "num_in_flight_changes: $num_in_flight_changes\n";
         print "num_outstanding_changes: $num_outstanding_changes\n";
-        print "last_lsn_applied: $last_lsn_applied\n" if( $last_lsn_applied );
-        print "last_lsn_applied: NULL\n" unless( $last_lsn_applied );
         print "last_seeked_lsn: $last_seeked_lsn\n" if( $last_seeked_lsn );
         print "last_seeked_lsn: NULL\n" unless( $last_seeked_lsn );
+        print "YOUNGEST_IN_FLIGHT: $youngest_in_flight_lsn\n" if( $youngest_in_flight_lsn );
+        print "YOUNGEST_IN_FLIGHT: NULL\n" unless( $youngest_in_flight_lsn );
 
-        if( !defined( $last_lsn_applied ) || lsn_cmp( $max_idle_lsn, $last_lsn_applied ) < 0 )
+        $seekable_lsn = $max_idle_lsn;
+
+        # Safety check - CANNOT seek past any in-flight change
+        if(
+               defined( $youngest_in_flight_lsn )
+            && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
+          )
         {
-            $seekable_lsn = $max_idle_lsn;
-        }
-        else
-        {
-            $seekable_lsn = $last_lsn_applied;
+            $seekable_lsn = $youngest_in_flight_lsn;
         }
 
         print "Determined we can safely seek to $seekable_lsn\n" if( $seekable_lsn );
@@ -684,7 +719,8 @@ sub parent_loop($$$)
             )
           )
         {
-            if( !replication_seek( $handle, $seekable_lsn, $all_filter_tables ) )
+            print "Attempting to seek to $seekable_lsn\n";
+            if( !replication_seek( $handle, $seekable_lsn ) )
             {
                 print "Successfully seeked to $seekable_lsn\n";
                 $last_seeked_lsn = $seekable_lsn;
@@ -949,6 +985,11 @@ sub worker_entrypoint($$$$)
         $CONNECTION_MAP->{user_name},
         undef
     );
+    
+    $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+    $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+    $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+    $handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
 
     _log( $LOG_LEVEL_FATAL, 'Worker failed to connect to DB' ) unless( $handle );
 
@@ -1127,6 +1168,7 @@ sub worker_entrypoint($$$$)
 
             my $aged_handle;
             my $aged_snapshot;
+
             if( scalar( keys %$changes ) > 0 )
             {
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
@@ -1217,6 +1259,11 @@ sub worker_entrypoint($$$$)
                         undef
                     );
 
+                    $aged_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+                    $aged_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+                    $aged_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+                    $aged_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+
                     $tried_fast_delete = 1;
                     unless( $aged_handle )
                     {
@@ -1272,7 +1319,38 @@ FD_FALLBACK:
                 {
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                     # Create temp table in aged handle && perform fast delete
+                    # XXX
+                    my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
 
+                    unless( $aged_temp_table )
+                    {
+                        _log( $LOG_LEVEL_ERROR, "Failed to create aged temp table" );
+                        $can_fast_delete   = 0;
+                        $tried_fast_delete = 1;
+                        $aged_handle->disconnect();
+                        goto FD_FALLBACK;
+                    }
+
+                    unless(
+                        &generate_aged_delete_statement(
+                            $aged_handle,
+                            $handle,
+                            $aged_temp_table,
+                            $CACHE_HASH->{definition},
+                            $CACHE_HASH->{schema},
+                            $CACHE_HASH->{name},
+                            $CACHE_HASH->{cache_table_columns},
+                            $CACHE_HASH->{cache_table_uniques}
+                        )
+                          )
+                    {
+                        _log( $LOG_LEVEL_ERROR, "Fast delete failed, falling back to slow delete" );
+                        $can_fast_delete = 0;
+                        $tried_fast_delete = 1;
+                        $aged_handle->disconnect();
+                        undef( $aged_handle );
+                        goto FD_FALLBACK;
+                    }
                     # delete finished, free resources
                     $aged_handle->disconnect();
                     undef( $aged_handle );

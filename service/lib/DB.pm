@@ -154,6 +154,22 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
   ORDER BY lsn ASC
 END_SQL
 
+Readonly::Scalar my $REPLICATION_SEEK_QUERY_NO_FT => <<END_SQL;
+    SELECT lsn,
+           xid,
+           data::JSONB AS data
+      FROM pg_catalog.pg_logical_slot_get_changes(
+               ?::NAME,
+               ?::PG_LSN,
+               NULL::INTEGER,
+               'wal-level'::VARCHAR,
+               ?::VARCHAR,
+               'include-transaction'::VARCHAR,
+               'TRUE'::VARCHAR
+           )
+  ORDER BY lsn ASC
+END_SQL
+
 Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
     SELECT lsn
       FROM pg_catalog.pg_logical_slot_peek_changes(
@@ -353,6 +369,8 @@ sub try_query($$;$) :Export( :MANDATORY )
                 $LOG_LEVEL_INFO,
                 'Not connected to DB, attempting to reconnect...'
             );
+            my $ret = $handle->pg_ping();
+            _log( $LOG_LEVEL_DEBUG, "DB handle pg_ping returned $ret" );
         }
 
         $try_count++;
@@ -623,19 +641,32 @@ sub get_worker_list($;$) :Export( :MANDATORY )
     return undef;
 }
 
-sub replication_seek($$$) :Export( :MANDATORY )
+sub replication_seek($$;$) :Export( :MANDATORY )
 {
     my( $handle, $lsn, $all_filter_tables ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => SCALAR },
-        { type => SCALAR },
+        { type => SCALAR, optional => 1 },
     );
+
+    my $seek_query;
+    my $params = [];
+    if( defined( $all_filter_tables ) )
+    {
+        $seek_query = $REPLICATION_SEEK_QUERY;
+        $params = [ $SLOT_NAME, $lsn, 'M', $all_filter_tables ];
+    }
+    else
+    {
+        $seek_query = $REPLICATION_SEEK_QUERY_NO_FT;
+        $params = [ $SLOT_NAME, $lsn, 'M' ];
+    }
 
     my $sth = try_query(
         $handle,
-        $REPLICATION_SEEK_QUERY,
-        [ $SLOT_NAME, $lsn, 'M', $all_filter_tables ]
+        $seek_query,
+        $params
     );
 
     unless( $sth )
@@ -716,13 +747,13 @@ sub replication_peek($$$$) :Export( :MANDATORY )
             my $data;
             $data = decode_json( $row->{data} ) if( $row->{data} );
             my $out  = { lsn => $lsn, xid => $xid };
-            
+
             if( $wal_level eq 'F' )
             {
                 $out->{data} = $data;
             }
             elsif( $wal_level eq 'M' )
-            {   
+            {
                 if( defined( $data->{d} ) )
                 {
                     #inflate data
@@ -946,7 +977,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
               . "Please verify the cardinality of this index provided!"
             );
         }
-        
+
         return $temp_table_name;
     }
 
@@ -1049,6 +1080,7 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
         { type => ARRAYREF },
     );
 
+    $handle->do( "SET application_name = 'update: $cache_table_name'" );
     my $join_clauses       = [];
     my $where_clauses      = [];
     my $distinct_uniques   = [];
@@ -1130,6 +1162,8 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
         { type => ARRAYREF },
     );
 
+    $handle->do( "SET application_name = 'insert: $cache_table_name'" );
+
     my $join_clauses  = [];
     my $where_clauses = [];
 
@@ -1173,6 +1207,219 @@ END_SQL
     return 1;
 }
 
+sub generate_aged_delete_statement($$$$$$$$) :Export( :MANDATORY )
+{
+    my(
+        $aged_handle,
+        $current_handle,
+        $aged_temp_table,
+        $definition,
+        $cache_table_schema,
+        $cache_table_name,
+        $table_columns,
+        $uniques
+      ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => ARRAYREF },
+        { type => ARRAYREF },
+    );
+    $current_handle->do( "SET application_name = 'Fast delete: $cache_table_name'" );
+    $aged_handle->do( "SET application_name = 'Lookback: $cache_table_name'" );
+    my $column_data_type_hash = {};
+    my $column_data_types = [];
+    my $get_type_q = <<END_SQL;
+    SELECT t.typname AS datatype
+      FROM pg_class c
+      JOIN pg_attribute a
+        ON a.attnum > 0
+       AND a.attrelid = c.oid
+      JOIN pg_type t
+        ON t.oid = a.atttypid
+     WHERE c.relname = ?
+       AND a.attname = ?
+END_SQL
+    my $get_type_sth = $aged_handle->prepare( $get_type_q );
+
+    unless( $get_type_sth )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to prepare type lookup query for aged handle' );
+        return 0;
+    }
+
+    foreach my $unique_column_set( @$uniques )
+    {
+        foreach my $unique_column( @$unique_column_set )
+        {
+            next if( defined( $column_data_type_hash->{$unique_column} ) );
+            $get_type_sth->bind_param( 1, $aged_temp_table );
+            $get_type_sth->bind_param( 2, $unique_column );
+            unless( $get_type_sth->execute() )
+            {
+                _log( $LOG_LEVEL_ERROR, "Failed to lookup datatype for unique column $unique_column on aged handle" );
+                return 0;
+            }
+
+            unless( $get_type_sth->rows() > 0 )
+            {
+                _log( $LOG_LEVEL_ERROR, "No column found on aged handle for $unique_column" );
+                return 0;
+            }
+            my $row = $get_type_sth->fetchrow_hashref();
+            push( @$column_data_types, $unique_column . ' ' . $row->{datatype} );
+            $column_data_type_hash->{$unique_column} = $row->{datatype};
+        }
+    }
+
+    $get_type_sth->finish();
+    my $past_temp_table = 'tt_past_data';
+    my $temp_table_q = "CREATE TEMP TABLE $past_temp_table ( "
+                     . join( ',', @$column_data_types )
+                     . ' )';
+
+    unless( $current_handle->do( $temp_table_q ) )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to create tt_past_data' );
+        return 0;
+    }
+
+    my $unique_columns = join( ',', keys %$column_data_type_hash );
+    my $AGED_DATA_QUERY = <<END_SQL;
+        SELECT $unique_columns
+          FROM $aged_temp_table
+END_SQL
+
+    my $aged_sth = $aged_handle->prepare( $AGED_DATA_QUERY );
+
+    unless( $aged_sth )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to prepare aged data query for fast delete' );
+        return 0;
+    }
+
+    unless( $aged_sth->execute() )
+    {
+        _log( $LOG_LEVEL_DEBUG, 'Failed to execute aged data query for fast delete' );
+        return 0;
+    }
+
+    my $bind_points = '?' . ( ',?' x ( scalar( keys %$column_data_type_hash ) - 1 ) );
+    my $insert_q = "INSERT INTO $past_temp_table( " . join( ',', sort { $a cmp $b } keys %$column_data_type_hash ) . " ) VALUES ( $bind_points )";
+
+    my $insert_sth = $current_handle->prepare( $insert_q );
+    unless( $insert_sth )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to prepared insert statement for past data transfer' );
+        return 0;
+    }
+
+    my $where_filters = [];
+
+    unless( $aged_sth->rows() > 0 )
+    {
+        _log( $LOG_LEVEL_WARNING, "Insufficient data in aged handle" );
+        $insert_sth->finish();
+        $aged_sth->finish();
+        return 0;
+    }
+
+    while( my $row = $aged_sth->fetchrow_hashref() )
+    {
+        my $where_filter_elems = [];
+        my $index = 1;
+
+        foreach my $unique_columns( @$uniques )
+        {
+            my $where_elems = [];
+            foreach my $unique( @$unique_columns )
+            {
+                my $value;
+                if( $row->{$unique} )
+                {
+                    $value = "'" . $row->{$unique} . "'::" . $column_data_type_hash->{$unique};
+                }
+                else
+                {
+                    $value = 'NULL::' . $column_data_type_hash->{$unique};
+                }
+
+                push( @$where_elems, "vw.$unique IS NOT DISTINCT FROM $value" );
+            }
+
+            push( @$where_filter_elems, ' ( ( ' . join( ' ) AND ( ', @$where_elems ) . ' ) ) ' );
+        }
+
+        push( @$where_filters, ' ( ( ' . join( ' ) OR ( ', @$where_filter_elems ) . ' ) ) ' );
+
+        foreach my $unique( sort { $a cmp $b } keys %$column_data_type_hash )
+        {
+            $insert_sth->bind_param( $index, $row->{$unique} );
+            $index++;
+        }
+
+        unless( $insert_sth->execute() )
+        {
+            _log( $LOG_LEVEL_ERROR, 'Failed to insert aged data into current timeline' );
+            return 0;
+        }
+    }
+
+    $insert_sth->finish();
+    $aged_sth->finish();
+
+    # at this point, past_temp_table contains data from a historic timeline but is in the present timeline
+    my $unique_column_select = join( ',', map { "vw.$_" } keys %$column_data_type_hash );
+
+    my $left_join_clauses = [];
+    my $left_join_wheres  = [];
+    foreach my $unique_columns( @$uniques )
+    {
+        my $join_clause = join(
+            ' AND ',
+            map { "vw.$_ IS NOT DISTINCT FROM tt.$_" } @$unique_columns
+        );
+
+        my $where_clause = join(
+            ' AND ',
+            map { "tt.$_ IS NULL" } @$unique_columns
+        );
+
+        push( @$left_join_wheres, $where_clause );
+        push( @$left_join_clauses, $join_clause );
+    }
+
+    my $left_join_predicate  = ' ( ( ' . join( ' ) OR ( ', @$left_join_clauses ) . ' ) ) ';
+    my $left_join_where      = ' ( ( ' . join( ' ) OR ( ', @$left_join_wheres ) . ' ) ) ';
+    my $main_filter          = '( ' . join( ') OR (', @$where_filters ) . ' )';
+    my $delete_query = <<END_SQL;
+    WITH tt_rows_to_delete AS
+    (
+        SELECT $unique_column_select
+          FROM $cache_table_schema.$cache_table_name vw
+     LEFT JOIN $past_temp_table tt
+            ON $left_join_predicate
+         WHERE $left_join_where
+           AND $main_filter
+    )
+        DELETE FROM $cache_table_schema.$cache_table_name vw
+              USING tt_rows_to_delete tt
+              WHERE $left_join_predicate
+END_SQL
+
+    unless( $current_handle->do( $delete_query ) )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to execute fast delete query' );
+        return 0;
+    }
+
+    return 1;
+}
+
 sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
 {
     my(
@@ -1192,6 +1439,7 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
         { type => ARRAYREF },
     );
 
+    $handle->do( "SET application_name = 'delete: $cache_table_name'" );
     my $join_clauses  = [];
     my $where_clauses = [];
 

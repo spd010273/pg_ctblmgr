@@ -1507,11 +1507,11 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     #print Dumper( $where_expressions ) if( $DEBUG );
     my $new_q = $definition;
     my $index = 0;
-    
+
     foreach my $bind_start( @starts )
     {
         # Skip if unbindable (no relevent relations)
-        
+
         if( $bind_start < 0 )
         {
             $index++;
@@ -1532,7 +1532,6 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             $next_cte_name = $table_mapping->{BINDS}->{$starts[$index-1]}->{parent};
         }
 
-    
         if( !defined( $bind_end ) )
         {
             my $parent = $table_mapping->{BINDS}->{$bind_start}->{parent};
