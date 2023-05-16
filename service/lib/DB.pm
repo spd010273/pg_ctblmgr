@@ -1285,6 +1285,8 @@ END_SQL
     unless( $current_handle->do( $temp_table_q ) )
     {
         _log( $LOG_LEVEL_ERROR, 'Failed to create tt_past_data' );
+        $aged_handle->do( 'ROLLBACK' );
+        $aged_handle->disconnect();
         return 0;
     }
 
@@ -1315,6 +1317,9 @@ END_SQL
     unless( $insert_sth )
     {
         _log( $LOG_LEVEL_ERROR, 'Failed to prepared insert statement for past data transfer' );
+        $aged_sth->finish();
+        $aged_handle->do( 'ROLLBACK' );
+        $aged_handle->disconnect();
         return 0;
     }
 
@@ -1325,6 +1330,8 @@ END_SQL
         _log( $LOG_LEVEL_WARNING, "Insufficient data in aged handle" );
         $insert_sth->finish();
         $aged_sth->finish();
+        $aged_handle->do( 'ROLLBACK' );
+        $aged_handle->disconnect();
         return 0;
     }
 
@@ -1371,6 +1378,8 @@ END_SQL
 
     $insert_sth->finish();
     $aged_sth->finish();
+    $aged_handle->do( 'ROLLBACK' );
+    $aged_handle->disconnect();
 
     # at this point, past_temp_table contains data from a historic timeline but is in the present timeline
     my $unique_column_select = join( ',', map { "vw.$_" } keys %$column_data_type_hash );

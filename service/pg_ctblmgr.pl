@@ -1295,8 +1295,9 @@ sub worker_entrypoint($$$$)
 FD_FALLBACK:
                 if( !$can_fast_delete && $tried_fast_delete )
                 {
-                    if( defined $aged_handle )
+                    if( defined $aged_handle && $aged_handle->ping() > 0 )
                     {
+                        $aged_handle->do( 'ROLLBACK' );
                         $aged_handle->disconnect();
                         undef( $aged_handle );
                     }
@@ -1327,6 +1328,7 @@ FD_FALLBACK:
                         _log( $LOG_LEVEL_ERROR, "Failed to create aged temp table" );
                         $can_fast_delete   = 0;
                         $tried_fast_delete = 1;
+                        $aged_handle->do( 'ROLLBACK' );
                         $aged_handle->disconnect();
                         goto FD_FALLBACK;
                     }
@@ -1345,13 +1347,21 @@ FD_FALLBACK:
                           )
                     {
                         _log( $LOG_LEVEL_ERROR, "Fast delete failed, falling back to slow delete" );
-                        $can_fast_delete = 0;
+                        $can_fast_delete   = 0;
                         $tried_fast_delete = 1;
-                        $aged_handle->disconnect();
+
+                        if( $aged_handle->ping() > 0 )
+                        {
+                            $aged_handle->do( 'ROLLBACK' );
+                            $aged_handle->disconnect();
+                        }
+
                         undef( $aged_handle );
                         goto FD_FALLBACK;
                     }
+
                     # delete finished, free resources
+                    $aged_handle->do( 'ROLLBACK' );
                     $aged_handle->disconnect();
                     undef( $aged_handle );
 
