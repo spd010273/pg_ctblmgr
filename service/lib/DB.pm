@@ -671,19 +671,15 @@ sub replication_seek($$;$) :Export( :MANDATORY )
         $params
     );
 
+    my $rows = 0;
     unless( $sth )
     {
-        return 0;
+        return -1;
     }
 
-    if( $sth->rows() > 0 )
-    {
-        $sth->finish();
-        return 1;
-    }
-
+    $rows = $sth->rows();
     $sth->finish();
-    return 0;
+    return $rows;
 }
 
 sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
@@ -1209,12 +1205,13 @@ END_SQL
     return 1;
 }
 
-sub generate_aged_delete_statement($$$$$$$$) :Export( :MANDATORY )
+sub generate_aged_delete_statement($$$$$$$$$) :Export( :MANDATORY )
 {
     my(
         $aged_handle,
         $current_handle,
         $aged_temp_table,
+        $current_temp_table,
         $definition,
         $cache_table_schema,
         $cache_table_name,
@@ -1224,6 +1221,7 @@ sub generate_aged_delete_statement($$$$$$$$) :Export( :MANDATORY )
         @_,
         { type => OBJECT },
         { type => OBJECT },
+        { type => SCALAR },
         { type => SCALAR },
         { type => SCALAR },
         { type => SCALAR },
@@ -1326,9 +1324,32 @@ END_SQL
     }
 
     my $where_filters = [];
+    # TODO move count here 
+    my $current_count_q = "SELECT COUNT(*) AS count FROM $current_temp_table";
+    my $current_count_sth = $current_handle->prepare( $current_count_q );
+    if( defined( $current_count_sth ) && $current_count_sth->execute() )
+    {
+        my $count_row = $current_count_sth->fetchrow_hashref();
+        if( $count_row->{count} == $aged_sth->rows() )
+        {
+            # no rows previously existed
+            _log( $LOG_LEVEL_DEBUG, 'Fast delete early exit - no rows previously existed matching this filter or subset rough match' );
+            $aged_sth->finish();
+            $insert_sth->finish();
+            $current_count_sth->finish();
+            $aged_handle->do( 'ROLLBACK' );
+            $aged_handle->disconnect();
+            return 1;
+        }
+    }
+    else
+    {
+        _log( $LOG_LEVEL_WARNING, 'Failed to cross reference current and aged data set' );
+    }
 
     unless( $aged_sth->rows() > 0 )
     {
+         # Likely an anti-join involved - revert to slow delete
         _log( $LOG_LEVEL_WARNING, "Insufficient data in aged handle" );
         $insert_sth->finish();
         $aged_sth->finish();
@@ -1473,11 +1494,11 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
     my $where_clause   = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
 
     my $DELETE_Q = <<"END_SQL";
-    WITH tt_base_data AS MATERIALIZED
+    WITH tt_base_data AS
     (
         $definition
     ),
-    tt_rows_to_delete AS
+    tt_rows_to_delete AS MATERIALIZED
     (
         SELECT $columns
           FROM $cache_table_schema.$cache_table_name vw

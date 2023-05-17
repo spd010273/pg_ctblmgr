@@ -38,6 +38,8 @@ use QueryParser;
 # - Due to IPC::Shareable limitations / the way perl handles data structures under the hood,
 #   the shared structures, while cumbersome, prevent memory leaks by, for instance, by
 #   eschewing delete() calls and overwriting data in-place
+# - Because of the above, and some weirdness surrounding refs - we need to use cumbersome methods
+#   to manipulate arrayrefs. this involves some convoluted code around push/pop/shift/unshift
 # NOTE: IPC::Shareable keys seeem to be extremely short (4-8 chars) and may collide!
 
 # enables holding past transactions open for a trailing XID chain we can use to lookup historic data
@@ -93,6 +95,7 @@ sub _terminate(;$$$)
 
 $SIG{INT} = \&_terminate_sigint;
 $SIG{__DIE__} = \&_terminate;
+
 
 sub shm_cleanup()
 {
@@ -352,14 +355,12 @@ sub parent_loop($$$)
         tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } );
     }
 
-    print "Parent attempting to tie xid map\n";
     my $local_xid_map = {};
     if( $ENABLE_FAST_DELETE && !tied( $XID_MAP ) )
     {
-        _log( $LOG_LEVEL_DEBUG, "XID not tied" );
         tie( $XID_MAP, 'IPC::Shareable', { key => 'XID' } );
     }
-    print "parent tied xid map\n";
+
     unless( $handle )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to connect to database" );
@@ -667,8 +668,6 @@ sub parent_loop($$$)
         {
             if( defined $dispatched_changes->{$pid} && scalar( @{$dispatched_changes->{$pid}} ) > 0 )
             {
-                print "Dispatched changes for $pid\n";
-                print Dumper( $dispatched_changes->{$pid} );
                 if(
                     !defined( $youngest_in_flight_lsn )
                  || (
@@ -687,25 +686,27 @@ sub parent_loop($$$)
         #
         # max_idle_lsn contains the LSN of the first BEGIN change preceeding any change we're actually concerned about
         # IFF no changes have happened - we set it to last_peeked_lsn so that we have a consistent LSN to seek to during idle times.
-        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0  && !defined( $max_idle_lsn ) )
+
+        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
         {
             $max_idle_lsn = $last_peeked_lsn;
         }
 
-        print "LSN logic entry:\n";
-        print "max_idle_lsn: $max_idle_lsn\n" if( $max_idle_lsn );
-        print "max_idle_lsn: NULL\n" unless( $max_idle_lsn );
-        print "last_peeked_lsn: $last_peeked_lsn\n" if( $last_peeked_lsn );
-        print "last_peeked_lsn: NULL\n" unless( $last_peeked_lsn );
-        print "num_in_flight_changes: $num_in_flight_changes\n";
-        print "num_outstanding_changes: $num_outstanding_changes\n";
-        print "last_seeked_lsn: $last_seeked_lsn\n" if( $last_seeked_lsn );
-        print "last_seeked_lsn: NULL\n" unless( $last_seeked_lsn );
-        print "YOUNGEST_IN_FLIGHT: $youngest_in_flight_lsn\n" if( $youngest_in_flight_lsn );
-        print "YOUNGEST_IN_FLIGHT: NULL\n" unless( $youngest_in_flight_lsn );
+        #print "LSN logic entry:\n";
+        #print "max_idle_lsn: $max_idle_lsn\n" if( $max_idle_lsn );
+        #print "max_idle_lsn: NULL\n" unless( $max_idle_lsn );
+        #print "last_peeked_lsn: $last_peeked_lsn\n" if( $last_peeked_lsn );
+        #print "last_peeked_lsn: NULL\n" unless( $last_peeked_lsn );
+        #print "num_in_flight_changes: $num_in_flight_changes\n";
+        #print "num_outstanding_changes: $num_outstanding_changes\n";
+        #print "last_seeked_lsn: $last_seeked_lsn\n" if( $last_seeked_lsn );
+        #print "last_seeked_lsn: NULL\n" unless( $last_seeked_lsn );
+        #print "YOUNGEST_IN_FLIGHT: $youngest_in_flight_lsn\n" if( $youngest_in_flight_lsn );
+        #print "YOUNGEST_IN_FLIGHT: NULL\n" unless( $youngest_in_flight_lsn );
 
         $seekable_lsn = $max_idle_lsn;
 
+        _log( $LOG_LEVEL_DEBUG, "Max idle lsn is $max_idle_lsn" ) if( $max_idle_lsn );
         # Safety check - CANNOT seek past any in-flight change
         if(
                defined( $youngest_in_flight_lsn )
@@ -715,7 +716,7 @@ sub parent_loop($$$)
             $seekable_lsn = $youngest_in_flight_lsn;
         }
 
-        print "Determined we can safely seek to $seekable_lsn\n" if( $seekable_lsn );
+        _log( $LOG_LEVEL_DEBUG, "Determined we can safely seek to $seekable_lsn" ) if( $seekable_lsn );
 
         if(
              defined( $seekable_lsn )
@@ -725,15 +726,14 @@ sub parent_loop($$$)
             )
           )
         {
-            print "Attempting to seek to $seekable_lsn\n";
-            if( !replication_seek( $handle, $seekable_lsn ) )
+            my $rows = replication_seek( $handle, $seekable_lsn );
+            if( $rows < 0 )
             {
-                print "Successfully seeked to $seekable_lsn\n";
-                $last_seeked_lsn = $seekable_lsn;
+                _log( $LOG_LEVEL_DEBUG, "Logical seek to $seekable_lsn failed" );
             }
             else
             {
-                _log( $LOG_LEVEL_ERROR, "Logical seek to $seekable_lsn failed\n" );
+                $last_seeked_lsn = $seekable_lsn;
             }
         }
 
@@ -783,7 +783,7 @@ sub parent_loop($$$)
                     {
                         if( !defined $candidate_replace || $elem->{xid} < $candidate_replace )
                         {
-                            $candidate_replace = $elem->{xid};
+                            $candidate_replace     = $elem->{xid};
                             $candidate_replace_ind = $replace_ind;
                         }
                     }
@@ -811,10 +811,24 @@ sub parent_loop($$$)
                         {
                             if( $XID_MAP->[$candidate_replace_ind]->{xid} == $candidate_replace )
                             {
+                                my $ind     = 0;
+                                my @backup;
+
+                                while( $ind != $candidate_replace_ind )
+                                {
+                                    push( @backup, shift( @$XID_MAP ) );
+                                    $ind++;
+                                }
+
+                                shift( @$XID_MAP ); # throw away from sh,
+                                unshift( @$XID_MAP, { snapshot => $snapshot, xid => $new_xid, in_use => [] } ); # replace tossed element in-place
+
+                                while( scalar( @backup ) > 0 )
+                                {
+                                    unshift( @$XID_MAP, pop( @backup ) );
+                                }
+
                                 $local_xid_map->{$new_xid} = $handle;
-                                $XID_MAP->[$candidate_replace_ind]->{snapshot} = $snapshot;
-                                $XID_MAP->[$candidate_replace_ind]->{in_use}   = [],
-                                $XID_MAP->[$candidate_replace_ind]->{xid}      = $new_xid;
                             }
                             else
                             {
@@ -826,6 +840,14 @@ sub parent_loop($$$)
                             _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
                         }
                     }
+                    else
+                    {
+                        _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
+                    }
+                }
+                else
+                {
+                    _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
                 }
             }
             tied( $XID_MAP )->shunlock();
@@ -1208,24 +1230,6 @@ sub worker_entrypoint($$$$)
                     next;
                 }
 
-                # At this point we're ready to execute the table into a temp
-                # table
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_TEMP_TABLE;
-                tied( $WORKER_STATUSES )->shunlock();
-                my $temp_table = &generate_temp_table( $handle, $query, $CACHE_HASH );
-
-                if( !defined( $temp_table ) )
-                {
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        'Failed to generate temp table for updating cache '
-                      . "table '$CACHE_HASH->{name}'"
-                    );
-                    next;
-                }
-
-                _log( $LOG_LEVEL_DEBUG, "Begining changes" );
                 my $using_xid;
                 my $using_xid_ind;
 
@@ -1253,15 +1257,58 @@ sub worker_entrypoint($$$$)
                         tied( $XID_MAP )->shlock( LOCK_EX );
                         unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
                         {
-                            push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
+                            my $mod_hr = $XID_MAP->[$best_candidate_ind];
+                            push( @{$mod_hr->{in_use}}, $worker_pid );
+                            my $ind     = 0;
+                            my @backup;
+
+                            while( $ind != $best_candidate_ind )
+                            {
+                                push( @backup, shift( @$XID_MAP ) );
+                                $ind++;
+                            }
+
+                            shift( @$XID_MAP ); # throw away from sh,
+                            unshift( @$XID_MAP, $mod_hr ); # replace tossed element in-place
+
+                            while( scalar( @backup ) > 0 )
+                            {
+                                unshift( @$XID_MAP, pop( @backup ) );
+                            }
+
                             $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
                             $using_xid       = $best_candidate;
                             $using_xid_ind   = $best_candidate_ind;
                             $can_fast_delete = 1;
+                            _log( $LOG_LEVEL_DEBUG, 'Found candidate XID for fast delete' );
                         }
+                    }
+                    else
+                    {
+                        _log( $LOG_LEVEL_DEBUG, 'Could not find candidate XID for fast delete' );
                     }
                     tied( $XID_MAP )->shunlock();
                 }
+
+                # At this point we're ready to execute the table into a temp
+                # table
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_TEMP_TABLE;
+                tied( $WORKER_STATUSES )->shunlock();
+                $handle->do( "SET application_name = '$EXTENSION_NAME temp table $CACHE_HASH->{name}'" );
+                my $temp_table = &generate_temp_table( $handle, $query, $CACHE_HASH );
+
+                if( !defined( $temp_table ) )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        'Failed to generate temp table for updating cache '
+                      . "table '$CACHE_HASH->{name}'"
+                    );
+                    next;
+                }
+
+                _log( $LOG_LEVEL_DEBUG, "Begining changes" );
 
                 my $tried_fast_delete = 0;
                 if( $can_fast_delete )
@@ -1274,37 +1321,45 @@ sub worker_entrypoint($$$$)
                         undef
                     );
 
-                    $aged_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
-                    $aged_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-                    $aged_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
-                    $aged_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
-
                     $tried_fast_delete = 1;
                     unless( $aged_handle )
                     {
                         $can_fast_delete = 0;
+                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not connect aged handle' );
                         goto FD_FALLBACK;
                     }
 
+                    $aged_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+                    $aged_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+                    $aged_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+                    $aged_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+                    $aged_handle->do( "SET application_name = '$EXTENSION_NAME historic $CACHE_HASH->{name}'" );
                     unless( $aged_handle->do( 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ' ) )
                     {
                         $can_fast_delete = 0;
+                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not begin repeatable read transaction' );
                         goto FD_FALLBACK;
                     }
 
                     unless( $aged_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" ) )
                     {
                         $can_fast_delete = 0;
+                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
                         goto FD_FALLBACK;
                     }
 
                     unless( $aged_handle->do( "SET TRANSACTION SNAPSHOT '$aged_snapshot'" ) )
                     {
                         $can_fast_delete = 0;
+                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not import aged snapshot' );
                         goto FD_FALLBACK;
                     }
 
-                    print "Sucessfully established aged handle at snapshot $aged_snapshot uxind XID $using_xid for target $youngest_xid\n";
+                    _log(
+                        $LOG_LEVEL_DEBUG,
+                        "Sucessfully established aged handle at snapshot $aged_snapshot "
+                      . "uxind XID $using_xid for target $youngest_xid"
+                    );
                 }
 
 FD_FALLBACK:
@@ -1318,15 +1373,23 @@ FD_FALLBACK:
                     }
 
                     tied( $XID_MAP )->shlock( LOCK_EX );
-                    my $ind = 0;
-                    foreach my $pid( @{$XID_MAP->[$using_xid_ind]->{in_use}} )
+                    my $mod_hr = $XID_MAP->[$using_xid_ind];
+                    @{$mod_hr->{in_use}} = grep { $_ ne $worker_pid } @{$mod_hr->{in_use}};
+                    my $ind     = 0;
+                    my @backup;
+
+                    while( $ind != $using_xid_ind )
                     {
-                        if( $pid == $worker_pid )
-                        {
-                            splice( @{$XID_MAP->[$using_xid_ind]->{in_use}}, $ind, 1 );
-                            last;
-                        }
+                        push( @backup, shift( @$XID_MAP ) );
                         $ind++;
+                    }
+
+                    shift( @$XID_MAP ); # throw away from sh,
+                    unshift( @$XID_MAP, $mod_hr ); # replace tossed element in-place
+
+                    while( scalar( @backup ) > 0 )
+                    {
+                        unshift( @$XID_MAP, pop( @backup ) );
                     }
                     tied( $XID_MAP )->shunlock();
                 }
@@ -1341,10 +1404,10 @@ FD_FALLBACK:
                     # Create temp table in aged handle && perform fast delete
                     # XXX
                     my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
-
+                    print "$query\n";
                     unless( $aged_temp_table )
                     {
-                        _log( $LOG_LEVEL_ERROR, "Failed to create aged temp table" );
+                        _log( $LOG_LEVEL_ERROR, "Fast delete failed - could not create aged temp table" );
                         $can_fast_delete   = 0;
                         $tried_fast_delete = 1;
                         $aged_handle->do( 'ROLLBACK' );
@@ -1357,6 +1420,7 @@ FD_FALLBACK:
                             $aged_handle,
                             $handle,
                             $aged_temp_table,
+                            $temp_table,
                             $CACHE_HASH->{definition},
                             $CACHE_HASH->{schema},
                             $CACHE_HASH->{name},
@@ -1388,16 +1452,23 @@ FD_FALLBACK:
                     }
 
                     tied( $XID_MAP )->shlock( LOCK_EX );
-                    my $ind = 0;
-                    foreach my $pid( @{$XID_MAP->[$using_xid_ind]->{in_use}} )
-                    {
-                        if( $pid == $worker_pid )
-                        {
-                            splice( @{$XID_MAP->[$using_xid_ind]->{in_use}}, $ind, 1 );
-                            last;
-                        }
+                    my $mod_hr = $XID_MAP->[$using_xid_ind];
+                    @{$mod_hr->{in_use}} = grep { $_ ne $worker_pid } @{$mod_hr->{in_use}};
+                    my $ind     = 0;
+                    my @backup;
 
-                        $ind++
+                    while( $ind != $using_xid_ind )
+                    {
+                        push( @backup, shift( @$XID_MAP ) );
+                        $ind++;
+                    }
+
+                    shift( @$XID_MAP ); # throw away from sh,
+                    unshift( @$XID_MAP, $mod_hr ); # replace tossed element in-place
+
+                    while( scalar( @backup ) > 0 )
+                    {
+                        unshift( @$XID_MAP, pop( @backup ) );
                     }
                     tied( $XID_MAP )->shunlock();
                     _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );

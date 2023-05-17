@@ -63,7 +63,7 @@ sub read_xid_map()
             snapshot => $elem->{snapshot},
         };
 
-        foreach my $pid( $elem->{in_use} )
+        foreach my $pid( @{$elem->{in_use}} )
         {
             push( @{$xid_map->{$elem->{xid}}->{in_use}}, $pid );
         }
@@ -142,8 +142,20 @@ my $table = Text::Table->new(
     'Last LSN',
     'Filter Tables',
     'Total Queued',
-    'Snapshot'
+    'Snapshot',
+    'XID'
 );
+
+my @keys = sort { $a <=> $b } keys( %$xid_map );
+my $min_xid = shift( @keys );
+my $min_snapshot = $xid_map->{$min_xid}->{snapshot};
+my $max_xid = pop( @keys );
+my $max_snapshot = $xid_map->{$max_xid}->{snapshot};
+
+print "XID Mapping ranges:\n";
+print "Min: $min_xid ( $min_snapshot )\n";
+print "Max: $max_xid ( $max_snapshot )\n";
+
 foreach my $pid( sort { $a <=> $b } keys %$worker_statuses )
 {
     my $status                = $worker_statuses->{$pid}->{status};
@@ -181,14 +193,14 @@ foreach my $pid( sort { $a <=> $b } keys %$worker_statuses )
         }
     }
 
-    $table->load( [ $pid, $ct_name, $status_text, $last_lsn, $filter_tables, $total_queued, $held_snapshot ] );
+    $table->load( [ $pid, $ct_name, $status_text, $last_lsn, $filter_tables, $total_queued, $held_snapshot, $held_xid] );
 
     if( scalar( keys %$queue ) > 0 )
     {
         foreach my $filter_table( sort { $a cmp $b } keys %$queue )
         {
             my $count = $queue->{$filter_table};
-            $table->load( [ undef, undef, undef, undef, $filter_table, $count, undef ] );
+            $table->load( [ undef, undef, undef, undef, $filter_table, $count, undef, undef ] );
         }
     }
 }
