@@ -20,11 +20,11 @@ $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 
 Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
-Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<'END_SQL';
+Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
       FROM pg_catalog.pg_create_logical_replication_slot(
                ?,
-               'pg_ctblmgr'
+               '$EXTENSION_NAME'
            );
 END_SQL
 
@@ -127,7 +127,8 @@ Readonly::Scalar my $GET_WORKER_LIST => <<"END_SQL";
     SELECT rs.maintenance_channel,
            rs.filter,
            mg.wal_level,
-           mo.maintenance_object
+           mo.maintenance_object,
+           mo.name
       FROM ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
 INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.maintenance_object = rs.id
@@ -397,7 +398,7 @@ sub try_query($$;$) :Export( :MANDATORY )
         {
             _log(
                 $LOG_LEVEL_FATAL,
-                'Failed to acquire lock after reconnecting to database'
+                'Failed to acquire lock after reconnecting to database or extension not installed'
             );
         }
     }
@@ -621,7 +622,7 @@ sub get_worker_list($;$) :Export( :MANDATORY )
             my $filter_tables       = $row->{filter};
             my $wal_level           = $row->{wal_level};
             my $maintenance_object  = $row->{maintenance_object};
-
+            my $name                = $row->{name};
             push(
                 @$worker_data,
                 {
@@ -629,6 +630,7 @@ sub get_worker_list($;$) :Export( :MANDATORY )
                     filter_tables       => $filter_tables,
                     wal_level           => $wal_level,
                     maintenance_object  => $maintenance_object,
+                    name                => $name,
                 }
             );
         }

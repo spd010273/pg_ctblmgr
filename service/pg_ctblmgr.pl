@@ -18,8 +18,8 @@ use Time::HiRes qw( gettimeofday tv_interval );
 use POSIX qw( strftime setsid :sys_wait_h );
 use Cwd qw( abs_path );
 use IPC::Shareable qw( :lock );
+
 use Data::Dumper;
-use Carp;
 
 use FindBin;
 use lib "$FindBin::Bin/lib";
@@ -35,6 +35,9 @@ use QueryParser;
 #   prevent bad queries from executing.
 # - This requires, like matviews, that a unique expression exists on the table,
 #   though this can support multiple unique indicies.
+# - Due to IPC::Shareable limitations / the way perl handles data structures under the hood,
+#   the shared structures, while cumbersome, prevent memory leaks by, for instance, by
+#   eschewing delete() calls and overwriting data in-place
 # NOTE: IPC::Shareable keys seeem to be extremely short (4-8 chars) and may collide!
 
 # enables holding past transactions open for a trailing XID chain we can use to lookup historic data
@@ -260,7 +263,7 @@ sub new_xid_placeholder($$$)
 
     return 0 unless( $$new_handle );
 
-    $$new_handle->do( "SET application_name = 'pg_ctblmgr fast delete'" );
+    $$new_handle->do( "SET application_name = '$EXTENSION_NAME fast delete'" );
     $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
     $$new_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
     $$new_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
@@ -305,7 +308,7 @@ sub new_xid_placeholder($$$)
         $row = $sth->fetchrow_hashref();
         $$new_snapshot = $row->{snapshot};
         $sth->finish();
-        $$new_handle->do( "SET application_name = 'pg_ctblmgr snapshot for $$new_xid'" );
+        $$new_handle->do( "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid'" );
         return 1;
     }
 
@@ -431,7 +434,7 @@ sub parent_loop($$$)
                 _log( $LOG_LEVEL_DEBUG, "Child $target_pid exited!" );
                 delete( $worker_mapping->{$pk_maintenance_object} );
                 tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-                delete( $WORKER_FILTER_TABLES->{$target_pid} );
+                delete( $WORKER_FILTER_TABLES->{$target_pid} ); ## this may leak shm
                 tied( $WORKER_FILTER_TABLES )->shunlock();
             }
 
@@ -451,6 +454,7 @@ sub parent_loop($$$)
                 my $wal_level           = $worker_data->{wal_level};
                 my $filter_tables       = $worker_data->{filter_tables};
                 my $maintenance_channel = $worker_data->{maintenance_channel};
+                my $ct_name             = $worker_data->{name};
                 my $child_pid = fork();
 
                 if( defined( $child_pid ) and $child_pid == 0 )
@@ -483,6 +487,8 @@ sub parent_loop($$$)
                     $WORKER_STATUSES->{$child_pid}->{status}   = $WORKER_STATUS_STARTUP;
                     $WORKER_STATUSES->{$child_pid}->{shutdown} = 0;
                     $WORKER_STATUSES->{$child_pid}->{last_lsn} = undef;
+                    $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
+                    $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
                     _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
                 }
                 else
@@ -929,6 +935,7 @@ sub worker_entrypoint($$$$)
         { type => SCALAR },
     );
 
+    &set_program_name( "$EXTENSION_NAME worker startup" );
     my $CACHE_HASH           = {};
     my $WORKER_FILTER_TABLES = {};
     my $WAL_DATA;
@@ -948,7 +955,6 @@ sub worker_entrypoint($$$$)
         { key => 'WORKER_FILTER_TABLES' }
     );
 
-    print "Worker attempting to tie XID map\n";
     if( $ENABLE_FAST_DELETE )
     {
         tie(
@@ -957,19 +963,22 @@ sub worker_entrypoint($$$$)
             { key => 'XID' }
         );
     }
-    print "Worker xid map tied\n";
+
     my $count = 0;
-    my $lim = 15;
+    my $lim   = 15;
+
     until( tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB ) )
     {
         if( $count > $lim )
         {
             _log( $LOG_LEVEL_FATAL, "Parent took > $lim seconds to start!" );
         }
+
         _log(
             $LOG_LEVEL_DEBUG,
             "Worker $worker_pid waiting to enter running state"
         );
+
         sleep( 1 );
         $count++;
     }
@@ -1005,6 +1014,7 @@ sub worker_entrypoint($$$$)
     # our query changes underneath us
     # TODO: Add detection and correction for the above
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
+    &set_program_name( "$EXTENSION_NAME idle $CACHE_HASH->{name}" );
 
     if( $CACHE_HASH->{driver} eq 'postgresql' )
     {
@@ -1030,6 +1040,8 @@ sub worker_entrypoint($$$$)
             {
                 $exit = $WORKER_STATUSES->{$worker_pid}->{shutdown} if( defined( $WORKER_STATUSES->{$worker_pid}->{shutdown} ) );
             }
+            tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+            $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
             tied( $WORKER_STATUSES )->shunlock();
 
             if( defined $exit && $exit == 1 )
@@ -1172,7 +1184,7 @@ sub worker_entrypoint($$$$)
             if( scalar( keys %$changes ) > 0 )
             {
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{statuses} = $WORKER_STATUS_UPDATING;
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_QUERY_PARSE;
                 tied( $WORKER_STATUSES )->shunlock();
 
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
@@ -1198,6 +1210,9 @@ sub worker_entrypoint($$$$)
 
                 # At this point we're ready to execute the table into a temp
                 # table
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_TEMP_TABLE;
+                tied( $WORKER_STATUSES )->shunlock();
                 my $temp_table = &generate_temp_table( $handle, $query, $CACHE_HASH );
 
                 if( !defined( $temp_table ) )
@@ -1318,6 +1333,10 @@ FD_FALLBACK:
 
                 if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
                 {
+                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_FAST_DELETE;
+                    tied( $WORKER_STATUSES )->shunlock();
+                    &set_program_name( "$EXTENSION_NAME fast delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                     # Create temp table in aged handle && perform fast delete
                     # XXX
@@ -1383,6 +1402,10 @@ FD_FALLBACK:
 
                 if( !$can_fast_delete )
                 {
+                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_SLOW_DELETE;
+                    tied( $WORKER_STATUSES )->shunlock();
+                    &set_program_name( "$EXTENSION_NAME slow delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
                     my $delete_result = generate_delete_statement(
                         $handle,
@@ -1405,7 +1428,11 @@ FD_FALLBACK:
                 }
 
                 _log( $LOG_LEVEL_DEBUG, "DELETE FINISH" );
-
+                
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_UPDATE;
+                tied( $WORKER_STATUSES )->shunlock();
+                &set_program_name( "$EXTENSION_NAME update $CACHE_HASH->{name}" );
                 my $update_result = generate_update_statement(
                     $handle,
                     $temp_table,
@@ -1426,6 +1453,10 @@ FD_FALLBACK:
                     next;
                 }
 
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_INSERT;
+                tied( $WORKER_STATUSES )->shunlock();
+                &set_program_name( "$EXTENSION_NAME insert $CACHE_HASH->{name}" );
                 my $insert_result = generate_insert_statement(
                     $handle,
                     $temp_table,
@@ -1459,10 +1490,11 @@ FD_FALLBACK:
                     next;
                 }
 
+                &set_program_name( "$EXTENSION_NAME idle $CACHE_HASH->{name}" );
                 _log( $LOG_LEVEL_DEBUG, "====================== Applied $max_peeked_lsn" );
                 $max_applied_lsn = $max_peeked_lsn;
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{statuses} = $WORKER_STATUS_RUNNING;
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
                 $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
                 tied( $WORKER_STATUSES )->shunlock();
             }
@@ -1609,7 +1641,7 @@ foreach my $worker_entry( @$worker_data )
     my $wal_level             = $worker_entry->{wal_level};
     my $maintenance_channel   = $worker_entry->{maintenance_channel};
     my $pk_maintenance_object = $worker_entry->{maintenance_object};
-
+    my $ct_name               = $worker_entry->{name};
     my $child_pid = fork();
 
     if( defined( $child_pid ) and $child_pid == 0 )
@@ -1642,6 +1674,8 @@ foreach my $worker_entry( @$worker_data )
         $WORKER_STATUSES->{$child_pid}->{status}   = $WORKER_STATUS_STARTUP;
         $WORKER_STATUSES->{$child_pid}->{shutdown} = 0;
         $WORKER_STATUSES->{$child_pid}->{last_lsn} = undef;
+        $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
+        $WORKER_STATUSES->{$child_pid}->{name} = $ct_name;
         _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
     }
     else
@@ -1653,6 +1687,7 @@ foreach my $worker_entry( @$worker_data )
 # We've started workers, lets start processing WAL
 _log( $LOG_LEVEL_DEBUG, "All workers started" );
 tied( $WORKER_STATUSES )->shunlock();
+&set_program_name( "$EXTENSION_NAME parent process" );
 parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
 shm_cleanup();

@@ -16,11 +16,17 @@ Readonly::Scalar our $LOG_LEVEL_WARNING            :Export( :MANDATORY ) => 3;
 Readonly::Scalar our $LOG_LEVEL_INFO               :Export( :MANDATORY ) => 2;
 Readonly::Scalar our $LOG_LEVEL_DEBUG              :Export( :MANDATORY ) => 1;
 Readonly::Scalar our $WORKER_STATUS_STARTUP        :Export( :MANDATORY ) => 1;
-Readonly::Scalar our $WORKER_STATUS_RUNNING        :Export( :MANDATORY ) => 2;
-Readonly::Scalar our $WORKER_STATUS_UPDATING       :Export( :MANDATORY ) => 3;
+Readonly::Scalar our $WORKER_STATUS_RUNNING        :Export( :MANDATORY ) => 2; #not used?
+Readonly::Scalar our $WORKER_STATUS_IDLE           :Export( :MANDATORY ) => 3;
 Readonly::Scalar our $WORKER_STATUS_EXITED         :Export( :MANDATORY ) => 4;
+Readonly::Scalar our $WORKER_STATUS_INSERT         :Export( :MANDATORY ) => 5;
+Readonly::Scalar our $WORKER_STATUS_SLOW_DELETE    :Export( :MANDATORY ) => 6;
+Readonly::Scalar our $WORKER_STATUS_FAST_DELETE    :Export( :MANDATORY ) => 7;
+Readonly::Scalar our $WORKER_STATUS_UPDATE         :Export( :MANDATORY ) => 8;
+Readonly::Scalar our $WORKER_STATUS_TEMP_TABLE     :Export( :MANDATORY ) => 9;
+Readonly::Scalar our $WORKER_STATUS_QUERY_PARSE    :Export( :MANDATORY ) => 10;
 Readonly::Scalar our $EXTENSION_NAME               :Export( :MANDATORY ) => 'pg_ctblmgr';
-Readonly::Scalar our $SCHEMA_NAME                  :Export( :MANDATORY ) => 'pgctblmgr';
+Readonly::Scalar our $SCHEMA_NAME                  :Export( :MANDATORY ) => 'pg_ctblmgr';
 Readonly::Scalar our $SQL_STATE_ADMIN_TERM         :Export( :MANDATORY ) => '57P01';
 Readonly::Scalar our $SQL_STATE_ADMIN_CANC         :Export( :MANDATORY ) => '57014';
 Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 5;
@@ -130,7 +136,14 @@ sub _log($$) :Export( :MANDATORY )
 
     if( $log_level == $LOG_LEVEL_FATAL )
     {
-        $SIG{__INT__}();
+        if( $SIG{__INT__} )
+        {
+            $SIG{__INT__}();
+        }
+        else
+        {
+            exit 1;
+        }
     }
 
     return;
@@ -197,6 +210,17 @@ sub lsn_cmp($$) :Export( :MANDATORY )
     }
 
     return -1;
+}
+
+sub set_program_name($) :Export( :MANDATORY )
+{
+    my( $program_name ) = validate_pos(
+        @_,
+        { type => SCALAR },
+    );
+
+    $PROGRAM_NAME = $program_name;
+    return;
 }
 
 1;
