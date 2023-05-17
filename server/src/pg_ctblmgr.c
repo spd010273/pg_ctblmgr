@@ -419,7 +419,7 @@ static void pg_ctblmgr_decode_change(
         return;
     }
 
-    if( strncmp( schema_name, "pgctblmgr", 9 ) == 0 )
+    if( strncmp( schema_name, SCHEMA_NAME, strnlen( SCHEMA_NAME, strlen( schema_name ) ) ) == 0 )
     { // Disregard changes to ext schema
         return;
     }
