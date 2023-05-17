@@ -2,4 +2,4 @@ comment = 'Asynchronous Eager Materialized Views'
 default_version = '0.1'
 relocatable = false
 superuser = false
-schema = pg_ctblmgr
+schema = pgctblmgr

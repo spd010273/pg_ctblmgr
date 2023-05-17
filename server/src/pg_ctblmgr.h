@@ -40,7 +40,7 @@ PG_MODULE_MAGIC;
 #include "access/xact.h"
 #include "access/transam.h"
 
-#define SCHEMA_NAME "pg_ctblmgr"
+#define SCHEMA_NAME "pgctblmgr"
 // Defined in src/backend/utils/adt/txid.c
 /*
 typedef uint64 txid;
