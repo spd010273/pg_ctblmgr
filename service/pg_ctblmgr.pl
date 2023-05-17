@@ -544,7 +544,7 @@ sub parent_loop($$$)
 
                         my $commit_lsn = $change->{commit_lsn};
                         my $change_lsn = $change->{begin_lsn};
-                        
+
                         if(
                                !defined( $filter_table_lsns->{$filter_table} )
                             || lsn_cmp( $filter_table_lsns->{$filter_table}, $change_lsn ) < 0
@@ -557,8 +557,8 @@ sub parent_loop($$$)
                         {
                             $dispatched_changes->{$pid} = [];
                         }
-                   
-                        unless( grep( /^$commit_lsn$/, @{$dispatched_changes->{$pid}} ) ) 
+
+                        unless( grep( /^$commit_lsn$/, @{$dispatched_changes->{$pid}} ) )
                         {
                             push( @{$dispatched_changes->{$pid}}, $commit_lsn );
                         }
@@ -633,7 +633,7 @@ sub parent_loop($$$)
         foreach my $pid( keys %$worker_lsns )
         {
             my $last_lsn = $worker_lsns->{$pid};
-            
+
             # here we will maintain the local diaptched_changes versus the global applied lsns
             # if we find a dispatched change for this PID that is <= the PID's last lsn, we remove it
             # such that dispatched changes contains a list of outstanding (in-flight) LSNs
@@ -994,7 +994,7 @@ sub worker_entrypoint($$$$)
         $CONNECTION_MAP->{user_name},
         undef
     );
-    
+
     $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
     $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
     $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
@@ -1380,9 +1380,12 @@ FD_FALLBACK:
                     }
 
                     # delete finished, free resources
-                    $aged_handle->do( 'ROLLBACK' );
-                    $aged_handle->disconnect();
-                    undef( $aged_handle );
+                    if( $aged_handle && $aged_handle->ping > 0 )
+                    {
+                        $aged_handle->do( 'ROLLBACK' );
+                        $aged_handle->disconnect();
+                        undef( $aged_handle );
+                    }
 
                     tied( $XID_MAP )->shlock( LOCK_EX );
                     my $ind = 0;
@@ -1428,7 +1431,7 @@ FD_FALLBACK:
                 }
 
                 _log( $LOG_LEVEL_DEBUG, "DELETE FINISH" );
-                
+
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_UPDATE;
                 tied( $WORKER_STATUSES )->shunlock();
