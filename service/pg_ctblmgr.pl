@@ -50,7 +50,7 @@ Readonly my $SLEEP_TIMER        => 1; # seconds for main loop
 
 Readonly my $TCP_KEEPALIVE          => 60;
 Readonly my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
-Readonly my $TCP_KEEPALIVE_COUNT    => 720;
+Readonly my $TCP_KEEPALIVE_COUNT    => 200; #720;
 Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
 our $OUTPUT_AUTOFLUSH = 1;
@@ -498,8 +498,9 @@ sub parent_loop($$$)
                 }
             }
         }
+
         ## CHANGE MANAGEMENT
-        my $num_in_flight_changes = 0; # number of changes we're queueing
+        my $num_in_flight_changes   = 0; # number of changes we're queueing
         my $num_outstanding_changes = 0; # number of changes we've queued previously
         #print "Peeking uneeded changes\n";
         #&replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn, $all_filter_tables );
@@ -641,7 +642,7 @@ sub parent_loop($$$)
             if( defined( $dispatched_changes->{$pid} ) && scalar( @{$dispatched_changes->{$pid}} ) > 0 )
             {
                 my @ordered_changes = sort lsn_cmp @{$dispatched_changes->{$pid}};
-                print Dumper( @ordered_changes );
+                #print Dumper( @ordered_changes );
                 my $remove_lsns = [];
                 foreach my $dispatched_lsn( @ordered_changes )
                 {
@@ -706,7 +707,6 @@ sub parent_loop($$$)
 
         $seekable_lsn = $max_idle_lsn;
 
-        _log( $LOG_LEVEL_DEBUG, "Max idle lsn is $max_idle_lsn" ) if( $max_idle_lsn );
         # Safety check - CANNOT seek past any in-flight change
         if(
                defined( $youngest_in_flight_lsn )
@@ -715,8 +715,6 @@ sub parent_loop($$$)
         {
             $seekable_lsn = $youngest_in_flight_lsn;
         }
-
-        _log( $LOG_LEVEL_DEBUG, "Determined we can safely seek to $seekable_lsn" ) if( $seekable_lsn );
 
         if(
              defined( $seekable_lsn )
@@ -811,7 +809,13 @@ sub parent_loop($$$)
                         {
                             if( $XID_MAP->[$candidate_replace_ind]->{xid} == $candidate_replace )
                             {
-                                my $ind     = 0;
+                                # note: this code is duplicated to handle updating XID_MAP in-place. Due to oddities in
+                                # how IPC::Shareable handles arrayrefs, the elements must be manipulated using push/pop
+                                # /shift/unshift. Futher complicating matters, this needs to share scope with the knots
+                                # created with tie() and tied(). Without this - cases where LOCK_SH get upgraded to LOCK_EX
+                                # will result in a deadlock on the same PID, unless scope of LOCK_SH call and LOCK_EX call
+                                # are the same.
+                                my $ind = 0;
                                 my @backup;
 
                                 while( $ind != $candidate_replace_ind )
@@ -1205,13 +1209,26 @@ sub worker_entrypoint($$$$)
 
             if( scalar( keys %$changes ) > 0 )
             {
+                # Timing variables
+                my $query_parse_time;
+                my $temp_table_time;
+                my $fast_delete_time;
+                my $slow_delete_time;
+                my $update_time;
+                my $insert_time;
+
+                # Fast delete variables / flags
+                my $can_fast_delete = 0;
+                my $tried_fast_delete = 0;
+                my $using_xid;
+                my $using_xid_ind;
+                
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_QUERY_PARSE;
                 tied( $WORKER_STATUSES )->shunlock();
-
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
-                # now lets apply changes from the array after pop
-                my $can_fast_delete = 0;
+                my $query_parse_start = [ gettimeofday() ];
+
                 my $query = &apply_filters(
                     $handle,
                     $CACHE_HASH->{parse_tree},
@@ -1230,8 +1247,8 @@ sub worker_entrypoint($$$$)
                     next;
                 }
 
-                my $using_xid;
-                my $using_xid_ind;
+                $query_parse_time = tv_interval( $query_parse_start, [ gettimeofday() ] );
+                _log( $LOG_LEVEL_DEBUG, "Query parse took $query_parse_time seconds" );
 
                 if( $ENABLE_FAST_DELETE )
                 {
@@ -1252,6 +1269,7 @@ sub worker_entrypoint($$$$)
                         $ind++;
                     }
 
+                    # Add our PID to the list of PIDS using this XID/snapshot combo
                     if( defined( $best_candidate ) )
                     {
                         tied( $XID_MAP )->shlock( LOCK_EX );
@@ -1259,7 +1277,7 @@ sub worker_entrypoint($$$$)
                         {
                             my $mod_hr = $XID_MAP->[$best_candidate_ind];
                             push( @{$mod_hr->{in_use}}, $worker_pid );
-                            my $ind     = 0;
+                            $ind = 0;
                             my @backup;
 
                             while( $ind != $best_candidate_ind )
@@ -1287,16 +1305,17 @@ sub worker_entrypoint($$$$)
                     {
                         _log( $LOG_LEVEL_DEBUG, 'Could not find candidate XID for fast delete' );
                     }
+
                     tied( $XID_MAP )->shunlock();
                 }
 
-                # At this point we're ready to execute the table into a temp
-                # table
+                # Generate temp table containing state of rows relevent to the keys that have changed
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_TEMP_TABLE;
                 tied( $WORKER_STATUSES )->shunlock();
                 $handle->do( "SET application_name = '$EXTENSION_NAME temp table $CACHE_HASH->{name}'" );
-                my $temp_table = &generate_temp_table( $handle, $query, $CACHE_HASH );
+                my $temp_table_start = [ gettimeofday() ];
+                my $temp_table       = &generate_temp_table( $handle, $query, $CACHE_HASH );
 
                 if( !defined( $temp_table ) )
                 {
@@ -1308,9 +1327,11 @@ sub worker_entrypoint($$$$)
                     next;
                 }
 
-                _log( $LOG_LEVEL_DEBUG, "Begining changes" );
+                $temp_table_time = tv_interval( $temp_table_start, [ gettimeofday() ] );
+                _log( $LOG_LEVEL_DEBUG, "Temp table generation took $temp_table_time seconds" );
 
-                my $tried_fast_delete = 0;
+                # Setup aged handle and lock-in snapshot for looking back in time to see
+                # the state of the output relative to the changed keys.
                 if( $can_fast_delete )
                 {
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
@@ -1334,6 +1355,7 @@ sub worker_entrypoint($$$$)
                     $aged_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
                     $aged_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
                     $aged_handle->do( "SET application_name = '$EXTENSION_NAME historic $CACHE_HASH->{name}'" );
+
                     unless( $aged_handle->do( 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ' ) )
                     {
                         $can_fast_delete = 0;
@@ -1402,9 +1424,8 @@ FD_FALLBACK:
                     &set_program_name( "$EXTENSION_NAME fast delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                     # Create temp table in aged handle && perform fast delete
-                    # XXX
                     my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
-                    print "$query\n";
+
                     unless( $aged_temp_table )
                     {
                         _log( $LOG_LEVEL_ERROR, "Fast delete failed - could not create aged temp table" );
@@ -1415,17 +1436,14 @@ FD_FALLBACK:
                         goto FD_FALLBACK;
                     }
 
+                    my $fast_delete_start = [ gettimeofday() ];
                     unless(
                         &generate_aged_delete_statement(
                             $aged_handle,
                             $handle,
                             $aged_temp_table,
                             $temp_table,
-                            $CACHE_HASH->{definition},
-                            $CACHE_HASH->{schema},
-                            $CACHE_HASH->{name},
-                            $CACHE_HASH->{cache_table_columns},
-                            $CACHE_HASH->{cache_table_uniques}
+                            $CACHE_HASH
                         )
                           )
                     {
@@ -1451,6 +1469,8 @@ FD_FALLBACK:
                         undef( $aged_handle );
                     }
 
+                    $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
+                    _log( $LOG_LEVEL_DEBUG, "Fast delete took $fast_delete_time seconds" );
                     tied( $XID_MAP )->shlock( LOCK_EX );
                     my $mod_hr = $XID_MAP->[$using_xid_ind];
                     @{$mod_hr->{in_use}} = grep { $_ ne $worker_pid } @{$mod_hr->{in_use}};
@@ -1481,13 +1501,10 @@ FD_FALLBACK:
                     tied( $WORKER_STATUSES )->shunlock();
                     &set_program_name( "$EXTENSION_NAME slow delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
+                    my $slow_delete_start = [ gettimeofday() ];
                     my $delete_result = generate_delete_statement(
                         $handle,
-                        $CACHE_HASH->{definition},
-                        $CACHE_HASH->{schema},
-                        $CACHE_HASH->{name},
-                        $CACHE_HASH->{cache_table_columns},
-                        $CACHE_HASH->{cache_table_uniques}
+                        $CACHE_HASH
                     );
 
                     unless( $delete_result )
@@ -1499,24 +1516,21 @@ FD_FALLBACK:
                         );
                         next;
                     }
+                    $slow_delete_time = tv_interval( $slow_delete_start, [ gettimeofday() ] );
+                    _log( $LOG_LEVEL_DEBUG, "Slow delete took $slow_delete_time seconds" );
                 }
-
-                _log( $LOG_LEVEL_DEBUG, "DELETE FINISH" );
 
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_UPDATE;
                 tied( $WORKER_STATUSES )->shunlock();
                 &set_program_name( "$EXTENSION_NAME update $CACHE_HASH->{name}" );
+                my $update_start = [ gettimeofday() ];
                 my $update_result = generate_update_statement(
                     $handle,
                     $temp_table,
-                    $CACHE_HASH->{schema},
-                    $CACHE_HASH->{name},
-                    $CACHE_HASH->{cache_table_columns},
-                    $CACHE_HASH->{cache_table_uniques}
+                    $CACHE_HASH
                 );
 
-                _log( $LOG_LEVEL_DEBUG, "UPDATE FINISH" );
                 unless( $update_result )
                 {
                     _log(
@@ -1526,31 +1540,40 @@ FD_FALLBACK:
                     );
                     next;
                 }
+                $update_time = tv_interval( $update_start, [ gettimeofday() ] );
+                _log( $LOG_LEVEL_DEBUG, "Update took $update_time seconds" );
 
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_INSERT;
-                tied( $WORKER_STATUSES )->shunlock();
-                &set_program_name( "$EXTENSION_NAME insert $CACHE_HASH->{name}" );
-                my $insert_result = generate_insert_statement(
-                    $handle,
-                    $temp_table,
-                    $CACHE_HASH->{schema},
-                    $CACHE_HASH->{name},
-                    $CACHE_HASH->{cache_table_columns},
-                    $CACHE_HASH->{cache_table_uniques}
-                );
-
-                _log( $LOG_LEVEL_DEBUG, "INSERT FINISH" );
-                unless( $insert_result )
+                unless( $temp_table->{count} > $BULK_ACTION_CUTOFF )
                 {
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        "Inserting entries into $CACHE_HASH->{schema}."
-                      . "$CACHE_HASH->{name} failed"
+                    # We perform insert/update action with one fell swoop in generage_update_statement iff
+                    # the above condition is met.
+                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_INSERT;
+                    tied( $WORKER_STATUSES )->shunlock();
+                    &set_program_name( "$EXTENSION_NAME insert $CACHE_HASH->{name}" );
+                    my $insert_start = [ gettimeofday() ];
+                    my $insert_result = generate_insert_statement(
+                        $handle,
+                        $temp_table,
+                        $CACHE_HASH
                     );
-                    next;
-                }
 
+                    unless( $insert_result )
+                    {
+                        _log(
+                            $LOG_LEVEL_ERROR,
+                            "Inserting entries into $CACHE_HASH->{schema}."
+                          . "$CACHE_HASH->{name} failed"
+                        );
+                        next;
+                    }
+                    $insert_time = tv_interval( $insert_start, [ gettimeofday() ] );
+                    _log( $LOG_LEVEL_DEBUG, "Insert took $insert_time seconds" );
+                }
+                else
+                {
+                    _log( $LOG_LEVEL_DEBUG, "Fast update skipped INSERT" );
+                }
                 # If we make it here we can signal that we've applied up to
                 # $max_peeked_lsn changes Check here to see if the table
                 # definition has changed

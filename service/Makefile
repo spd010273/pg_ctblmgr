@@ -17,8 +17,8 @@ SRCS			= $(wildcard src/*.c) $(wildcard src/lib/*.c)
 OBJS			= $(SRCS:.c=.o)
 LDFLAGS 		= -lm -lpq -lrt
 
-pg_ctblmgr: $(OBJS)
-	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
+#pg_ctblmgr: $(OBJS)
+#	$(CC) -o $@ $^ $(CFLAGS) $(LDFLAGS)
 
 .PHONY: clean
 clean:

@@ -136,14 +136,14 @@ my $worker_filter_tables = read_worker_filter_tables();
 my $xid_map = read_xid_map();
 my $worker_statuses = read_worker_statuses();
 my $table = Text::Table->new(
-    'PID',
-    'Cache Table',
-    'Status',
-    'Last LSN',
-    'Filter Tables',
-    'Total Queued',
-    'Snapshot',
-    'XID'
+    "PID\n---", "|\n|",
+    "Cache Table\n-----------", "|\n|",
+    "Status\n------", "|\n|",
+    "Last LSN\n--------", "|\n|",
+    "Filter Tables\n-------------", "|\n|",
+    "Total Queued\n-------------", "|\n|",
+    "Snapshot\n--------", "|\n|",
+    "XID\n---"
 );
 
 my @keys = sort { $a <=> $b } keys( %$xid_map );
@@ -193,14 +193,32 @@ foreach my $pid( sort { $a <=> $b } keys %$worker_statuses )
         }
     }
 
-    $table->load( [ $pid, $ct_name, $status_text, $last_lsn, $filter_tables, $total_queued, $held_snapshot, $held_xid] );
+    $table->add(
+        $pid, '|',
+        $ct_name, '|',
+        $status_text, '|',
+        $last_lsn, '|',
+        $filter_tables, '|',
+        $total_queued, '|',
+        $held_snapshot, '|',
+        $held_xid
+    );
 
     if( scalar( keys %$queue ) > 0 )
     {
         foreach my $filter_table( sort { $a cmp $b } keys %$queue )
         {
             my $count = $queue->{$filter_table};
-            $table->load( [ undef, undef, undef, undef, $filter_table, $count, undef, undef ] );
+            $table->add(
+                undef, '|',
+                undef, '|',
+                undef, '|',
+                undef, '|',
+                $filter_table, '|',
+                $count, '|',
+                undef, '|',
+                undef
+            );
         }
     }
 }

@@ -19,6 +19,7 @@ use Util;
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 
+Readonly::Scalar our $BULK_ACTION_CUTOFF :Export( :MANDATORY ) => 100000;
 Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
@@ -895,10 +896,12 @@ sub create_cache_table($$)
     unless( $sth )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to create cache table $schema.$name" );
+        return;
     }
 
-    _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
     $sth->finish();
+    $handle->do( "ANALYZE $schema.$name" );
+    _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
     return;
 }
 
@@ -952,16 +955,23 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
-    my $temp_table_name = 'tt_foo';
-    my $tt_query = "CREATE TEMP TABLE $temp_table_name AS( $query );";
-
-    my $sth = try_query( $handle, $tt_query );
+    my $temp_table_name = 'tt_' . $ct_hash->{name};
+    my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
+    my $sth             = try_query( $handle, $tt_query );
 
     if( $sth )
     {
         $sth->finish();
-        my $uniques = join( ',', @{$ct_hash->{indexes}} );
-        $sth = try_query( $handle, "CREATE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
+
+        $sth = try_query( $handle, "SELECT COUNT(*) AS count FROM $temp_table_name" );
+
+        return undef unless( $sth );
+        my $count_row   = $sth->fetchrow_hashref();
+        my $tt_count    = $count_row->{count}; 
+        my $return_data = { count => $tt_count, name => $temp_table_name, index => "ix_$temp_table_name" };
+        my $uniques     = join( ',', @{$ct_hash->{indexes}} );
+        $sth->finish();
+        $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
 
         if( $sth )
         {
@@ -976,10 +986,10 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
             );
         }
 
-        return $temp_table_name;
+        return $return_data;
     }
 
-    return;
+    return undef;
 }
 
 sub drop_temp_table($$) :Export( :MANDATORY )
@@ -987,10 +997,10 @@ sub drop_temp_table($$) :Export( :MANDATORY )
     my( $handle, $temp_table ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => SCALAR },
+        { type => HASHREF },
     );
 
-    my $query = "DROP TABLE $temp_table";
+    my $query = 'DROP TABLE ' . $temp_table->{name};
     my $sth   = try_query( $handle, $query );
 
     return 0 unless( $sth );
@@ -1059,24 +1069,23 @@ sub get_cache_table_unique($$$) :Export( :MANDATORY )
     return $uniques;
 }
 
-sub generate_update_statement($$$$$$) :Export( :MANDATORY )
+sub generate_update_statement($$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $temp_table,
-        $cache_table_schema,
-        $cache_table_name,
-        $table_columns,
-        $uniques
+        $cache_hash
       ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => ARRAYREF },
-        { type => ARRAYREF },
+        { type => HASHREF },
+        { type => HASHREF },
     );
+
+    my $cache_table_schema = $cache_hash->{schema};
+    my $cache_table_name   = $cache_hash->{name};
+    my $table_columns      = $cache_hash->{cache_table_columns};
+    my $uniques            = $cache_hash->{cache_table_uniques};
 
     $handle->do( "SET application_name = 'update: $cache_table_name'" );
     my $join_clauses       = [];
@@ -1114,51 +1123,86 @@ sub generate_update_statement($$$$$$) :Export( :MANDATORY )
         push( @$non_unique_columns, $column_name );
     }
 
-    my $join_predicate  = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
-    my $update_fragment = join( ', ', map { "$_ = tt.$_" } @$table_columns );
-    my $columns         = join( ', ', map { "vw.$_" } @$table_columns );
-    my $where_clause    = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
-
-    my $UPDATE_Q = <<END_SQL;
-    WITH tt_records_to_update AS
-    (
-        SELECT $columns
-          FROM $temp_table vw
-    INNER JOIN $cache_table_schema.$cache_table_name tt
-            ON $join_predicate
-    )
-        UPDATE $cache_table_schema.$cache_table_name ct
-           SET $update_fragment
-          FROM tt_records_to_update tt
-         WHERE $where_clause
+    if( $temp_table->{count} > $BULK_ACTION_CUTOFF )
+    {
+        _log( $LOG_LEVEL_DEBUG, "Performing large update optimization ($temp_table->{count} possible rows)" );
+        $handle->do( 'BEGIN' );
+        $handle->do( "DROP INDEX ix_$cache_hash->{name}" );
+        my $delete_where = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
+        my $DELETE_Q = <<END_SQL;
+        DELETE FROM $cache_table_schema.$cache_table_name ct
+              USING $temp_table->{name} tt
+              WHERE $delete_where
+END_SQL
+        unless( &try_query( $handle, $DELETE_Q, [] ) )
+        {
+            _log( $LOG_LEVEL_ERROR, 'Failed to bulk delete rows for fast update' );
+            $handle->do( 'ROLLBACK' );
+            return 0;
+        }
+        
+        my $INSERT_Q = <<END_SQL;
+        INSERT INTO $cache_table_schema.$cache_table_name ct
+             SELECT *
+               FROM $temp_table->{name}
 END_SQL
 
-    my $sth = &try_query( $handle, $UPDATE_Q, [] );
+        unless( &try_query( $handle, $INSERT_Q ) )
+        {
+            $handle->do( 'ROLLBACK' );
+            _log( $LOG_LEVEL_ERROR, 'failed to bulk insert rows for fast update' );
+            return 0
+        }
 
-    return 0 unless( $sth );
+        unless( create_cache_table_unique( $handle, $cache_hash ) )
+        {
+            $handle->do( 'ROLLBACK' );
+            _log( $LOG_LEVEL_ERROR, "Failed to recreate unique index" );
+            return 0;
+        }
+        $handle->do( 'COMMIT' );
+        $handle->do( "ANALYZE $cache_table_schema.$cache_table_name" );
+    }
+    else
+    {
+        my $update_fragment = join( ', ', map { "$_ = tt.$_" } @$non_unique_columns );
+        my $where_clause    = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
+        my $diff_distinct   = '( ' . join( ' OR ', map { "ct.$_ IS DISTINCT FROM tt.$_" } @$non_unique_columns ) . ' )';
+        my $UPDATE_Q = <<END_SQL;
+        UPDATE $cache_table_schema.$cache_table_name ct
+           SET $update_fragment
+          FROM $temp_table->{name} tt
+         WHERE $where_clause
+           AND $diff_distinct
+END_SQL
 
-    $sth->finish();
+        my $sth = &try_query( $handle, $UPDATE_Q, [] );
+
+        return 0 unless( $sth );
+
+        $sth->finish();
+    }
+
     return 1;
 }
 
-sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
+sub generate_insert_statement($$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $temp_table,
-        $cache_table_schema,
-        $cache_table_name,
-        $table_columns,
-        $uniques
+        $cache_hash
       ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => ARRAYREF },
-        { type => ARRAYREF },
+        { type => HASHREF },
+        { type => HASHREF },
     );
+
+    my $cache_table_schema = $cache_hash->{schema};
+    my $cache_table_name   = $cache_hash->{name};
+    my $table_columns      = $cache_hash->{cache_table_columns};
+    my $uniques            = $cache_hash->{cache_table_uniques};
 
     $handle->do( "SET application_name = 'insert: $cache_table_name'" );
 
@@ -1184,10 +1228,10 @@ sub generate_insert_statement($$$$$$) :Export( :MANDATORY )
     my $where_clause   = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
 
     my $INSERT_Q = <<END_SQL;
-    WITH tt_records_to_insert AS
+    WITH tt_records_to_insert AS MATERIALIZED
     (
         SELECT $columns
-          FROM $temp_table vw
+          FROM $temp_table->{name} vw
      LEFT JOIN $cache_table_schema.$cache_table_name tt
             ON $join_predicate
          WHERE $where_clause
@@ -1205,32 +1249,32 @@ END_SQL
     return 1;
 }
 
-sub generate_aged_delete_statement($$$$$$$$$) :Export( :MANDATORY )
+sub generate_aged_delete_statement($$$$$) :Export( :MANDATORY )
 {
     my(
         $aged_handle,
         $current_handle,
         $aged_temp_table,
         $current_temp_table,
-        $definition,
-        $cache_table_schema,
-        $cache_table_name,
-        $table_columns,
-        $uniques
+        $cache_hash
       ) = validate_pos(
         @_,
         { type => OBJECT },
         { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => ARRAYREF },
-        { type => ARRAYREF },
+        { type => HASHREF },
+        { type => HASHREF },
+        { type => HASHREF },
     );
+
+    my $definition         = $cache_hash->{definition};
+    my $cache_table_schema = $cache_hash->{schema};
+    my $cache_table_name   = $cache_hash->{name};
+    my $table_columns      = $cache_hash->{cache_table_columns};
+    my $uniques            = $cache_hash->{cache_table_uniques};
+
     $current_handle->do( "SET application_name = 'Fast delete: $cache_table_name'" );
     $aged_handle->do( "SET application_name = 'Lookback: $cache_table_name'" );
+
     my $column_data_type_hash = {};
     my $column_data_types = [];
     my $get_type_q = <<END_SQL;
@@ -1257,7 +1301,7 @@ END_SQL
         foreach my $unique_column( @$unique_column_set )
         {
             next if( defined( $column_data_type_hash->{$unique_column} ) );
-            $get_type_sth->bind_param( 1, $aged_temp_table );
+            $get_type_sth->bind_param( 1, $aged_temp_table->{name} );
             $get_type_sth->bind_param( 2, $unique_column );
             unless( $get_type_sth->execute() )
             {
@@ -1293,7 +1337,7 @@ END_SQL
     my $unique_columns = join( ',', keys %$column_data_type_hash );
     my $AGED_DATA_QUERY = <<END_SQL;
         SELECT $unique_columns
-          FROM $aged_temp_table
+          FROM $aged_temp_table->{name}
 END_SQL
 
     my $aged_sth = $aged_handle->prepare( $AGED_DATA_QUERY );
@@ -1325,26 +1369,15 @@ END_SQL
 
     my $where_filters = [];
     # TODO move count here 
-    my $current_count_q = "SELECT COUNT(*) AS count FROM $current_temp_table";
-    my $current_count_sth = $current_handle->prepare( $current_count_q );
-    if( defined( $current_count_sth ) && $current_count_sth->execute() )
+    if( $current_temp_table->{count} == $aged_sth->rows() )
     {
-        my $count_row = $current_count_sth->fetchrow_hashref();
-        if( $count_row->{count} == $aged_sth->rows() )
-        {
-            # no rows previously existed
-            _log( $LOG_LEVEL_DEBUG, 'Fast delete early exit - no rows previously existed matching this filter or subset rough match' );
-            $aged_sth->finish();
-            $insert_sth->finish();
-            $current_count_sth->finish();
-            $aged_handle->do( 'ROLLBACK' );
-            $aged_handle->disconnect();
-            return 1;
-        }
-    }
-    else
-    {
-        _log( $LOG_LEVEL_WARNING, 'Failed to cross reference current and aged data set' );
+        # no rows previously existed
+        _log( $LOG_LEVEL_DEBUG, 'Fast delete early exit - no rows previously existed matching this filter or subset rough match' );
+        $aged_sth->finish();
+        $insert_sth->finish();
+        $aged_handle->do( 'ROLLBACK' );
+        $aged_handle->disconnect();
+        return 1;
     }
 
     unless( $aged_sth->rows() > 0 )
@@ -1452,26 +1485,25 @@ END_SQL
     return 1;
 }
 
-sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
+sub generate_delete_statement($$) :Export( :MANDATORY )
 {
     my(
         $handle,
-        $definition,
-        $cache_table_schema,
-        $cache_table_name,
-        $table_columns,
-        $uniques
+        $cache_hash,
       ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => ARRAYREF },
-        { type => ARRAYREF },
+        { type => HASHREF },
     );
 
+    my $definition         = $cache_hash->{definition};
+    my $cache_table_schema = $cache_hash->{schema};
+    my $cache_table_name   = $cache_hash->{name};
+    my $table_columns      = $cache_hash->{cache_table_columns};
+    my $uniques            = $cache_hash->{cache_table_uniques};
+
     $handle->do( "SET application_name = 'delete: $cache_table_name'" );
+
     my $join_clauses  = [];
     my $where_clauses = [];
 
@@ -1510,9 +1542,8 @@ sub generate_delete_statement($$$$$$) :Export( :MANDATORY )
           USING tt_rows_to_delete vw
           WHERE $join_predicate
 END_SQL
-    _log( $LOG_LEVEL_DEBUG, "DELETE BEGIN" );
+
     my $sth = &try_query( $handle, $DELETE_Q, [] );
-    _log( $LOG_LEVEL_DEBUG, "Delete done" );
     return 0 unless( $sth );
     $sth->finish();
     return 1;
