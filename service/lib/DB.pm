@@ -954,7 +954,8 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         { type => SCALAR },
         { type => HASHREF },
     );
-
+    
+    print "$query\n";
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
     my $sth             = try_query( $handle, $tt_query );
@@ -1097,12 +1098,12 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
     {
         my $join_clause  = join(
             ' AND ',
-            map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns
+            map { "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ) )" } @$unique_columns
         );
 
         my $where_clause = join(
             ' AND ',
-            map { "ct.$_ IS NOT DISTINCT FROM tt.$_" } @$unique_columns
+            map { "( ( ct.$_ IS NULL AND tt.$_ IS NULL ) OR ( ct.$_ = tt.$_ ) )" } @$unique_columns
         );
 
         push( @$join_clauses,  $join_clause  );
@@ -1175,7 +1176,7 @@ END_SQL
          WHERE $where_clause
            AND $diff_distinct
 END_SQL
-
+        print "$UPDATE_Q\n";
         my $sth = &try_query( $handle, $UPDATE_Q, [] );
 
         return 0 unless( $sth );
@@ -1213,7 +1214,7 @@ sub generate_insert_statement($$$) :Export( :MANDATORY )
     {
         my $join_clause  = join(
             ' AND ',
-            map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns
+            map { "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ) )" } @$unique_columns
         );
         my $where_clause = join(
             ' AND ',
@@ -1411,7 +1412,7 @@ END_SQL
                     $value = 'NULL::' . $column_data_type_hash->{$unique};
                 }
 
-                push( @$where_elems, "vw.$unique IS NOT DISTINCT FROM $value" );
+                push( @$where_elems, "( vw.$unique IS NULL AND  $value IS NULL ) OR ( vw.$unique = $value )" );
             }
 
             push( @$where_filter_elems, ' ( ( ' . join( ' ) AND ( ', @$where_elems ) . ' ) ) ' );
@@ -1446,7 +1447,7 @@ END_SQL
     {
         my $join_clause = join(
             ' AND ',
-            map { "vw.$_ IS NOT DISTINCT FROM tt.$_" } @$unique_columns
+            map { "( vw.$_ IS NULL AND tt.$_ IS NULL ) OR ( vw.$_ = tt.$_ )" } @$unique_columns
         );
 
         my $where_clause = join(
@@ -1511,7 +1512,7 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     {
         my $join_clause  = join(
             ' AND ',
-            map { "tt.$_ IS NOT DISTINCT FROM vw.$_" } @$unique_columns
+            map { "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ) )" } @$unique_columns
         );
         my $where_clause = join(
             ' AND ',
