@@ -8,7 +8,7 @@ all: pg_ctblmgr_decoder pg_ctblmgr_service
 
 pg_ctblmgr_service:
 	$(MAKE) -C service
-	cp service/pg_ctblmgr ./
+	cp service/pg_ctblmgr.pl ./
 
 pg_ctblmgr_decoder:
 	$(MAKE) -C server
@@ -27,4 +27,4 @@ check: make_test
 clean:
 	$(MAKE) -C service clean
 	$(MAKE) -C server clean
-	rm -f pg_ctblmgr
+	rm -f pg_ctblmgr.pl
