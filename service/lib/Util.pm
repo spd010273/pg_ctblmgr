@@ -25,6 +25,7 @@ Readonly::Scalar our $WORKER_STATUS_FAST_DELETE    :Export( :MANDATORY ) => 7;
 Readonly::Scalar our $WORKER_STATUS_UPDATE         :Export( :MANDATORY ) => 8;
 Readonly::Scalar our $WORKER_STATUS_TEMP_TABLE     :Export( :MANDATORY ) => 9;
 Readonly::Scalar our $WORKER_STATUS_QUERY_PARSE    :Export( :MANDATORY ) => 10;
+Readonly::Scalar our $WORKER_STATUS_REPLACE        :Export( :MANDATORY ) => 11;
 Readonly::Scalar our $EXTENSION_NAME               :Export( :MANDATORY ) => 'pg_ctblmgr';
 Readonly::Scalar our $SCHEMA_NAME                  :Export( :MANDATORY ) => 'pgctblmgr';
 Readonly::Scalar our $SQL_STATE_ADMIN_TERM         :Export( :MANDATORY ) => '57P01';

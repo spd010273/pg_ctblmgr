@@ -58,7 +58,6 @@ our $|=1;
 
 ## GLOBAL VARIABLES
 $PARENT_PID  = $PROCESS_ID;
-$SLOT_NAME   = '__pg_ctblmgr';
 $LOG_FILE    = '';
 $LOG_FH      = undef;
 $DAEMONIZE   = 0;
@@ -66,7 +65,15 @@ $DAEMONIZE   = 0;
 sub _terminate_sigint()
 {
     # Wrapper to mask errors
-    print "Caught sigint $PROCESS_ID\n";
+    if( $PROCESS_ID == $PARENT_PID )
+    {
+        _log( $LOG_LEVEL_INFO, 'Parent process shutting down' );
+    }
+    else
+    {
+        _log( $LOG_LEVEL_INFO, 'Worker process shutting down' );
+    }
+
     _terminate();
 }
 
@@ -81,6 +88,21 @@ sub _terminate(;$$$)
 
     if( $PROCESS_ID == $PARENT_PID )
     {
+        my $handle = DBI->connect(
+            $CONNECTION_MAP->{connection_string},
+            $CONNECTION_MAP->{user_name},
+            undef
+        );
+
+        if( $handle )
+        {
+            &drop_replication_slot( $handle );
+            _log( $LOG_LEVEL_INFO, "Replication slot '$SLOT_NAME' has been dropped" );
+        }
+        else
+        {
+            _log( $LOG_LEVEL_ERROR, "Failed to connect to database - you will need to drop '$SLOT_NAME' manually" );
+        }
         #this is crucial to prevent running out of shm after crashes / terminations
         &shm_cleanup();
     }
@@ -1059,13 +1081,25 @@ sub worker_entrypoint($$$$)
 
         while( 1 )
         {
-            # Check for commanded exit
-            my $exit = 0;
+            # Check for commanded exit or replacement
+            my $exit    = 0;
+            my $replace = 0;
+
             tied( $WORKER_STATUSES )->shlock( LOCK_SH );
+
             if( defined( $WORKER_STATUSES ) && defined( $WORKER_STATUSES->{$worker_pid} ) )
             {
-                $exit = $WORKER_STATUSES->{$worker_pid}->{shutdown} if( defined( $WORKER_STATUSES->{$worker_pid}->{shutdown} ) );
+                if( defined( $WORKER_STATUSES->{$worker_pid}->{shutdown} ) )
+                {
+                    $exit    = $WORKER_STATUSES->{$worker_pid}->{shutdown};
+                }
+
+                if( defined( $WORKER_STATUSES->{$worker_pid}->{replace} ) )
+                {
+                    $replace = $WORKER_STATUSES->{$worker_pid}->{replace};
+                }
             }
+
             tied( $WORKER_STATUSES )->shlock( LOCK_EX );
             $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
             tied( $WORKER_STATUSES )->shunlock();
@@ -1083,6 +1117,20 @@ sub worker_entrypoint($$$$)
                     _log( $LOG_LEVEL_ERROR, "Failed to drop cache table $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
                 }
                 exit( 0 );
+            }
+
+            if( defined $replace && $replace == 1 )
+            {
+                _log( $LOG_LEVEL_DEBUG, "Commanded to replace $CACHE_HASH->{name}" );
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
+                tied( $WORKER_STATUSES )->shunlock();
+
+                &replace_cache_table( $handle, $pk_maintenance_object );
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
+                $WORKER_STATUSES->{$worker_pid}->{replace} = 0;
+                tied( $WORKER_STATUSES )->shunlock();
             }
 
             # check to see if definition has changed
@@ -1768,11 +1816,12 @@ foreach my $worker_entry( @$worker_data )
         }
         tied( $WORKER_FILTER_TABLES )->shunlock();
 
-        $WORKER_STATUSES->{$child_pid}->{status}   = $WORKER_STATUS_STARTUP;
-        $WORKER_STATUSES->{$child_pid}->{shutdown} = 0;
-        $WORKER_STATUSES->{$child_pid}->{last_lsn} = undef;
+        $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
+        $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
+        $WORKER_STATUSES->{$child_pid}->{replace}            = 1;
+        $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
         $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
-        $WORKER_STATUSES->{$child_pid}->{name} = $ct_name;
+        $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
         _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
     }
     else

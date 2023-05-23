@@ -15,6 +15,8 @@ Each 'cache table' is implemented as a real-life table, rather than patching in 
 
 An asynchronous approach was taken because this allows the extension to be decoupled from the database primar(y|ies), moving processing overhead out-of-band. It also allows for the extension to function on vanilla, out-of-the-box PostgreSQL installations without the need to recompilation or patching. The caveat is that while the originating transaction is not delayed by maintenance overhead of the 'cache tables', there will be some measurable lag until the 'cache table' reflects the changes made to the base tables in said transaction. This is a function of the number of tuples modified in a given transaction and the complexity of the 'cache table's' definition.
 
+pg_ctblmgr uses logical replication, along with replication identiies to determine which keys were modified following an arbitrary DML statement. pg_ctblmgr then uses query parsing hooks to determine how to apply the key to the cache table definition as a WHERE clause element. This filtered subset of data tells the extension how to apply the changes to the cache table representation of the data.
+
 # Getting Started
 
 ## Prerequisites:
@@ -23,6 +25,7 @@ This extension requires the following:
 
 * PostgreSQL 9.4 or better
 * git, gcc, make, and PostgreSQL development libraries
+* perl along with DBD::Pg, Data::Search, JSON::XS, POSIX, Readonly, Carp, English, Params::Validate, DBI, IO::Select, IO::Handle, Getopt::Std, Time::HiRes, Cwd, IPC::Shareable, Data::Dumper, FindBin, Perl6::Export::Attrs, IO::Interactive.
 
 ## Installing
 

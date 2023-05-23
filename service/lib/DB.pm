@@ -29,11 +29,19 @@ Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
            );
 END_SQL
 
+Readonly::Scalar my $GET_SLOT_NAME => <<"END_SQL";
+    SELECT ( current_database()::VARCHAR || '__' || '$EXTENSION_NAME' )::VARCHAR AS slot_name
+END_SQL
+
 Readonly::Scalar my $CHECK_REPLICATION_SLOT => <<'END_SQL';
     SELECT plugin,
            slot_type
       FROM pg_catalog.pg_replication_slots
      WHERE slot_name = ?
+END_SQL
+
+Readonly::Scalar my $DROP_REPLICATION_SLOT => <<'END_SQL';
+    SELECT pg_drop_replication_slot( ? )
 END_SQL
 
 Readonly::Scalar my $CHECK_EXTENSION_RUNNING_QUERY => <<"END_SQL";
@@ -237,6 +245,24 @@ INNER JOIN ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
      WHERE mo.maintenance_object = ?
 END_SQL
 
+sub get_slot_name($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $slot_name_sth = &try_query( $handle, $GET_SLOT_NAME );
+
+    return undef unless( $slot_name_sth );
+    my $slot_name_row = $slot_name_sth->fetchrow_hashref();
+
+    my $slot_name = $slot_name_row->{slot_name};
+
+    $slot_name_sth->finish();
+    return $slot_name;
+}
+
 sub get_ct_definition($$$) :Export( :MANDATORY )
 {
     my( $handle, $pk_maintenance_object, $cache_hash ) = validate_pos(
@@ -282,7 +308,27 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
     return 0;
 }
 
-sub replace_cache_table($$)
+sub drop_replication_slot($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $drop_sth = $handle->prepare( $DROP_REPLICATION_SLOT );
+
+    return 0 unless( $drop_sth );
+
+    $drop_sth->bind_param( 1, $SLOT_NAME );
+
+    return 0 unless( $drop_sth->execute() );
+
+    $drop_sth->finish();
+
+    return 1;
+}
+
+sub replace_cache_table($$) :Export( :MANDATORY )
 {
     my( $handle, $pk_maintenance_object ) = validate_pos(
         @_,
@@ -297,6 +343,8 @@ sub replace_cache_table($$)
         _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
         return 0;
     }
+    
+    $handle->do( "SET application_name = 'replace $ct_hash->{name}'" );
 
     my $name          = $ct_hash->{name};
     $ct_hash->{name} .= '_temp';
@@ -319,7 +367,7 @@ sub replace_cache_table($$)
 
     $sth = &try_query(
         $handle,
-        "ALTER TABLE $schema.$temp_name RENAME TO $schema.$name"
+        "ALTER TABLE $schema.$temp_name RENAME TO $name"
     );
 
     unless( $sth )
@@ -526,6 +574,7 @@ sub create_replication_slot($) :Export( :MANDATORY )
         { type => OBJECT },
     );
 
+    $SLOT_NAME = get_slot_name( $handle );
     my $check_sth = &try_query(
         $handle,
         $CHECK_REPLICATION_SLOT,
@@ -547,8 +596,13 @@ sub create_replication_slot($) :Export( :MANDATORY )
             $check_sth->finish();
             return 0;
         }
-
+        _log( $LOG_LEVEL_DEBUG, "slot $SLOT_NAME created" );
         $create_sth->finish();
+    }
+    else
+    {
+        # slot exists
+        _log( $LOG_LEVEL_DEBUG, "Slot $SLOT_NAME exists!" );
     }
 
     $check_sth->finish();
