@@ -13,21 +13,84 @@ use Getopt::Std;
 use IPC::Shareable qw( :lock );
 use Data::Dumper;
 use Text::Table;
+use DBI;
 
 use FindBin;
 use lib "$FindBin::Bin/../service/lib";
 
 use Util;
-
+Readonly my $TCP_KEEPALIVE          => 60;
+Readonly my $TCP_KEEPALIVE_INTERVAL => 5;
+Readonly my $TCP_KEEPALIVE_COUNT    => 200;
+Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 Readonly::Scalar my $EXTENSION_NAME => 'pg_ctblmgr';
-Readonly::Scalar my $SCHEMA_NAME    => 'pg_ctblmgr';
+Readonly::Scalar my $SCHEMA_NAME    => 'pgctblmgr';
 Readonly::Scalar my $USAGE          => <<USAGE;
 USAGE:
- $0 [-C command -v cache_table]
+ $0 [-C command -v cache_table] [ -d database -h host -U user -p port ]
     -C command: issue a command to pg_ctblmgr. Available commands are:
-        rebuild
+        rebuild - Rebuild a cache table
+        check - Check the validity of a cache table
+                The check command requires database connection parameters
     -v cache_table: The cache table the command applies to
 USAGE
+
+Readonly::Scalar my $CACHE_TABLE_COLUMNS => <<'END_SQL';
+    SELECT a.attname::VARCHAR AS column_name
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+     WHERE c.relname::VARCHAR = ?
+  ORDER BY a.attnum ASC
+END_SQL
+
+Readonly::Scalar my $CACHE_TABLE_UNIQUE => <<'END_SQL';
+    SELECT array_agg( a.attname::VARCHAR ) AS unique_keys
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+INNER JOIN pg_catalog.pg_constraint co
+        ON co.contype = 'u'
+       AND co.conrelid = c.oid
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum = ANY( co.conkey )
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+     WHERE c.relname::VARCHAR = ?
+  GROUP BY co.oid
+     UNION
+    SELECT array_agg( a.attname::VARCHAR ) AS unique_keys
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+INNER JOIN pg_catalog.pg_index i
+        ON i.indisunique IS TRUE
+       AND i.indislive IS TRUE
+       AND i.indisready IS TRUE
+       AND i.indrelid = c.oid
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+       AND a.attnum = ANY( i.indkey )
+INNER JOIN pg_catalog.pg_class ci
+        ON ci.oid = i.indexrelid
+ LEFT JOIN pg_catalog.pg_constraint co
+        ON co.contype = 'u'
+       AND co.conrelid = c.oid
+       AND co.conindid = ci.oid
+     WHERE c.relname::VARCHAR = ?
+       AND co.oid IS NULL
+  GROUP BY ci.oid
+END_SQL
 
 sub print_usage(;$)
 {
@@ -72,6 +135,31 @@ sub parse_worker_status($)
     return $status;
 }
 
+sub parse_cache_table($$$)
+{
+    my( $cache_table, $schema, $name ) = validate_pos(
+        @_,
+        { type => SCALAR },
+        { type => SCALARREF },
+        { type => SCALARREF },
+    );
+
+    my @relation = split( /\./, $cache_table );
+
+    if( scalar( @relation ) > 1 )
+    {
+        $$schema = $relation[0];
+        $$name   = $relation[1];
+    }
+    else
+    {
+        $$name   = $relation[0];
+        $$schema = undef;
+    }
+
+    return;
+}
+
 sub command_rebuild($)
 {
     my( $cache_table ) = validate_pos(
@@ -82,7 +170,7 @@ sub command_rebuild($)
     my $WORKER_STATUSES = {};
 
     eval { tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } ); };
-    
+
     if( $OS_ERROR )
     {
         carp( "Failed to attach to shared memory - is $EXTENSION_NAME running?\n" );
@@ -119,12 +207,315 @@ sub command_rebuild($)
     return undef;
 }
 
-sub parse_command($$)
+sub get_cache_table_definition($$$$$)
 {
-    my( $command, $cache_table ) = validate_pos(
+    my( $handle, $cache_table, $def, $columns, $uniques ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALARREF },
+        { type => ARRAYREF },
+        { type => ARRAYREF },
+    );
+
+    my $name;
+    my $namespace;
+    parse_cache_table( $cache_table, \$namespace, \$name );
+
+    my $get_def_query = <<END_SQL;
+    SELECT definition
+      FROM $SCHEMA_NAME.tb_maintenance_object
+     WHERE ( ?::VARCHAR IS NULL OR ?::VARCHAR = namespace::VARCHAR )
+       AND ?::VARCHAR = name::VARCHAR
+END_SQL
+
+    my $sth = $handle->prepare( $get_def_query );
+
+    return undef unless( $sth );
+
+    $sth->bind_param( 1, $namespace );
+    $sth->bind_param( 2, $namespace );
+    $sth->bind_param( 3, $name );
+
+    return undef unless( $sth->execute() );
+
+    if( $sth->rows() == 0 )
+    {
+        $sth->finish();
+        return undef;
+    }
+
+    my $row = $sth->fetchrow_hashref();
+
+    $sth->finish();
+
+    $$def = $row->{definition};
+    $sth = $handle->prepare( $CACHE_TABLE_COLUMNS );
+	return undef unless( $sth );
+
+	$sth->bind_param( 1, $namespace );
+    $sth->bind_param( 2, $name );
+
+    unless( $sth->execute() )
+    {
+        $sth->finish();
+        return undef;
+    }
+
+    while( $row = $sth->fetchrow_hashref() )
+    {
+        push( @$columns, $row->{column_name} );
+    }
+
+    $sth->finish();
+
+    $sth = $handle->prepare( $CACHE_TABLE_UNIQUE );
+
+    return undef unless( $sth );
+
+    $sth->bind_param( 1, $namespace );
+    $sth->bind_param( 2, $name );
+    $sth->bind_param( 3, $namespace );
+    $sth->bind_param( 4, $name );
+
+    unless( $sth->execute() )
+    {
+        $sth->finish();
+        return undef;
+    }
+
+    while( $row = $sth->fetchrow_hashref() )
+    {
+        push( @$uniques, $row->{unique_keys} );
+    }
+
+    $sth->finish();
+
+    return 1;
+}
+
+sub command_check($$)
+{
+    my( $cache_table, $connection_map ) = validate_pos(
+        @_,
+        { type => SCALAR },
+        { type => HASHREF },
+    );
+
+    my $handle = DBI->connect( $connection_map->{connection_string}, $connection_map->{username}, undef );
+
+    unless( $handle )
+    {
+        carp( "Failed to connect to database\n" );
+        return undef;
+    }
+
+    my $def;
+    my $columns = [];
+    my $uniques = [];
+
+    unless( get_cache_table_definition( $handle, $cache_table, \$def, $columns, $uniques ) )
+    {
+        carp( "Cache table '$cache_table' appears to no exist\n" );
+        return undef;
+    }
+
+    if( !defined( $def ) )
+    {
+        carp( "Received empty definition for cache table '$cache_table'\n" );
+        return undef;
+    }
+
+    $handle->do( 'BEGIN' );
+    $handle->do( "SET application_name = '$EXTENSION_NAME validate $cache_table'" );
+    $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+    $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+    $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+    $handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+
+    unless( $handle->do( "CREATE TEMP TABLE tt_ct AS( SELECT * FROM $cache_table )" ) )
+    {
+        carp( "Failed to store contents of cache table '$cache_table'\n" );
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
+
+    unless( $handle->do( "CREATE TEMP TABLE tt_current AS( $def )" ) )
+    {
+        carp( "Failed to store contents of cache table definition for '$cache_table'\n" );
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
+    my $index = 0;
+    foreach my $unique_columns( @$uniques )
+    {
+        my $cols = join( ',', @$unique_columns );
+        $handle->do( "CREATE UNIQUE INDEX ix_foo${index} ON tt_ct( $cols )" );
+        $index++;
+        $handle->do( "CREATE UNIQUE INDEX ix_foo${index} on tt_current( $cols )" );
+        $index++;
+    }
+
+    my $create_ind_ct = 'CREATE INDEX ix_allcols_ct ON tt_ct(';
+    my $create_ind_cur = 'CREATE INDEX ix_allcols_Cur ON tt_current(';
+    my $col_type_q = <<"END_SQL";
+    SELECT t.typname
+      FROM pg_class c
+      JOIN pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+      JOIN pg_type t
+        ON t.oid = a.atttypid
+      JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR ILIKE 'pg_temp%'
+     WHERE c.relname::VARCHAR = ?
+       AND a.attname::VARCHAR = ?
+END_SQL
+
+    my $col_type_sth = $handle->prepare( $col_type_q );
+    return undef unless( $col_type_sth );
+    my $cast_cols = [];
+
+    foreach my $column( @$columns )
+    {
+        $col_type_sth->bind_param( 1, 'tt_current' );
+        $col_type_sth->bind_param( 2, $column );
+        return undef unless( $col_type_sth->execute() );
+   
+        my $type_row = $col_type_sth->fetchrow_hashref(); 
+        my $type = $type_row->{typname};
+
+        if( $type eq 'json' || $type eq 'jsonb' )
+        {
+            push( @$cast_cols, "${column}::TEXT" );
+        }
+        else
+        {
+            push( @$cast_cols, $column );
+        }
+    }
+   
+    $create_ind_ct .= join( ',', @$cast_cols ) . ')';
+    $create_ind_cur .= join( ',', @$cast_cols ) . ')';
+    $handle->do( $create_ind_ct );
+    $handle->do( $create_ind_cur );
+    my $join_predicate = '( ( '
+                       . join(
+                             ' ) AND ( ',
+                             map { "( ttes.$_ IS NULL AND ttcs.$_ IS NULL ) OR ( ttes.$_ = ttcs.$_ )" } @$cast_cols
+                         )
+                       . ') ) ';
+    my $cs_uniques = [];
+    my $es_uniques = [];
+
+    foreach my $unique_columns( @$uniques )
+    {
+        push(
+            @$cs_uniques,
+            '( '
+          . join(
+                ' ) AND ( ',
+                map { "ttcs.$_ IS NULL" } @$unique_columns
+            )
+          . ' )'
+        );
+
+        push(
+            @$es_uniques,
+            '( '
+          . join(
+                ' ) AND ( ',
+                map { "ttes.$_ IS NULL" } @$unique_columns
+            )
+          . ' )'
+        );
+    }
+
+    my $cs_where = '( ' . join( ' ) AND ( ', @$cs_uniques ) . ' )';
+    my $es_where = '( ' . join( ' ) AND ( ', @$es_uniques ) . ' )';
+    my $check_query_left = <<"END_SQL";
+    CREATE TEMP TABLE tt_validation_left AS
+    (
+        SELECT ttcs.*
+          FROM tt_ct ttes
+     LEFT JOIN tt_current ttcs
+            ON $join_predicate
+         WHERE $cs_where
+    );
+END_SQL
+    my $check_query_right = <<"END_SQL";
+    CREATE TEMP TABLE tt_validation_right AS
+    (
+        SELECT ttes.*
+          FROM tt_current ttcs
+     LEFT JOIN tt_ct ttes
+            ON $join_predicate
+         WHERE $es_where
+    )
+END_SQL
+
+    print "Checking table validity, this may take some time.\n";
+    unless( $handle->do( $check_query_left ) )
+    {
+        carp( "Failed to create validation table for '$cache_table'\n" );
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
+
+    unless( $handle->do( $check_query_right ) )
+    {
+        carp( "Failed to create validation table for '$cache_table'\n" );
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
+
+    my $count_sth = $handle->prepare( 'SELECT COUNT(*) AS count FROM tt_validation_left' );
+
+    return undef unless( $count_sth );
+
+    unless( $count_sth->execute() )
+    {
+        $count_sth->finish();
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
+
+    my $count_row = $count_sth->fetchrow_hashref();
+
+    my $count_left = $count_row->{count};
+    $count_sth->finish();
+    $count_sth = $handle->prepare( 'SELECT COUNT(*) AS COUNT FROM tt_validation_right' );
+    return undef unless( $count_sth );
+
+    unless( $count_sth->execute() )
+    {
+        $count_sth->finish();
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
+
+    $count_row = $count_sth->fetchrow_hashref();
+
+    my $count_right = $count_row->{count};
+    $count_sth->finish();
+    $handle->do( 'ROLLBACK' );
+    if( $count_left > 0 || $count_right > 0 )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+sub parse_command($$;$)
+{
+    my( $command, $cache_table, $connection_map ) = validate_pos(
         @_,
         { type => SCALAR },
         { type => SCALAR },
+        { type => HASHREF | UNDEF, optional => 1 },
     );
 
     if( $command eq 'rebuild' )
@@ -134,6 +525,27 @@ sub parse_command($$)
         {
             print "Successfully commanded refresh of $cache_table to $pid\n";
             return;
+        }
+    }
+    elsif( $command eq 'check' )
+    {
+        if( !defined( $connection_map ) || scalar( keys %$connection_map ) == 0 )
+        {
+            print_usage( 'Need database connection parameters for this command' );
+        }
+
+        my $result = command_check( $cache_table, $connection_map );
+
+        if( defined( $result ) )
+        {
+            if( $result )
+            {
+                print "Table '$cache_table' passed validation\n";
+            }
+            else
+            {
+                print "Table '$cache_table' FAILED validation\n";
+            }
         }
     }
     else
@@ -343,12 +755,16 @@ sub print_worker_table()
 }
 
 ## MAIN PROGRAM
-our( $opt_C, $opt_v, $opt_d, $opt_U, $opt_p, $opt_p );
+our( $opt_C, $opt_v, $opt_d, $opt_U, $opt_p, $opt_h );
 
 print_usage( 'Invalid arguments' ) unless( getopts( 'C:v:d:U:h:p:' ) );
 
-my $command = $opt_C;
-my $ct      = $opt_v;
+my $command  = $opt_C;
+my $ct       = $opt_v;
+my $dbname   = $opt_d;
+my $username = $opt_U;
+my $port     = $opt_p;
+my $hostname = $opt_h;
 
 if(
       ( defined( $command ) && !defined( $ct ) )
@@ -356,6 +772,17 @@ if(
   )
 {
     print_usage( 'Must specify -v and -C together' );
+}
+
+my $connection_map = {};
+if( defined( $dbname ) )
+{
+    $port = 5432 unless( defined( $port ) );
+    print_usage( 'Invalid port' ) unless( $port =~ m/^\d+$/ && $port <= 65535 );
+    print_usage( 'Invalid username' ) unless( defined( $username ) && length( $username ) > 0 );
+    print_usage( 'Invalid hostname' ) unless( defined( $hostname ) && length( $hostname ) > 0 );
+    $connection_map->{connection_string} = "dbi:Pg:dbname=$dbname;host=$hostname;port=$port";
+    $connection_map->{username} = $username;
 }
 
 if( !defined( $command ) && !defined( $ct ) )
@@ -366,5 +793,5 @@ if( !defined( $command ) && !defined( $ct ) )
 
 if( defined( $command ) && defined( $ct ) )
 {
-    parse_command( $command, $ct );
+    parse_command( $command, $ct, $connection_map );
 }

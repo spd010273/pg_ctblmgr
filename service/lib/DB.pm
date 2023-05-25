@@ -953,6 +953,11 @@ sub create_cache_table($$)
         return;
     }
 
+    unless( &create_cache_table_unique( $handle, $ct_hash ) )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to create cache table unique index" );
+    }
+
     $sth->finish();
     $handle->do( "ANALYZE $schema.$name" );
     _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
@@ -1182,7 +1187,7 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
     {
         _log( $LOG_LEVEL_DEBUG, "Performing large update optimization ($temp_table->{count} possible rows)" );
         $handle->do( 'BEGIN' );
-        $handle->do( "DROP INDEX ix_$cache_hash->{name}" );
+        $handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
         my $delete_where = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
         my $DELETE_Q = <<END_SQL;
         DELETE FROM $cache_table_schema.$cache_table_name ct
