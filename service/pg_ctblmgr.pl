@@ -1079,6 +1079,18 @@ sub worker_entrypoint($$$$)
             $CACHE_HASH
         );
 
+        # Check state of the cache table prior to entry - we may have started after a partial table build!
+        my $desired_count = get_def_count( $handle, $CACHE_HASH->{definition} );
+        my $current_count = get_table_count( $handle, $CACHE_HASH->{schema} . '.' . $CACHE_HASH->{name} );
+
+        if( $current_count != $desired_count )
+        {
+            _log( $LOG_LEVEL_INFO, "Out of date cache table detected on worker startup, initiating rebuild." );
+            tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+            $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
+            tied( $WORKER_STATUSES )->shunlock();
+        }
+
         while( 1 )
         {
             # Check for commanded exit or replacement
@@ -1818,7 +1830,7 @@ foreach my $worker_entry( @$worker_data )
 
         $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
         $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
-        $WORKER_STATUSES->{$child_pid}->{replace}            = 1;
+        $WORKER_STATUSES->{$child_pid}->{replace}            = 0;
         $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
         $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
         $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;

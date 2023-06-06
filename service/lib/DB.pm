@@ -1075,6 +1075,54 @@ sub test_query($$) :Export( :MANDATORY )
     return 1;
 }
 
+sub get_table_count($$) :Export( :MANDATORY )
+{
+    my( $handle, $table_name ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $query = "SELECT COUNT(*) as count FROM $table_name";
+
+    my $sth = &try_query( $handle, $query );
+
+    return -1 unless( $sth );
+
+    my $row = $sth->fetchrow_hashref();
+
+    my $count = $row->{count};
+    $sth->finish();
+    return $count;
+}
+
+sub get_def_count($$) :Export( :MANDATORY )
+{
+    my( $handle, $definition ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $def_q = <<END_SQL;
+    WITH tt_def AS
+    (
+        $definition
+    )
+        SELECT COUNT(*) AS count FROM tt_def
+END_SQL
+
+    my $sth = &try_query( $handle, $def_q );
+
+    return -1 unless( $sth );
+
+    my $row = $sth->fetchrow_hashref();
+
+    $sth->finish();
+    my $count = $row->{count};
+    return $count;
+}
+
 sub generate_temp_table($$$) :Export( :MANDATORY )
 {
     my( $handle, $query, $ct_hash ) = validate_pos(
@@ -1093,14 +1141,12 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
     {
         $sth->finish();
 
-        $sth = try_query( $handle, "SELECT COUNT(*) AS count FROM $temp_table_name" );
-
-        return undef unless( $sth );
-        my $count_row   = $sth->fetchrow_hashref();
-        my $tt_count    = $count_row->{count};
+        my $tt_count = get_table_count( $handle, $temp_table_name );
+        return undef if( $tt_count < 0 );
+        
         my $return_data = { count => $tt_count, name => $temp_table_name, index => "ix_$temp_table_name" };
         my $uniques     = join( ',', @{$ct_hash->{indexes}} );
-        $sth->finish();
+        
         $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
 
         if( $sth )
