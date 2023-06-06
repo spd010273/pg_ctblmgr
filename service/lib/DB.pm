@@ -19,6 +19,8 @@ use Util;
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 
+Readonly::Scalar our $BATCHED_CREATE     :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $BATCH_SIZE         :Export( :MANDATORY ) => 1000000;
 Readonly::Scalar our $BULK_ACTION_CUTOFF :Export( :MANDATORY ) => 100000;
 Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
@@ -223,11 +225,43 @@ INNER JOIN pg_catalog.pg_namespace n
        AND c.relname::VARCHAR = ?
 END_SQL
 
-Readonly::Scalar my $CREATE_CACHE_TABLE => <<END_SQL;
-CREATE TABLE IF NOT EXISTS __TABLE__ AS
+my $CREATE_CACHE_TABLE;
+if( $BATCHED_CREATE )
+{
+    $CREATE_CACHE_TABLE = <<END_SQL;
+    CREATE TABLE IF NOT EXISTS __TABLE__ AS
+    (
+        WITH tt_foo AS
+        (
+            __DEFINITION__
+        )
+            SELECT *
+              FROM tt_foo
+             LIMIT 0
+    );
+END_SQL
+}
+else
+{
+    $CREATE_CACHE_TABLE = <<END_SQL;
+    CREATE TABLE IF NOT EXISTS __TABLE__ AS
+    (
+        __DEFINITION__
+    );
+END_SQL
+}
+
+Readonly::Scalar my $CREATE_POPULATE => <<END_SQL;
+WITH tt_def AS
 (
     __DEFINITION__
-);
+)
+    INSERT INTO __TABLE__
+         SELECT *
+           FROM tt_def
+       ORDER BY __ORDERBY__
+          LIMIT __LIMIT__
+         OFFSET __OFFSET__
 END_SQL
 
 Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
@@ -343,7 +377,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
         return 0;
     }
-    
+
     $handle->do( "SET application_name = 'replace $ct_hash->{name}'" );
 
     my $name          = $ct_hash->{name};
@@ -353,6 +387,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     my $definition    = $ct_hash->{definition};
 
     $handle->do( 'BEGIN' );
+    $handle->do( "DROP TABLE IF EXISTS $temp_name" );
     &create_cache_table( $handle, $ct_hash );
     my $sth = &try_query( $handle, "DROP TABLE $schema.$name" );
 
@@ -385,6 +420,10 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         _log( $LOG_LEVEL_FATAL, "Failed to analyze replacement cache table" );
     }
 
+    unless( $handle->do( "ALTER INDEX ix_$temp_name RENAME TO ix_$name" ) )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to rename index for $name" );
+    }
     $handle->do( 'COMMIT' );
 
     return;
@@ -953,6 +992,37 @@ sub create_cache_table($$)
         return;
     }
 
+    if( $BATCHED_CREATE )
+    {
+        _log( $LOG_LEVEL_DEBUG, "Performing batch population of $name" );
+
+        my $done            = 0;
+        my $offset          = 0;
+        my $populate_q      = $CREATE_POPULATE;
+        my $initial_orderby = join( ',', @{$ct_hash->{indexes}} );
+
+        $populate_q =~ s/__TABLE__/${schema}.${name}/;
+        $populate_q =~ s/__DEFINITION__/$definition/;
+        $populate_q =~ s/__ORDERBY__/$initial_orderby/;
+        $populate_q =~ s/__LIMIT__/$BATCH_SIZE/;
+
+        while( !$done )
+        {
+            my $populate_iter_q = $populate_q;
+            $populate_iter_q =~ s/__OFFSET__/$offset/;
+            my $check_sth = &try_query( $handle, $populate_iter_q );
+
+            unless( $check_sth )
+            {
+                _log( $LOG_LEVEL_ERROR, "Batched insert to ${name} failed!" );
+                return;
+            }
+
+            $done = 1 if( $check_sth->rows() == 0 );
+            $offset += $BATCH_SIZE;
+        }
+    }
+
     unless( &create_cache_table_unique( $handle, $ct_hash ) )
     {
         _log( $LOG_LEVEL_ERROR, "Failed to create cache table unique index" );
@@ -973,7 +1043,7 @@ sub create_cache_table_unique($$) :Export( :MANDATORY )
     );
 
     my $index_columns = join( ',', @{$ct_hash->{indexes}} );
-    my $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$ct_hash->{name} ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )" );
+    my $sth = try_query( $handle, "CREATE UNIQUE INDEX IF NOT EXISTS ix_$ct_hash->{name} ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )" );
 
     return 0 unless( $sth );
 
@@ -1013,7 +1083,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         { type => SCALAR },
         { type => HASHREF },
     );
-    
+
     print "$query\n";
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
@@ -1027,7 +1097,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
 
         return undef unless( $sth );
         my $count_row   = $sth->fetchrow_hashref();
-        my $tt_count    = $count_row->{count}; 
+        my $tt_count    = $count_row->{count};
         my $return_data = { count => $tt_count, name => $temp_table_name, index => "ix_$temp_table_name" };
         my $uniques     = join( ',', @{$ct_hash->{indexes}} );
         $sth->finish();
@@ -1200,7 +1270,7 @@ END_SQL
             $handle->do( 'ROLLBACK' );
             return 0;
         }
-        
+
         my $INSERT_Q = <<END_SQL;
         INSERT INTO $cache_table_schema.$cache_table_name ct
              SELECT *
@@ -1428,7 +1498,7 @@ END_SQL
     }
 
     my $where_filters = [];
-    # TODO move count here 
+    # TODO move count here
     if( $current_temp_table->{count} == $aged_sth->rows() )
     {
         # no rows previously existed
