@@ -35,14 +35,18 @@ use QueryParser;
 #   prevent bad queries from executing.
 # - This requires, like matviews, that a unique expression exists on the table,
 #   though this can support multiple unique indicies.
-# - Due to IPC::Shareable limitations / the way perl handles data structures under the hood,
-#   the shared structures, while cumbersome, prevent memory leaks by, for instance, by
-#   eschewing delete() calls and overwriting data in-place
-# - Because of the above, and some weirdness surrounding refs - we need to use cumbersome methods
-#   to manipulate arrayrefs. this involves some convoluted code around push/pop/shift/unshift
-# NOTE: IPC::Shareable keys seeem to be extremely short (4-8 chars) and may collide!
+# - Due to IPC::Shareable limitations / the way perl handles data structures
+#   under the hood, the shared structures, while cumbersome, prevent memory
+#   leaks by, for instance, by eschewing delete() calls and overwriting data
+#   in-place.
+# - Because of the above, and some weirdness surrounding refs - we need to use
+#   cumbersome methods to manipulate arrayrefs. this involves some convoluted
+#   code around push/pop/shift/unshift
+# NOTE:
+# IPC::Shareable keys seeem to be extremely short (4 chars) and may collide!
 
-# enables holding past transactions open for a trailing XID chain we can use to lookup historic data
+# enables holding past transactions open for a trailing XID chain we can use
+# to lookup historic data
 Readonly my $ENABLE_FAST_DELETE => 1;
 Readonly my $MAX_XID_LENGTH     => 10;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
@@ -97,13 +101,20 @@ sub _terminate(;$$$)
         if( $handle )
         {
             &drop_replication_slot( $handle );
-            _log( $LOG_LEVEL_INFO, "Replication slot '$SLOT_NAME' has been dropped" );
+            _log(
+                $LOG_LEVEL_INFO,
+                "Replication slot '$SLOT_NAME' has been dropped"
+            );
         }
         else
         {
-            _log( $LOG_LEVEL_ERROR, "Failed to connect to database - you will need to drop '$SLOT_NAME' manually" );
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Failed to connect to database - you will need to drop '
+              . "'$SLOT_NAME' manually"
+            );
         }
-        #this is crucial to prevent running out of shm after crashes / terminations
+        #this is crucial to prevent running out of shm after crashes / term
         &shm_cleanup();
     }
 
@@ -157,7 +168,11 @@ sub shm_cleanup()
 sub get_distinct_filter_tables()
 {
     my $WORKER_FILTER_TABLES;
-    tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
+    tie(
+        $WORKER_FILTER_TABLES,
+        'IPC::Shareable',
+        { key => 'WORKER_FILTER_TABLES' }
+    );
 
     my $DISTINCT_FILTER_TABLES = [];
     tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
@@ -192,11 +207,18 @@ sub populate_worker_data($$)
         {
             my $pk_maintenance_object = $worker_entry->{maintenance_object};
             my $filter_tables         = $worker_entry->{filter_tables};
-            my $ct_hash               = &get_ct_digest( $handle, $pk_maintenance_object );
+            my $ct_hash               = &get_ct_digest(
+                $handle,
+                $pk_maintenance_object
+            );
 
             unless( $ct_hash )
             {
-                _log( $LOG_LEVEL_ERROR, "Failed to get digest for cache table $pk_maintenance_object" );
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    'Failed to get digest for cache table '
+                  . "$pk_maintenance_object"
+                );
                 next;
             }
 
@@ -226,33 +248,34 @@ sub check_for_new_cache_tables($$$)
         old    => {},
     };
 
-    foreach my $pk_maintenance_object( keys %$new_workers )
+    foreach my $pk_mo( keys %$new_workers )
     {
-        if( defined( $current_workers->{$pk_maintenance_object} ) )
+        if( defined( $current_workers->{$pk_mo} ) )
         {
-            next if( $current_workers->{$pk_maintenance_object} eq $new_workers->{$pk_maintenance_object} );
+            next if( $current_workers->{$pk_mo} eq $new_workers->{$pk_mo} );
+
             #indicate a change to a CT
-            $diff->{change}->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
-            $current_workers->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
+            $diff->{change}->{$pk_mo}  = $new_workers->{$pk_mo};
+            $current_workers->{$pk_mo} = $new_workers->{$pk_mo};
         }
         else
         {
             #indicate a new CT has been added
-            $diff->{new}->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
-            $current_workers->{$pk_maintenance_object} = $new_workers->{$pk_maintenance_object};
+            $diff->{new}->{$pk_mo}     = $new_workers->{$pk_mo};
+            $current_workers->{$pk_mo} = $new_workers->{$pk_mo};
         }
     }
 
-    foreach my $pk_maintenance_object( keys %$current_workers )
+    foreach my $pk_mo( keys %$current_workers )
     {
-        next if( defined( $new_workers->{$pk_maintenance_object} ) );
+        next if( defined( $new_workers->{$pk_mo} ) );
         #indicate a removed CT
-        $diff->{old}->{$pk_maintenance_object} = $current_workers->{$pk_maintenance_object};
+        $diff->{old}->{$pk_mo} = $current_workers->{$pk_mo};
     }
 
-    foreach my $pk_maintenance_object( keys %{$diff->{old}} )
+    foreach my $pk_mo( keys %{$diff->{old}} )
     {
-        delete( $current_workers->{$pk_maintenance_object} );
+        delete( $current_workers->{$pk_mo} );
     }
 
     return $diff;
@@ -316,7 +339,9 @@ sub new_xid_placeholder($$$)
 
     if( $$new_xid =~ m/^\d+$/ )
     {
-        $sth = $$new_handle->prepare( 'SELECT pg_export_snapshot() AS snapshot' );
+        $sth = $$new_handle->prepare(
+            'SELECT pg_export_snapshot() AS snapshot'
+        );
 
         unless( $sth )
         {
@@ -333,7 +358,9 @@ sub new_xid_placeholder($$$)
         $row = $sth->fetchrow_hashref();
         $$new_snapshot = $row->{snapshot};
         $sth->finish();
-        $$new_handle->do( "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid'" );
+        $$new_handle->do(
+            "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid'"
+        );
         return 1;
     }
 
@@ -1282,7 +1309,7 @@ sub worker_entrypoint($$$$)
                 my $tried_fast_delete = 0;
                 my $using_xid;
                 my $using_xid_ind;
-                
+
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_QUERY_PARSE;
                 tied( $WORKER_STATUSES )->shunlock();

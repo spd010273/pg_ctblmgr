@@ -1143,10 +1143,10 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
 
         my $tt_count = get_table_count( $handle, $temp_table_name );
         return undef if( $tt_count < 0 );
-        
+
         my $return_data = { count => $tt_count, name => $temp_table_name, index => "ix_$temp_table_name" };
         my $uniques     = join( ',', @{$ct_hash->{indexes}} );
-        
+
         $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
 
         if( $sth )
