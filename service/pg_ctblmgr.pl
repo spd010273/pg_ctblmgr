@@ -387,6 +387,11 @@ sub parent_loop($$$)
         undef
     );
 
+    if( !check_extension_running( $handle ) )
+    {
+        _log( $LOG_LEVEL_FATAL, "Failed to secure advisory lock in parent process" );
+    }
+
     $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
     $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
     $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
