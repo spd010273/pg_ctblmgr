@@ -17,6 +17,15 @@ An asynchronous approach was taken because this allows the extension to be decou
 
 pg_ctblmgr uses logical replication, along with replication identiies to determine which keys were modified following an arbitrary DML statement. pg_ctblmgr then uses query parsing hooks to determine how to apply the key to the cache table definition as a WHERE clause element. This filtered subset of data tells the extension how to apply the changes to the cache table representation of the data.
 
+
+## Details
+
+pg_ctblmgr will decode WAL segments and determine how those changes impact cache tables under its control. The parent process is in charge of segment distribution, and one worker is assigned to each cache table. Each worker acknowledges WAL segments by their LSN as they are applies, and a given WAL segment is acknowledged with the primary server once all workers using that segment have acknowledged that it was applied.
+
+pg_ctblmgr also monitors cache table definitions for modification, and will replace the cache table if a change to its definition is detected.
+
+In steady-state operation, pg_ctblmgr maintains a list of historic transaction snapshots, which are used to observe the state of query output before a WAL change was applied to the database. This is helpful in determining if an operation visible in WAL results in a delete to a cache table, and is much faster than running an unfiltered definition query and full outer join operation to a cache table to determine if rows need to be removed.
+
 # Getting Started
 
 ## Prerequisites:
@@ -42,6 +51,14 @@ Once these steps are complete, the extension installation can be finalized by lo
 ```SQL
 CREATE EXTENSION pg_ctblmgr;
 ```
+
+Note that you will need a wal_level of logical, and at least one available wal sender / replication slot for pg_ctblmgr to function correctly.
+
+## Running
+
+pg_ctblmgr relies on an asynchronous service to maintain cache table state. This service is located in service/pg_ctblmgr.pl
+
+This daemon requires the connection parameters to the database cluster hosting the extension.
 
 # Versions
 
