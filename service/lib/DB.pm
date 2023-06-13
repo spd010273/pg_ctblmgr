@@ -147,6 +147,23 @@ INNER JOIN ${SCHEMA_NAME}.tb_maintenance_group mg
         ON mg.maintenance_group = mo.maintenance_group
 END_SQL
 
+Readonly::Scalar my $REPLICATION_PEEK_QUERY_NO_FT => <<END_SQL;
+    SELECT lsn,
+           xid,
+           data::JSONB AS data
+      FROM pg_catalog.pg_logical_slot_peek_changes(
+               ?::NAME,
+               NULL::PG_LSN,
+               ${DEFAULT_SEEK_COUNT}::INTEGER,
+               'wal-level'::VARCHAR,
+               ?::VARCHAR,
+               'include-transaction'::VARCHAR,
+               'TRUE'::VARCHAR
+           )
+     WHERE ?::PG_LSN IS NULL OR lsn > ?::PG_LSN
+  ORDER BY lsn ASC
+END_SQL
+
 Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
     SELECT lsn,
            xid,
@@ -813,11 +830,24 @@ sub replication_peek($$$$) :Export( :MANDATORY )
         { type => SCALARREF },
     );
 
-    my $sth = try_query(
-        $handle,
-        $REPLICATION_PEEK_QUERY,
-        [ $SLOT_NAME, $wal_level, $filter_tables, $$max_lsn, $$max_lsn ]
-    );
+    my $sth;
+
+    if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
+    {
+        $sth = try_query(
+            $handle,
+            $REPLICATION_PEEK_QUERY,
+            [ $SLOT_NAME, $wal_level, $filter_tables, $$max_lsn, $$max_lsn ]
+        );
+    }
+    else
+    {
+        $sth = try_query(
+            $handle,
+            $REPLICATION_PEEK_QUERY_NO_FT,
+            [ $SLOT_NAME, $wal_level, $$max_lsn, $$max_lsn ]
+        );
+    }
 
     return 0 unless( $sth );
 

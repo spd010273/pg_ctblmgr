@@ -460,15 +460,28 @@ sub parent_loop($$$)
         my $tmp_worker_data = {};
         $tmp_worker_data = populate_worker_data( $handle, $tmp_worker_data );
 
+        # handle edge case startup with 0 workers
         unless( defined $tmp_worker_data )
         {
             # Idle until we have workers to start
             _log( $LOG_LEVEL_DEBUG, "It appears there are no workers to create, idling until they exist" );
-            sleep( 5 );
-            next;
+            sleep( 4 );
+        }
+        else
+        {
+            if( !defined( $WORKER_DATA ) )
+            {
+                $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
+            }
         }
 
-        my $diff = check_for_new_cache_tables( $handle, $WORKER_DATA, $tmp_worker_data );
+        my $diff = {};
+        
+        if( defined( $WORKER_DATA ) && defined( $tmp_worker_data ) )
+        {
+            check_for_new_cache_tables( $handle, $WORKER_DATA, $tmp_worker_data );
+        }
+
         if(
                scalar( keys %{$diff->{new}}    ) > 0
             || scalar( keys %{$diff->{change}} ) > 0
@@ -1832,67 +1845,69 @@ $WORKER_STATUSES = {};
 $WORKER_FILTER_TABLES = {};
 # Time to fork workers
 # Lock status struct to pause workers while we wait to start everything
-tied( $WORKER_STATUSES )->shlock( LOCK_EX );
 
 if( !defined( $worker_data ) || scalar( @$worker_data ) == 0 )
 {
     _log( $LOG_LEVEL_INFO, "No workers to start, please populate pgctblmgr.tb_maintenance_object" );
-    _terminate();
 }
-
-foreach my $worker_entry( @$worker_data )
+else
 {
-    my $filter_tables         = $worker_entry->{filter_tables};
-    my $wal_level             = $worker_entry->{wal_level};
-    my $maintenance_channel   = $worker_entry->{maintenance_channel};
-    my $pk_maintenance_object = $worker_entry->{maintenance_object};
-    my $ct_name               = $worker_entry->{name};
-    my $child_pid = fork();
-
-    if( defined( $child_pid ) and $child_pid == 0 )
+    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+    foreach my $worker_entry( @$worker_data )
     {
-        &worker_entrypoint(
-            $wal_level,
-            $filter_tables,
-            $maintenance_channel,
-            $pk_maintenance_object
-        );
-        exit( 0 );
-    }
-    elsif( defined( $child_pid ) and $child_pid > 0 )
-    {
-        $worker_mapping->{$pk_maintenance_object} = $child_pid;
-        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+        my $filter_tables         = $worker_entry->{filter_tables};
+        my $wal_level             = $worker_entry->{wal_level};
+        my $maintenance_channel   = $worker_entry->{maintenance_channel};
+        my $pk_maintenance_object = $worker_entry->{maintenance_object};
+        my $ct_name               = $worker_entry->{name};
+        my $child_pid = fork();
 
-        foreach my $filter_table( @$filter_tables )
+        if( defined( $child_pid ) and $child_pid == 0 )
         {
-            if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
-            {
-                $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} = [];
-            }
-            # Setup the pins (parsed XLOG queue) for each filter table
-            # changes relevent to said changes will be pushed into this queue
-            # by the parent and popped later by the workers
+            &worker_entrypoint(
+                $wal_level,
+                $filter_tables,
+                $maintenance_channel,
+                $pk_maintenance_object
+            );
+            exit( 0 );
         }
-        tied( $WORKER_FILTER_TABLES )->shunlock();
+        elsif( defined( $child_pid ) and $child_pid > 0 )
+        {
+            $worker_mapping->{$pk_maintenance_object} = $child_pid;
+            tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
 
-        $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
-        $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
-        $WORKER_STATUSES->{$child_pid}->{replace}            = 0;
-        $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
-        $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
-        $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
-        _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
+            foreach my $filter_table( @$filter_tables )
+            {
+                if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
+                {
+                    $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} = [];
+                }
+                # Setup the pins (parsed XLOG queue) for each filter table
+                # changes relevent to said changes will be pushed into this queue
+                # by the parent and popped later by the workers
+            }
+            tied( $WORKER_FILTER_TABLES )->shunlock();
+
+            $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
+            $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
+            $WORKER_STATUSES->{$child_pid}->{replace}            = 0;
+            $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
+            $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
+            $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
+            _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
+        }
+        else
+        {
+            _log( $LOG_LEVEL_FATAL, "Failed to fork worker process" );
+        }
     }
-    else
-    {
-        _log( $LOG_LEVEL_FATAL, "Failed to fork worker process" );
-    }
+
+    # We've started workers, lets start processing WAL
+    _log( $LOG_LEVEL_DEBUG, "All workers started" );
+    tied( $WORKER_STATUSES )->shunlock();
 }
 
-# We've started workers, lets start processing WAL
-_log( $LOG_LEVEL_DEBUG, "All workers started" );
-tied( $WORKER_STATUSES )->shunlock();
 &set_program_name( "$EXTENSION_NAME parent process" );
 parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
