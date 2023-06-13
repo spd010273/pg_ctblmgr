@@ -227,7 +227,8 @@ sub populate_worker_data($$)
     }
     else
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to get updated worker list' );
+        #_log( $LOG_LEVEL_ERROR, 'Failed to get updated worker list or no workers exist' );
+        return undef;
     }
 
     return $WORKER_DATA;
@@ -238,7 +239,7 @@ sub check_for_new_cache_tables($$$)
     my( $handle, $current_workers, $new_workers ) = validate_pos(
         @_,
         { type => OBJECT },
-        { type => HASHREF },
+        { type => HASHREF | UNDEF },
         { type => HASHREF },
     );
 
@@ -458,6 +459,15 @@ sub parent_loop($$$)
         ## CACHE TABLE MANAGEMENT
         my $tmp_worker_data = {};
         $tmp_worker_data = populate_worker_data( $handle, $tmp_worker_data );
+
+        unless( defined $tmp_worker_data )
+        {
+            # Idle until we have workers to start
+            _log( $LOG_LEVEL_DEBUG, "It appears there are no workers to create, idling until they exist" );
+            sleep( 5 );
+            next;
+        }
+
         my $diff = check_for_new_cache_tables( $handle, $WORKER_DATA, $tmp_worker_data );
         if(
                scalar( keys %{$diff->{new}}    ) > 0
@@ -1823,6 +1833,12 @@ $WORKER_FILTER_TABLES = {};
 # Time to fork workers
 # Lock status struct to pause workers while we wait to start everything
 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+
+if( !defined( $worker_data ) || scalar( @$worker_data ) == 0 )
+{
+    _log( $LOG_LEVEL_INFO, "No workers to start, please populate pgctblmgr.tb_maintenance_object" );
+    _terminate();
+}
 
 foreach my $worker_entry( @$worker_data )
 {
