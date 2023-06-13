@@ -1132,7 +1132,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
-    print "$query\n";
+    #print "$query\n";
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
     my $sth             = try_query( $handle, $tt_query );
@@ -1318,7 +1318,7 @@ END_SQL
         }
 
         my $INSERT_Q = <<END_SQL;
-        INSERT INTO $cache_table_schema.$cache_table_name ct
+        INSERT INTO $cache_table_schema.$cache_table_name
              SELECT *
                FROM $temp_table->{name}
 END_SQL
@@ -1351,7 +1351,7 @@ END_SQL
          WHERE $where_clause
            AND $diff_distinct
 END_SQL
-        print "$UPDATE_Q\n";
+        #print "$UPDATE_Q\n";
         my $sth = &try_query( $handle, $UPDATE_Q, [] );
 
         return 0 unless( $sth );

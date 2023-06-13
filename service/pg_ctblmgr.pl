@@ -713,7 +713,7 @@ sub parent_loop($$$)
                     if( defined( $dispatched_changes->{$pid}->[$index] ) && $dispatched_changes->{$pid}->[$index] eq $remove_lsn )
                     {
                         splice( @{$dispatched_changes->{$pid}}, $index, 1 );
-                        print "Removed $remove_lsn from $pid\n";
+                        #print "Removed $remove_lsn from $pid\n";
                     }
                 }
             }
