@@ -51,43 +51,14 @@ BASH
 Readonly my $STOP_SH => <<BASH;
 #!/bin/bash
 #    This script will stop the pg_ctblmgr daemons
-pid=0
-if [ -f /var/run/pg_ctblmgr.pid ]; then
-    pid=\$(cat /var/run/pg_ctblmgr.pid)
-    rm /var/run/pg_ctblmgr.pid
-elif [ -f ~/pg_ctblmgr.pid ]; then
-    pid=\$(cat ~/pg_ctblmgr.pid)
-    rm ~/pg_ctblmgr.pid
-elif [ -f ./pg_ctblmgr.pid ]; then
-    pid=\$(cat ./pg_ctblmgr.pid)
-    rm ./pg_ctblmgr.pid
-else
-    echo "Could not locate PID file!"
-    exit 1
-fi
-
-kill \$pid
-
-while kill -0 \$pid; do
-    echo "Waiting on pg_ctblmgr to exit..."
-    sleep 2
-done
-
+pkill -0 pg_ctblmgr
 exit 0
 BASH
 
 Readonly my $RELOAD_SH => <<BASH;
 #!/bin/bash
 #   This script will issue a SIGHUP to pg_ctblmgr
-if [ -f /var/run/pg_ctblmgr.pid ]; then
-    kill -1 \$(cat /var/run/pg_ctblmgr.pid)
-elif [ -f ~/pg_ctblmgr.pid ]; then
-    kill -1 \$(cat ~/pg_ctblmgr.pid)
-elif [ -f ./pg_ctblmgr.pid ]; then
-    kill -1 \$(cat ./pg_ctblmgr.pid)
-else
-    echo "Could not locate PID file!"
-fi
+pkill -1 pg_ctblmgr
 BASH
 
 my $hostname;
