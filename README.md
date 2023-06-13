@@ -41,7 +41,7 @@ This extension requires the following:
 Once the extension code is checked out, it can be built and installed with
 
 ```bash
-make && su - postgres -c 'cd /path/to/pg_ctblmgr/ && make install'
+make && sudo make install'
 ```
 
 Prior to beginning, you should verify that pg_Config is in the user's PATH, and that it matches the version of the server that is running.
