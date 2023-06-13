@@ -1,0 +1,14 @@
+[Unit]
+Description=pg_ctblmgr
+Documentation=https://bitbucket.org/neadwerx/pg_ctblmgr/src/master/
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pg_ctblmgr-startup.sh
+ExecStop=/usr/bin/pg_ctblmgr-shutdown.sh
+StandardOutput=journal
+ExecReload=/usr/bin/pg_ctblmgr-reload.sh
+
+[Install]
+WantedBy=multi-user.target

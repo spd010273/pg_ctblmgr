@@ -1,0 +1,13 @@
+/var/log/pg_ctblmgr/pg_ctblmgr.log {
+    missingok
+    compress
+    copytruncate
+    notifempty
+    sharedscripts
+    nodateext
+    daily
+    rotate 7
+    postrotate
+        /bin/systemctl reload pg_ctblmgr.service > /dev/null 2> /dev/null || true
+    endscript
+}
