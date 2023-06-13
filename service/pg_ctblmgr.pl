@@ -1352,7 +1352,7 @@ sub worker_entrypoint($$$$)
 
                     foreach my $elem( @$XID_MAP )
                     {
-                        if( $elem->{xid} <= $youngest_xid )
+                        if( defined( $elem->{xid} ) && $elem->{xid} <= $youngest_xid )
                         {
                             $best_candidate = $XID_MAP->[$ind]->{xid};
                             $best_candidate_ind = $ind;
