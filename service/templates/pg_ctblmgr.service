@@ -7,7 +7,9 @@ Wants=NetworkManager.service
 Type=simple
 ExecStart=/usr/bin/pg_ctblmgr-startup.sh
 ExecStop=/usr/bin/pg_ctblmgr-shutdown.sh
-StandardOutput=journal
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=pg_ctblmgr
 ExecReload=/usr/bin/pg_ctblmgr-reload.sh
 
 [Install]
