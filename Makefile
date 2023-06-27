@@ -8,7 +8,6 @@ all: pg_ctblmgr_decoder pg_ctblmgr_service
 
 pg_ctblmgr_service:
 	$(MAKE) -C service
-	cp service/pg_ctblmgr.pl ./
 	ln -fs service/pg_ctblmgr.pl ./pg_ctblmgr
 
 pg_ctblmgr_decoder:

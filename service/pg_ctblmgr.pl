@@ -66,6 +66,10 @@ $LOG_FILE    = '';
 $LOG_FH      = undef;
 $DAEMONIZE   = 0;
 
+END {
+    _terminate();
+}
+
 sub _terminate_sigint()
 {
     # Wrapper to mask errors
@@ -100,11 +104,22 @@ sub _terminate(;$$$)
 
         if( $handle )
         {
-            &drop_replication_slot( $handle );
-            _log(
-                $LOG_LEVEL_INFO,
-                "Replication slot '$SLOT_NAME' has been dropped"
-            );
+            my $ret =  &drop_replication_slot( $handle );
+            if( $ret > 0 )
+            {
+                _log(
+                    $LOG_LEVEL_INFO,
+                    "Replication slot '$SLOT_NAME' has been dropped"
+                );
+            }
+            elsif( $ret < 0 )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    'Failed to drop replication slot - you will need to drop '
+                  . "'$SLOT_NAME' manually"
+                );
+            }
         }
         else
         {
@@ -683,8 +698,8 @@ sub parent_loop($$$)
             }
         }
 
-		if( $WT_LOCKED )
-		{
+        if( $WT_LOCKED )
+        {
             tied( $WORKER_FILTER_TABLES )->shunlock();
             $WT_LOCKED = 0;
         }

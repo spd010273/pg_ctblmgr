@@ -32,7 +32,16 @@ Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
 END_SQL
 
 Readonly::Scalar my $GET_SLOT_NAME => <<"END_SQL";
-    SELECT ( current_database()::VARCHAR || '__' || '$EXTENSION_NAME' )::VARCHAR AS slot_name
+    SELECT (
+                pg_catalog.regexp_replace(
+                    current_database()::VARCHAR,
+                    '[^[:alnum:]]',
+                    '_',
+                    'g'
+                )
+             || '__'
+             || '$EXTENSION_NAME'
+           )::VARCHAR AS slot_name
 END_SQL
 
 Readonly::Scalar my $CHECK_REPLICATION_SLOT => <<'END_SQL';
@@ -43,7 +52,9 @@ Readonly::Scalar my $CHECK_REPLICATION_SLOT => <<'END_SQL';
 END_SQL
 
 Readonly::Scalar my $DROP_REPLICATION_SLOT => <<'END_SQL';
-    SELECT pg_drop_replication_slot( ? )
+    SELECT pg_drop_replication_slot( slot_name )
+      FROM pg_catalog.pg_stat_replication_slots
+     WHERE slot_name = ?
 END_SQL
 
 Readonly::Scalar my $CHECK_EXTENSION_RUNNING_QUERY => <<"END_SQL";
@@ -296,6 +307,264 @@ INNER JOIN ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
      WHERE mo.maintenance_object = ?
 END_SQL
 
+Readonly::Scalar my $CREATE_CT_DEPENDENT_OBJECT_TT => <<'END_SQL';
+CREATE TEMP TABLE tt_dependent_objects
+(
+    drop_statement   TEXT,
+    create_statement TEXT,
+    object_name      VARCHAR,
+    is_base_obj      BOOLEAN,
+    rank             INTEGER
+)
+END_SQL
+
+Readonly::Scalar my $GET_DEPENDENT_VIEWS => <<"END_SQL";
+WITH RECURSIVE tt_viewdefs AS
+(
+    SELECT DISTINCT ON( dc.oid, sc.oid )
+           dc.oid AS dependent_oid,
+           sc.oid,
+           1 AS rank
+      FROM pg_depend d
+INNER JOIN pg_rewrite rw
+        ON rw.oid = d.objid
+INNER JOIN pg_class dc
+        ON dc.oid = rw.ev_class
+       AND dc.relkind IN( 'm', 'v' )
+INNER JOIN pg_class sc
+        ON sc.oid = d.refobjid
+INNER JOIN pg_namespace sns
+        ON sns.oid = sc.relnamespace
+     WHERE sns.nspname::VARCHAR = ?
+       AND sc.relname::VARCHAR = ?
+     UNION
+    SELECT DISTINCT ON( dc.oid, sc.oid )
+           dc.oid AS dependent_oid,
+           sc.oid,
+           tt.rank + 1 AS rank
+      FROM pg_depend d
+INNER JOIN pg_rewrite rw
+        ON rw.oid = d.objid
+INNER JOIN pg_class dc
+        ON dc.oid = rw.ev_class
+       AND dc.relkind IN( 'm', 'v' )
+INNER JOIN pg_class sc
+        ON sc.oid = d.refobjid
+INNER JOIN tt_viewdefs tt
+        ON tt.dependent_oid = sc.oid
+     WHERE sc.oid IS DISTINCT FROM dc.oid
+),
+tt_def_prep AS
+(
+    SELECT COALESCE( ns.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object_name,
+           CASE WHEN c.relkind = 'm'
+                THEN 'MATERIALIZED'
+                ELSE ''
+                 END AS view_type,
+           regexp_replace( pg_get_viewdef( c.oid, TRUE ), ';\\s*\$', '' ) AS definition,
+           tt.rank
+      FROM tt_viewdefs tt
+INNER JOIN pg_class c
+        ON c.oid = tt.dependent_oid
+INNER JOIN pg_namespace ns
+        ON ns.oid = c.relnamespace
+)
+INSERT INTO tt_dependent_objects
+            (
+                drop_statement,
+                create_statement,
+                object_name,
+                is_base_obj,
+                rank
+            )
+     SELECT 'DROP ' || view_type || ' VIEW ' || object_name AS drop_statement,
+            'CREATE ' || view_type || ' VIEW ' || object_name || ' AS ( ' || definition || ')' AS create_statement,
+            object_name,
+            TRUE,
+            rank
+       FROM tt_def_prep
+END_SQL
+
+Readonly::Scalar my $GET_FK_DEPENDENCIES => <<"END_SQL";
+WITH tt_fk_constraints AS
+(
+    SELECT co.conname::VARCHAR AS constraint_name,
+           COALESCE( nr.nspname::VARCHAR, 'public' ) || '.' || cr.relname::VARCHAR AS object,
+           pg_get_constraintdef( co.oid, TRUE ) AS definition,
+           2 AS rank
+      FROM pg_constraint co
+INNER JOIN pg_class c
+        ON c.oid = co.confrelid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN pg_class cr
+        ON cr.oid = co.conrelid
+INNER JOIN pg_namespace nr
+        ON nr.oid = cr.relnamespace
+     WHERE co.contype = 'f'
+       AND n.nspname::VARCHAR = ?
+       AND c.relname::VARCHAR = ?
+     UNION
+    SELECT co.conname::VARCHAR AS constraint_name,
+           COALESCE( nr.nspname::VARCHAR, 'public' ) || '.' || cr.relname::VARCHAR AS object,
+           pg_get_constraintdef( co.oid, TRUE ) AS definition,
+           tt.rank + 1 AS rank
+      FROM pg_constraint co
+INNER JOIN pg_class c
+        ON c.oid = co.confrelid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN pg_class cr
+        ON cr.oid = co.conrelid
+INNER JOIN pg_namespace nr
+        ON nr.oid = cr.relnamespace
+INNER JOIN tt_dependent_objects tt
+        ON tt.object_name = COALESCE( nr.nspname::VARCHAR, 'public' ) || '.' || cr.relname::VARCHAR
+       AND tt.is_base_obj IS TRUE
+     WHERE co.contype = 'f'
+)
+INSERT INTO tt_dependent_objects
+            (
+                drop_statement,
+                create_statement,
+                object_name,
+                is_base_obj,
+                rank
+            )
+     SELECT 'ALTER TABLE ' || object || ' DROP CONSTRAINT ' || constraint_name AS drop_statement,
+            'ALTER TABLE ' || object || ' ADD CONSTRAINT ' || constraint_name || ' ' || definition AS create_statement,
+            constraint_name,
+            FALSE,
+            rank
+       FROM tt_fk_constraints tt;
+END_SQL
+
+Readonly::Scalar my $GET_DEPENDENT_CHECK_CONSTRAINTS => <<"END_SQL";
+WITH tt_check_constraints AS
+(
+    SELECT co.conname::VARCHAR AS constraint_name,
+           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           pg_get_constraintdef( co.oid, TRUE ) AS definition,
+           2 AS rank
+      FROM pg_constraint co
+INNER JOIN pg_class c
+        ON c.oid = co.conrelid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+     WHERE co.contype != 'f'
+       AND co.contype != 'p'
+       AND n.nspname::VARCHAR = ?
+       AND c.relname::VARCHAR = ?
+     UNION
+    SELECT co.conname::VARCHAR AS constraint_name,
+           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           pg_get_constraintdef( co.oid, TRUE ) AS definition,
+           tt.rank + 1 AS rank
+      FROM pg_constraint co
+INNER JOIN pg_class c
+        ON c.oid = co.conrelid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN tt_dependent_objects tt
+        ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR
+       AND tt.is_base_obj IS TRUE
+     WHERE co.contype != 'f'
+       AND co.contype != 'p'
+)
+INSERT INTO tt_dependent_objects
+            (
+                drop_statement,
+                create_statement,
+                object_name,
+                is_base_obj,
+                rank
+            )
+     SELECT 'ALTER TABLE ' || object || ' DROP CONSTRAINT ' || constraint_name AS drop_statement,
+            'ALTER TABLE ' || object || ' ADD CONSTRAINT ' || constraint_name || ' ' || definition AS create_statement,
+            constraint_name,
+            FALSE,
+            rank
+       FROM tt_check_constraints tt;
+END_SQL
+
+Readonly::Scalar my $GET_DEPENDENT_TRIGGERS => <<"END_SQL";
+WITH tt_triggers AS
+(
+    SELECT t.tgname AS trigger_name,
+           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           pg_get_triggerdef( t.oid, TRUE ) AS definition,
+           2 AS rank
+      FROM pg_trigger t
+INNER JOIN pg_class c
+        ON c.oid = t.tgrelid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+     WHERE n.nspname::VARCHAR = ?
+       AND c.relname::VARCHAR = ? 
+     UNION
+    SELECT t.tgname AS trigger_name,
+           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           pg_get_triggerdef( t.oid, TRUE ) AS definition,
+           2 AS rank
+      FROM pg_trigger t
+INNER JOIN pg_class c
+        ON c.oid = t.tgrelid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN tt_dependent_objects tt
+        ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR
+       AND tt.is_base_obj IS TRUE
+)
+INSERT INTO tt_dependent_objects
+            (
+                drop_statement,
+                create_statement,
+                object_name,
+                is_base_obj,
+                rank
+            )
+     SELECT 'DROP TRIGGER ' || trigger_name || ' ON ' || object AS drop_statement,
+            definition AS create_statement,
+            trigger_name,
+            FALSE,
+            rank
+       FROM tt_triggers;
+END_SQL
+
+Readonly::Scalar my $GET_DEPENDENT_INDEXES => <<"END_SQL";
+    WITH tt_indexes AS
+    (
+        SELECT pg_get_indexdef( ci.oid ) AS create_statement,
+               'DROP INDEX ' || ci.relname::VARCHAR AS drop_statement,
+               ci.relname::VARCHAR AS object_name,
+               tt.rank + 1 AS rank
+          FROM pg_index i
+    INNER JOIN pg_class ci
+            ON ci.oid = i.indexrelid
+    INNER JOIN pg_class c
+            ON c.oid = i.indrelid
+    INNER JOIN pg_namespace n
+            ON n.oid = c.relnamespace
+    INNER JOIN tt_dependent_objects tt
+            ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR
+           AND tt.is_base_obj IS TRUE
+    )
+    INSERT INTO tt_dependent_objects
+                (
+                    drop_statement,
+                    create_statement,
+                    object_name,
+                    is_base_obj,
+                    rank
+                )
+         SELECT drop_statement,
+                create_statement,
+                object_name,
+                FALSE,
+                rank
+           FROM tt_indexes;
+END_SQL
+
 sub get_slot_name($) :Export( :MANDATORY )
 {
     my( $handle ) = validate_pos(
@@ -368,13 +637,164 @@ sub drop_replication_slot($) :Export( :MANDATORY )
 
     my $drop_sth = $handle->prepare( $DROP_REPLICATION_SLOT );
 
-    return 0 unless( $drop_sth );
+    return -1 unless( $drop_sth );
 
     $drop_sth->bind_param( 1, $SLOT_NAME );
 
-    return 0 unless( $drop_sth->execute() );
+    return -1 unless( $drop_sth->execute() );
+
+    if( $drop_sth->rows() == 0 )
+    {
+        $drop_sth->finish();
+        return 0;
+    }
 
     $drop_sth->finish();
+    return 1;
+}
+
+# Dependent object logic
+sub create_dependent_temp_table($$)
+{
+    my( $handle, $ct_hash ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => HASHREF },
+    );
+
+    my $sth = &try_query( $handle, $CREATE_CT_DEPENDENT_OBJECT_TT );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to create dependency temp table" );
+        return 0;
+    }
+
+    $sth->finish();
+
+    $sth = &try_query( $handle, $GET_DEPENDENT_VIEWS, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to get view dependencies for $ct_hash->{name}" );
+        return 0;
+    }
+
+    $sth->finish();
+    $sth = &try_query( $handle, $GET_FK_DEPENDENCIES, [ $ct_hash->{schema}, $ct_hash->{name} ] );    
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to get fk-dependent objects for $ct_hash->{name}" );
+        return 0;
+    }
+
+    $sth->finish();
+    $sth = &try_query( $handle, $GET_DEPENDENT_CHECK_CONSTRAINTS, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to get dependent check constraints on $ct_hash->{name}" );
+        return 0;
+    }
+
+    $sth->finish();
+    $sth = &try_query( $handle, $GET_DEPENDENT_TRIGGERS, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to get dependent triggers for $ct_hash->{name}" );
+        return 0;
+    }
+
+    $sth->finish();
+    $sth = &try_query( $handle, $GET_DEPENDENT_INDEXES );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, "Failed to get dependent triggers for $ct_hash->{name}" );
+        return 0;
+    }
+
+    $sth->finish();
+
+    return 1;
+}
+
+sub drop_dependencies($)
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $q = <<'END_SQL';
+        SELECT drop_statement
+          FROM tt_dependent_objects
+      ORDER BY rank DESC
+END_SQL
+
+    my $sth = &try_query( $handle, $q );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to get results from dependency table' );
+        return 0;
+    }
+
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        unless( $handle->do( $row->{drop_statement} ) )
+        {
+            _log( $LOG_LEVEL_ERROR, "Failed to drop dependent object" );
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+sub recreate_dependencies($)
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $q = <<'END_SQL';
+        SELECT create_statement
+          FROM tt_dependent_objects
+      ORDER BY rank ASC
+END_SQL
+
+    my $sth = &try_query( $handle, $q );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to get create results from dependency table' );
+        return 0;
+    }
+
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        unless( $handle->do( $row->{create_statement} ) )
+        {
+            _log( $LOG_LEVEL_ERROR, 'Failed to recreate dependent object' );
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+sub drop_dependency_temp_table($)
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    $handle->do( 'DROP TABLE tt_dependent_objects' );
 
     return 1;
 }
@@ -404,8 +824,20 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     my $definition    = $ct_hash->{definition};
 
     $handle->do( 'BEGIN' );
+    $handle->do( "SET client_min_messages = 'ERROR'" );
     $handle->do( "DROP TABLE IF EXISTS $temp_name" );
+    unless( &create_dependent_temp_table( $handle, $ct_hash ) )
+    {
+        $handle->do( 'ROLLBACK' );
+        _log(
+            $LOG_LEVEL_FATAL,
+            'Cache table replacement failed - could not collect dependent objects'
+        );
+    }
+
     &create_cache_table( $handle, $ct_hash );
+    
+    &drop_dependencies( $handle );
     my $sth = &try_query( $handle, "DROP TABLE $schema.$name" );
 
     unless( $sth )
@@ -437,10 +869,14 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         _log( $LOG_LEVEL_FATAL, "Failed to analyze replacement cache table" );
     }
 
+    &recreate_dependencies( $handle );
     unless( $handle->do( "ALTER INDEX ix_$temp_name RENAME TO ix_$name" ) )
     {
         _log( $LOG_LEVEL_ERROR, "Failed to rename index for $name" );
     }
+
+    &drop_dependency_temp_table( $handle );
+    $handle->do( 'SET client_min_messages TO DEFAULT' );
     $handle->do( 'COMMIT' );
 
     return;
@@ -1038,6 +1474,7 @@ sub create_cache_table($$)
 
         while( !$done )
         {
+            print( "OFFSET: $offset\n" );
             my $populate_iter_q = $populate_q;
             $populate_iter_q =~ s/__OFFSET__/$offset/;
             my $check_sth = &try_query( $handle, $populate_iter_q );
