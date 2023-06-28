@@ -58,7 +58,9 @@ BEGIN
                         NEW.name
                     ),
                     @extschema@.fn_get_dependencies( NEW.maintenance_object )
-                );
+                )
+    ON CONFLICT ( id )
+  DO UPDATE SET filter = @extschema@.fn_get_dependencies( NEW.maintenance_object );
     RETURN NEW;
 END
  $_$
