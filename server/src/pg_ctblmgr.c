@@ -5439,33 +5439,18 @@ static void Token_out( StringInfo str, char * s )
     }
 
     appendStringInfoChar( str, '"' );
-    // Treat tokens similar to read.c (nodeRead wrapper or underlying pg_strtok function)
-    if(
-//            *s == '<'
-            *s == '\"'
-         || isdigit( ( unsigned char ) *s )
-         || (
-                (*s == '+' || *s == '-' )
-             && (
-                     isdigit( ( unsigned char ) s[1] )
-                  || s[1] == '.'
-                )
-            )
-      )
-        appendStringInfoChar( str, '\\' );
 
     while( *s )
     {
         // Handle regular escapes
         if(
-                *s == ' '
+                *s == '\b'
              || *s == '\n'
              || *s == '\t'
-             || *s == '('
-             || *s == ')'
-             || *s == '{'
-             || *s == '}'
+             || *s == '\f'
+             || *s == '\r'
              || *s == '\\'
+             || *s == '"'
           )
         {
             appendStringInfoChar( str, '\\' );
