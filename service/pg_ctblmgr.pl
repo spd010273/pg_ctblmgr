@@ -180,6 +180,21 @@ sub shm_cleanup()
     return;
 }
 
+sub shm_pre_cleanup()
+{
+    foreach my $key( split( "\n", `ipcs -m | grep -v -E 'postgres' | grep \$(whoami) | grep '0x' | awk '{print \$1}'` ) )
+    {
+        return 0 unless( system( "ipcrm --shmem-key $key" ) == 0 );
+    }
+
+    foreach my $key( split( "\n", `ipcs -s | grep -v -E 'postgres' | grep \$(whoami) | grep '0x' | awk '{print \$1}'` ) )
+    {
+        return 0 unless( system( "ipcrm --semaphore-key $key" ) == 0 );
+    }
+
+    return 1;
+}
+
 sub get_distinct_filter_tables()
 {
     my $WORKER_FILTER_TABLES;
@@ -1743,6 +1758,11 @@ FD_FALLBACK:
 ## MAIN PROGRAM
 
 # Parse and validate arguments
+unless( shm_pre_cleanup() )
+{
+    _log( $LOG_LEVEL_ERROR, "Failed to prune shared memory on startup" );
+}
+
 our( $opt_D, $opt_d, $opt_U, $opt_h, $opt_p );
 my @original_argv = @ARGV;
 
