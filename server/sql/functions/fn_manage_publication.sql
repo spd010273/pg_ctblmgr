@@ -31,7 +31,7 @@ BEGIN
         END IF;
 
         IF( NEW.indexes::VARCHAR IS DISTINCT FROM OLD.indexes::VARCHAR ) THEN
-            EXECUTE 'DROP INDEX ix_' || OLD.name;
+            EXECUTE 'DROP INDEX IF EXISTS ix_' || OLD.name;
             EXECUTE 'CREATE UNIQUE INDEX ix_' || NEW.name || ' ON "' || NEW.namespace || '.' || NEW.name || '" ( ' || array_to_string( NEW.indexes, ',' ) || ')';
         END IF;
     ELSIF( TG_OP = 'DELETE' ) THEN
