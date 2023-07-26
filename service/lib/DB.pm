@@ -32,7 +32,7 @@ Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
 END_SQL
 
 Readonly::Scalar my $GET_SLOT_NAME => <<"END_SQL";
-    SELECT (
+    SELECT lower(
                 pg_catalog.regexp_replace(
                     current_database()::VARCHAR,
                     '[^[:alnum:]]',
