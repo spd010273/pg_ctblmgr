@@ -1964,14 +1964,15 @@ END_SQL
     }
 
     $get_type_sth->finish();
-    my $past_temp_table = 'tt_past_data';
+    my $past_temp_table = "tt_past_data_${PROCESS_ID}";
+    $current_handle->do( "DROP TABLE IF EXISTS $past_temp_table" );
     my $temp_table_q = "CREATE TEMP TABLE $past_temp_table ( "
                      . join( ',', @$column_data_types )
                      . ' )';
 
     unless( $current_handle->do( $temp_table_q ) )
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to create tt_past_data' );
+        _log( $LOG_LEVEL_ERROR, "Failed to create $past_temp_table" );
         $aged_handle->do( 'ROLLBACK' );
         $aged_handle->disconnect();
         return 0;
