@@ -500,7 +500,7 @@ INNER JOIN pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
      WHERE n.nspname::VARCHAR = ?
-       AND c.relname::VARCHAR = ? 
+       AND c.relname::VARCHAR = ?
      UNION
     SELECT t.tgname AS trigger_name,
            COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
@@ -681,7 +681,7 @@ sub create_dependent_temp_table($$)
     }
 
     $sth->finish();
-    $sth = &try_query( $handle, $GET_FK_DEPENDENCIES, [ $ct_hash->{schema}, $ct_hash->{name} ] );    
+    $sth = &try_query( $handle, $GET_FK_DEPENDENCIES, [ $ct_hash->{schema}, $ct_hash->{name} ] );
 
     unless( $sth )
     {
@@ -836,7 +836,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     }
 
     &create_cache_table( $handle, $ct_hash );
-    
+
     &drop_dependencies( $handle );
     my $sth = &try_query( $handle, "DROP TABLE $schema.$name" );
 
