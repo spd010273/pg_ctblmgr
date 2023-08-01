@@ -253,6 +253,55 @@ INNER JOIN pg_catalog.pg_namespace n
        AND c.relname::VARCHAR = ?
 END_SQL
 
+Readonly::Scalar my $CREATE_COLUMN_CHECK_TABLE => <<END_SQL;
+CREATE TEMP TABLE tt_column_verify AS
+(
+    WITH tt_foo AS
+    (
+        __DEFINITION__
+    )
+        SELECT *
+          FROM tt_foo
+         LIMIT 1
+)
+END_SQL
+
+Readonly::Scalar my $CHECK_CACHE_TABLE_COLUMNS => <<END_SQL;
+WITH tt_existing AS
+(
+    SELECT a.attname::VARCHAR as column_name
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname::VARCHAR = ?
+INNER JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+     WHERE c.relname::VARCHAR = ?
+),
+tt_requested AS
+(
+    SELECT a.attname::VARCHAR AS column_name
+      FROM pg_catalog.pg_class c
+INNER JOIN pg_catalog.pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.oid = pg_catalog.pg_my_temp_schema()
+INNER JOIN pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+     WHERE c.relname::VARCHAR = 'tt_column_verify'
+)
+    SELECT r.column_name AS r,
+           e.column_name AS e
+      FROM tt_existing e
+FULL OUTER JOIN tt_requested r
+        ON e.column_name = r.column_name
+     WHERE e.column_name IS NULL
+        OR r.column_name IS NULL
+END_SQL
+
 my $CREATE_CACHE_TABLE;
 if( $BATCHED_CREATE )
 {
@@ -298,6 +347,7 @@ Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
            mo.name,
            mo.definition,
            rs.filter,
+           mo.unique_index,
            mo.indexes
       FROM ${SCHEMA_NAME}.tb_driver d
 INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
@@ -607,6 +657,8 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
         $cache_hash->{definition}    = $row->{definition};
         $cache_hash->{filter_tables} = $row->{filter};
         $cache_hash->{indexes}       = $row->{indexes};
+        $cache_hash->{unique_index}  = $row->{unique_index};
+        $cache_hash->{maintenance_object} = $pk_maintenance_object;
         $ct_sth->finish();
 
         $cache_hash->{digest} = get_ct_digest(
@@ -809,6 +861,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
 
     my $ct_hash = {};
 
+    _log( $LOG_LEVEL_DEBUG, "replace cache table entry" );
     unless( &get_ct_definition( $handle, $pk_maintenance_object, $ct_hash ) )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
@@ -825,7 +878,8 @@ sub replace_cache_table($$) :Export( :MANDATORY )
 
     $handle->do( 'BEGIN' );
     $handle->do( "SET client_min_messages = 'ERROR'" );
-    $handle->do( "DROP TABLE IF EXISTS $temp_name" );
+    $handle->do( "DROP TABLE IF EXISTS $temp_name CASCADE" );
+
     unless( &create_dependent_temp_table( $handle, $ct_hash ) )
     {
         $handle->do( 'ROLLBACK' );
@@ -857,6 +911,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     unless( $sth )
     {
         $handle->do( 'ROLLBACK' );
+        $ct_hash->{name} = $name;
         _log(
             $LOG_LEVEL_FATAL,
             'Cache table replacement failed - could not rename new table'
@@ -877,8 +932,8 @@ sub replace_cache_table($$) :Export( :MANDATORY )
 
     &drop_dependency_temp_table( $handle );
     $handle->do( 'SET client_min_messages TO DEFAULT' );
+    $ct_hash->{name} = $name;
     $handle->do( 'COMMIT' );
-
     return;
 }
 
@@ -979,7 +1034,6 @@ sub try_query($$;$) :Export( :MANDATORY )
                 $LOG_LEVEL_ERROR,
                 'Failed to execute statement, retrying...'
             );
-            #print "$query\n";
         }
 
         $try_count++;
@@ -1423,14 +1477,44 @@ sub check_ct_exists($) :Export( :MANDATORY )
     {
         $sth->finish();
         _log( $LOG_LEVEL_DEBUG, "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists" );
-        return;
+        
+        my $create_tt = $CREATE_COLUMN_CHECK_TABLE;
+        $create_tt =~ s/__DEFINITION__/$ct_hash->{definition}/;
+        $sth = try_query(
+            $handle,
+            $create_tt
+        );
+
+        unless( $sth )
+        {
+            _log( $LOG_LEVEL_FATAL, "Failed to create test table using definition to validate columns" );
+        }
+
+        $sth->finish();
+
+        $sth = try_query(
+            $handle,
+            $CHECK_CACHE_TABLE_COLUMNS,
+            [ $ct_hash->{schema}, $ct_hash->{name} ]
+        );
+
+        unless( $sth )
+        {
+            _log( $LOG_LEVEL_FATAL, "Failed to check cache table columns against definition" );
+        }
+
+        $handle->do( 'DROP TABLE IF EXISTS tt_column_verify' );
+
+        return if( $sth->rows() == 0 );
+
+        _log(
+            $LOG_LEVEL_ERROR,
+            "There is a discrepency between the existing cache table and its definition. The cache table will be rebuilt"
+        );
     }
 
     $sth->finish();
-    &create_cache_table(
-        $handle,
-        $ct_hash
-    );
+    &replace_cache_table( $handle, $ct_hash->{maintenance_object} );
 
     return;
 }
@@ -1474,7 +1558,6 @@ sub create_cache_table($$)
 
         while( !$done )
         {
-            print( "OFFSET: $offset\n" );
             my $populate_iter_q = $populate_q;
             $populate_iter_q =~ s/__OFFSET__/$offset/;
             my $check_sth = &try_query( $handle, $populate_iter_q );
@@ -1497,6 +1580,24 @@ sub create_cache_table($$)
 
     $sth->finish();
     $handle->do( "ANALYZE $schema.$name" );
+    
+    foreach my $columns( @{$ct_hash->{indexes}} )
+    {
+        my $index_name = $columns;
+        $index_name =~ s/[^[:alnum:]]/_/g;
+        my $full_index_name = "ix_$ct_hash->{name}_$index_name";
+
+        my $def = "CREATE INDEX $full_index_name ON $ct_hash->{schema}.$ct_hash->{name}( $columns )";
+
+        unless( $handle->do( $def ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failure when creating index for columns ($columns) on $ct_hash->{schema}.$ct_hash->{name}"
+            );
+        }
+    }
+
     _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
     return;
 }
@@ -1509,12 +1610,12 @@ sub create_cache_table_unique($$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
-    my $index_columns = join( ',', @{$ct_hash->{indexes}} );
+    my $index_columns = join( ',', @{$ct_hash->{unique_index}} );
     my $sth = try_query( $handle, "CREATE UNIQUE INDEX IF NOT EXISTS ix_$ct_hash->{name} ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )" );
 
     return 0 unless( $sth );
 
-    foreach my $col( $ct_hash->{indexes} )
+    foreach my $col( $ct_hash->{unique_index} )
     {
         push( @{$ct_hash->{cache_table_uniques}}, $col );
     }
@@ -1612,7 +1713,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         return undef if( $tt_count < 0 );
 
         my $return_data = { count => $tt_count, name => $temp_table_name, index => "ix_$temp_table_name" };
-        my $uniques     = join( ',', @{$ct_hash->{indexes}} );
+        my $uniques     = join( ',', @{$ct_hash->{unique_index}} );
 
         $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
 
@@ -1768,6 +1869,7 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
 
     if( $temp_table->{count} > $BULK_ACTION_CUTOFF )
     {
+        my $columns = join( ',', @$table_columns );
         _log( $LOG_LEVEL_DEBUG, "Performing large update optimization ($temp_table->{count} possible rows)" );
         $handle->do( 'BEGIN' );
         $handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
@@ -1786,7 +1888,10 @@ END_SQL
 
         my $INSERT_Q = <<END_SQL;
         INSERT INTO $cache_table_schema.$cache_table_name
-             SELECT *
+                    (
+                        $columns
+                    )
+             SELECT $columns
                FROM $temp_table->{name}
 END_SQL
 

@@ -409,8 +409,6 @@ sub parent_loop($$$)
         { type => HASHREF }, # local mapping of pk_maint_obj -> pid
     );
 
-    #print Dumper( $WORKER_STATUSES );
-    #print Dumper( $WORKER_FILTER_TABLES );
     my $XID_MAP = [];
     my $handle = DBI->connect(
         $CONNECTION_MAP->{connection_string},
@@ -609,10 +607,7 @@ sub parent_loop($$$)
         ## CHANGE MANAGEMENT
         my $num_in_flight_changes   = 0; # number of changes we're queueing
         my $num_outstanding_changes = 0; # number of changes we've queued previously
-        #print "Peeking uneeded changes\n";
-        #&replication_slot_peek_unneeded_changes( $handle, \$max_idle_lsn, $all_filter_tables );
-        #print "Uneeded changes peeked\n";
-        my $WT_LOCKED = 0;
+        my $WT_LOCKED               = 0;
 
         ### LSN / Change Management
         # Here we peek changes (get them but do not change the slot's LSN). These changes are then passed to child processes and,
@@ -632,7 +627,6 @@ sub parent_loop($$$)
             foreach my $change( @$data )
             {
                 $num_in_flight_changes++;
-                #print Dumper( $change );
                 if( !$WT_LOCKED )
                 {
                     tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
@@ -749,7 +743,6 @@ sub parent_loop($$$)
             if( defined( $dispatched_changes->{$pid} ) && scalar( @{$dispatched_changes->{$pid}} ) > 0 )
             {
                 my @ordered_changes = sort lsn_cmp @{$dispatched_changes->{$pid}};
-                #print Dumper( @ordered_changes );
                 my $remove_lsns = [];
                 foreach my $dispatched_lsn( @ordered_changes )
                 {
@@ -766,7 +759,6 @@ sub parent_loop($$$)
                     if( defined( $dispatched_changes->{$pid}->[$index] ) && $dispatched_changes->{$pid}->[$index] eq $remove_lsn )
                     {
                         splice( @{$dispatched_changes->{$pid}}, $index, 1 );
-                        #print "Removed $remove_lsn from $pid\n";
                     }
                 }
             }
@@ -799,18 +791,6 @@ sub parent_loop($$$)
         {
             $max_idle_lsn = $last_peeked_lsn;
         }
-
-        #print "LSN logic entry:\n";
-        #print "max_idle_lsn: $max_idle_lsn\n" if( $max_idle_lsn );
-        #print "max_idle_lsn: NULL\n" unless( $max_idle_lsn );
-        #print "last_peeked_lsn: $last_peeked_lsn\n" if( $last_peeked_lsn );
-        #print "last_peeked_lsn: NULL\n" unless( $last_peeked_lsn );
-        #print "num_in_flight_changes: $num_in_flight_changes\n";
-        #print "num_outstanding_changes: $num_outstanding_changes\n";
-        #print "last_seeked_lsn: $last_seeked_lsn\n" if( $last_seeked_lsn );
-        #print "last_seeked_lsn: NULL\n" unless( $last_seeked_lsn );
-        #print "YOUNGEST_IN_FLIGHT: $youngest_in_flight_lsn\n" if( $youngest_in_flight_lsn );
-        #print "YOUNGEST_IN_FLIGHT: NULL\n" unless( $youngest_in_flight_lsn );
 
         $seekable_lsn = $max_idle_lsn;
 
@@ -845,7 +825,6 @@ sub parent_loop($$$)
         sleep( $SLEEP_TIMER );
 
         ## WORKER HEALTH CHECKS
-
         ## XID CHAIN MANAGEMENT
         if( $ENABLE_FAST_DELETE )
         {
@@ -1019,6 +998,7 @@ sub worker_cache_refresh($$$$)
        || scalar( @{$cache_hash->{cache_table_uniques}} ) == 0
       )
     {
+
         unless( create_cache_table_unique( $handle, $cache_hash ) )
         {
             _log(
@@ -1234,7 +1214,6 @@ sub worker_entrypoint($$$$)
             my $max_peeked_lsn;
             my $max_applied_lsn;
             my $test_hash = &get_ct_digest( $handle, $pk_maintenance_object );
-
             if( !defined $test_hash )
             {
                 _log(
