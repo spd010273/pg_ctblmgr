@@ -185,7 +185,7 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
                ${DEFAULT_SEEK_COUNT}::INTEGER,
                'wal-level'::VARCHAR,
                ?::VARCHAR,
-               'filter-tables'::VARCHAR,
+               'filter-table'::VARCHAR,
                ?::VARCHAR,
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR
@@ -218,7 +218,7 @@ Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
                NULL::INTEGER,
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR,
-               'filter-tables'::VARCHAR,
+               'filter-table'::VARCHAR,
                ?::VARCHAR
            )
   ORDER BY lsn DESC
@@ -237,7 +237,7 @@ Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
                ?::VARCHAR,
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR,
-               'filter-tables'::VARCHAR,
+               'filter-table'::VARCHAR,
                ?
            )
   ORDER BY lsn ASC
@@ -1349,7 +1349,6 @@ sub replication_peek($$$$) :Export( :MANDATORY )
         while( my $row = $sth->fetchrow_hashref() )
         {
             my $lsn  = $row->{lsn};
-
             if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
             {
                 $$max_lsn = $lsn;
@@ -1549,7 +1548,7 @@ sub create_cache_table($$)
         my $done            = 0;
         my $offset          = 0;
         my $populate_q      = $CREATE_POPULATE;
-        my $initial_orderby = join( ',', @{$ct_hash->{indexes}} );
+        my $initial_orderby = join( ',', @{$ct_hash->{unique_index}} );
 
         $populate_q =~ s/__TABLE__/${schema}.${name}/;
         $populate_q =~ s/__DEFINITION__/$definition/;
@@ -1700,7 +1699,6 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
-    #print "$query\n";
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
     my $sth             = try_query( $handle, $tt_query );
@@ -1923,7 +1921,6 @@ END_SQL
          WHERE $where_clause
            AND $diff_distinct
 END_SQL
-        #print "$UPDATE_Q\n";
         my $sth = &try_query( $handle, $UPDATE_Q, [] );
 
         return 0 unless( $sth );
