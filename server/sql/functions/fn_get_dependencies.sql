@@ -33,7 +33,8 @@ BEGIN
     FOR my_schema, my_table IN(
     WITH tt_pk_locator AS
     (
-        SELECT c_n.nspname::VARCHAR AS schema_name,
+        SELECT c.oid,
+			   c_n.nspname::VARCHAR AS schema_name,
                c.relname::VARCHAR AS table_name,
                array_agg( DISTINCT con_a_att.attname::VARCHAR ) AS primary,
                array_agg( DISTINCT con_b_att.attname::VARCHAR ) AS secondary,
@@ -86,13 +87,33 @@ BEGIN
             ON i.indrelid = c.oid
            AND i.indisunique IS TRUE
       GROUP BY c_n.nspname::VARCHAR,
-               c.relname::VARCHAR
+               c.oid::VARCHAR
     ),
     tt_dependencies AS
     (
-        SELECT tt.schema_name AS schema_name,
-               tt.table_name AS table_name
-          FROM tt_pk_locator tt
+		WITH RECURSIVE tt_inherited_dependencies AS
+		(
+			SELECT inh.inhrelid AS oid
+			  FROM tt_pk_locator tt
+		INNER JOIN pg_inherits inh
+				ON inh.inhparent = tt.oid
+			 UNION
+			SELECT inh.inhrelid AS oid
+			  FROM tt_inherited_dependencies tt
+		INNER JOIN pg_inherits inh
+				ON inh.inhparent = tt.oid
+		)
+			SELECT n.nspname::VARCHAR AS schema_name,
+				   c.relname::VARCHAR AS table_name
+			  FROM tt_inherited_dependencies tt
+		INNER JOIN pg_class c
+				ON c.oid = tt.oid
+		INNER JOIN pg_namespace n
+				ON n.oid = c.relnamespace
+			 UNION
+			SELECT tt.schema_name,
+				   tt.table_name
+			  FROM tt_pk_locator tt
     )
         SELECT schema_name,
                table_name

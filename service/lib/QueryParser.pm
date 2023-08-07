@@ -26,7 +26,8 @@ Readonly::Scalar my $OID_CACHE => <<END_SQL;
     SELECT n.nspname::VARCHAR AS schema_name,
            c.relname::VARCHAR AS obj_name,
            c.oid,
-           'r' AS type
+           'r' AS type,
+           NULL::OID AS dep
       FROM pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
@@ -35,11 +36,23 @@ INNER JOIN pg_namespace n
     SELECT n.nspname::VARCHAR AS schema_name,
            p.proname::VARCHAR AS obj_name,
            p.oid,
-           'f' AS type
+           'f' AS type,
+           NULL::OID AS dep
       FROM pg_proc p
 INNER JOIN pg_namespace n
         ON n.oid = p.pronamespace
        AND n.nspname::VARCHAR != 'pg_toast'
+     UNION ALL
+    SELECT n.nspname::VARCHAR AS schema_name,
+           c.relname::VARCHAR AS obj_name,
+           c.oid,
+           'p' AS type,
+           inh.inhrelid AS dep
+      FROM pg_class c
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN pg_inherits inh
+        ON inh.inhparent = c.oid
 END_SQL
 
 Readonly::Scalar my $GET_RELATION_TYPEMODS => <<END_SQL;
@@ -125,8 +138,22 @@ sub get_relcache($) :Export( :MANDATORY )
         my $schema = $row->{schema_name};
         my $name   = $row->{obj_name};
         my $oid    = $row->{oid};
+        my $dep    = $row->{dep};
         $cache->{rels}->{$schema}->{$name} = $oid if( $row->{type} eq 'r' );
         $cache->{func}->{$schema}->{$name} = $oid if( $row->{type} eq 'f' );
+        $cache->{oid}->{$oid} = { schema => $schema, name => $name };
+
+        if( $row->{type} eq 'p' )
+        {
+            if( !defined( $cache->{deps}->{$schema}->{$name} ) )
+            {
+                $cache->{deps}->{$schema}->{$name} = [ $dep ];
+            }
+            else
+            {
+                push( @{$cache->{deps}->{$schema}->{$name}}, $dep );
+            }
+        }
     }
 
     $sth->finish();
@@ -234,28 +261,56 @@ sub resolve_relation($$)
     return;
 }
 
-sub add_table_mapping($$$$$$$;$)
+sub get_inheritance($$)
 {
-    my(
-        $relcache,
-        $table_mapping,
-        $obj_name,
-        $obj_alias,
-        $parent,
-        $location,
-        $is_function,
-        $is_cte
-      ) = validate_pos(
+    my( $relcache, $relation ) = validate_pos(
         @_,
         { type => HASHREF },
-        { type => HASHREF },
-        { type => SCALAR },
-        { type => SCALAR | UNDEF },
-        { type => SCALAR | UNDEF },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR | UNDEF, optional => 1 },
+        { type => SCALAR }
     );
+
+    my $obj_data = resolve_relation( $relcache, $relation );
+
+    return if( !defined( $obj_data ) );
+
+    my $schema = $obj_data->{schema};
+    my $name   = $obj_data->{name};
+
+    # The passed-in item is assumed to be a parent of inheritence - so we need to locate all children
+    my $ret = [];
+    if(
+           defined( $relcache->{deps}->{$schema} )
+        && defined( $relcache->{deps}->{$schema}->{$name} )
+      )
+    {
+        foreach my $dep( @{$relcache->{deps}->{$schema}->{$name}} )
+        {
+            my $dep_schema = $relcache->{oid}->{$dep}->{schema};
+            my $dep_name   = $relcache->{oid}->{$dep}->{name};
+            push( @$ret, "${dep_schema}.${dep_name}" );
+        }
+    }
+
+    return $ret if( scalar( $ret ) > 0 );
+    return;
+}
+
+sub add_table_mapping($)
+{
+    my( $map ) = validate_pos(
+        @_,
+        { type => HASHREF },
+    );
+
+    my $relcache      = $map->{relcache};
+    my $table_mapping = $map->{table_mapping};
+    my $obj_name      = $map->{obj_name};
+    my $obj_alias     = $map->{obj_alias};
+    my $parent        = $map->{parent};
+    my $location      = $map->{location};
+    my $is_function   = $map->{is_function};
+    my $is_cte        = $map->{is_cte};
+    my $find_inh      = $map->{find_inh};
 
     if( defined $is_cte && $is_cte )
     {
@@ -270,19 +325,22 @@ sub add_table_mapping($$$$$$$;$)
         {
             delete $table_mapping->{RELS}->{$obj_name};
         }
+
         return;
     }
 
     my $obj_data = resolve_relation( $relcache, $obj_name );
 
     return unless( $obj_data ); # Likely a CTE
+    print "Resolved '$obj_name' to schema:$obj_data->{schema},name:$obj_data->{name}\n";
 
-    $obj_name = $obj_data->{name};
+    $obj_name      = $obj_data->{name};
     my $obj_schema = $obj_data->{schema};
 
     if( defined $is_function && $is_function )
     {
         my $target = $table_mapping->{FUNCTIONS}->{$obj_schema}->{$obj_name};
+
         if(
                !defined( $target )
             && !defined( $target->{$obj_alias} )
@@ -294,6 +352,7 @@ sub add_table_mapping($$$$$$$;$)
                     location => $location
                 }
             ];
+
             return;
         }
 
@@ -314,12 +373,29 @@ sub add_table_mapping($$$$$$$;$)
         return;
     }
 
+    if( $find_inh )
+    {
+        if(
+               defined( $relcache->{deps}->{$obj_schema} )
+            && defined( $relcache->{deps}->{$obj_schema}->{$obj_name} )
+          )
+        {
+            foreach my $dep( @{$relcache->{deps}->{$obj_schema}->{$obj_name}} )
+            {
+                my $dep_schema = $relcache->{oid}->{$dep}->{schema};
+                my $dep_name   = $relcache->{oid}->{$dep}->{name};
+                # XXX
+            }
+        }
+    }
+
     if( grep( /^$obj_name$/, keys %{$table_mapping->{CTES}} ) )
     {
         return;
     }
 
     my $reltarg = $table_mapping->{RELS}->{$obj_schema}->{$obj_name};
+
     if(
            !defined( $reltarg )
         && !defined( $reltarg->{$obj_alias} )
@@ -331,6 +407,7 @@ sub add_table_mapping($$$$$$$;$)
                 location => $location
             }
         ];
+
         return;
     }
 
@@ -346,6 +423,7 @@ sub add_table_mapping($$$$$$$;$)
             @{$reltarg->{$obj_alias}},
             { parent => $parent, location => $location }
         );
+
         return;
     }
 
@@ -470,14 +548,19 @@ sub get_joined_rels($$$$;$)
                         }
                     }
                 );
+
                 add_table_mapping(
-                    $relcache,
-                    $table_mapping,
-                    $function_name,
-                    $function_alias,
-                    $parent,
-                    $location,
-                    1
+                    {
+                        relcache      => $relcache,
+                        table_mapping => $table_mapping,
+                        obj_name      => $function_name,
+                        obj_alias     => $function_alias,
+                        parent        => $parent,
+                        location      => $location,
+                        is_function   => 1,
+                        is_cte        => 0,
+                        find_inh      => 0
+                    }
                 );
             }
             elsif( $json_fragment->{rarg}->{name} eq 'RANGEVAR' )
@@ -492,6 +575,14 @@ sub get_joined_rels($$$$;$)
                 }
 
                 my $alias = $right_relation;
+                my $inh;
+                if(
+                       defined( $json_fragment->{rarg}->{inh} )
+                    && $json_fragment->{rarg}->{inh}
+                  )
+                {
+                    $inh = get_inheritance( $relcache, $right_relation );
+                }
 
                 if( defined( $json_fragment->{rarg}->{alias} ) )
                 {
@@ -503,25 +594,36 @@ sub get_joined_rels($$$$;$)
                     $location = $json_fragment->{rarg}->{location};
                 }
 
+                my $frag = {
+                    $alias => {
+                        obj      => $right_relation,
+                        type     => 'RELATION',
+                        location => $location,
+                    }
+                };
+
+                if( defined( $inh ) )
+                {
+                    $frag->{$alias}->{inh} = $inh;
+                }
+
                 push(
                     @$from_list,
-                    {
-                        $alias => {
-                            obj      => $right_relation,
-                            type     => 'RELATION',
-                            location => $location,
-                        }
-                    }
+                    $frag
                 );
 
                 add_table_mapping(
-                    $relcache,
-                    $table_mapping,
-                    $right_relation,
-                    $alias,
-                    $parent,
-                    $location,
-                    0
+                    {
+                        relcache      => $relcache,
+                        table_mapping => $table_mapping,
+                        obj_name      => $right_relation,
+                        obj_alias     => $alias,
+                        parent        => $parent,
+                        location      => $location,
+                        is_function   => 0,
+                        is_cte        => 0,
+                        find_inh      => 0
+                    }
                 );
             }
             elsif( $json_fragment->{rarg}->{name} eq 'RANGESUBSELECT' )
@@ -574,7 +676,6 @@ sub get_joined_rels($$$$;$)
                   . "$json_fragment->{rarg}->{name}\n"
                 );
                 $PARSE_ERROR = 1;
-                print Dumper( $json_fragment->{rarg} );
                 return;
             }
         }
@@ -603,14 +704,19 @@ sub get_joined_rels($$$$;$)
             }
 
             add_table_mapping(
-                $relcache,
-                $table_mapping,
-                $function_name,
-                $function_alias,
-                $parent,
-                $location,
-                1
+                {
+                    relcache      => $relcache,
+                    table_mapping => $table_mapping,
+                    obj_name      => $function_name,
+                    obj_alias     => $function_alias,
+                    parent        => $parent,
+                    location      => $location,
+                    is_function   => 1,
+                    is_cte        => 0,
+                    find_inh      => 0
+                }
             );
+
             return [
                 {
                     $function_alias => {
@@ -624,7 +730,11 @@ sub get_joined_rels($$$$;$)
         elsif( $json_fragment->{name} eq 'RANGEVAR' )
         {
             my $left_relation = $json_fragment->{relname};
-            my $alias = $left_relation;
+            my $alias         = $left_relation;
+            my $find_inh      = 0;
+
+            # TODO, add support for partitions / inheritance here
+            $find_inh = 1 if( defined( $json_fragment->{inh} ) && $json_fragment->{inh} );
 
             if( defined( $json_fragment->{schemaname} ) )
             {
@@ -639,23 +749,34 @@ sub get_joined_rels($$$$;$)
             }
 
             add_table_mapping(
-                $relcache,
-                $table_mapping,
-                $left_relation,
-                $alias,
-                $parent,
-                $location,
-                0
-            );
-            return [
                 {
+                    relcache      => $relcache,
+                    table_mapping => $table_mapping,
+                    obj_name      => $left_relation,
+                    obj_alias     => $alias,
+                    parent        => $parent,
+                    location      => $location,
+                    is_function   => 0,
+                    is_cte        => 0,
+                    find_inh      => $find_inh
+                }
+            );
+
+            my $frag = {
                     $alias => {
                         obj      => $left_relation,
                         type     => 'RELATION',
                         location => $json_fragment->{location},
                     }
-                }
-            ];
+            };
+
+            if( $find_inh )
+            {
+                $frag->{$alias}->{inh} = get_inheritance( $relcache, $left_relation );
+                # XXX another spot to inject deps
+            }
+
+            return [ $frag ];
         }
         elsif( $json_fragment->{name} eq 'RANGESUBSELECT' )
         {
@@ -852,16 +973,21 @@ sub parse_cte($$$$)
 
         $index++;
         my $location = $cte_obj->{location};
+
         add_table_mapping(
-            $relcache,
-            $table_mapping,
-            $local_parent,
-            undef,
-            $parent,
-            $location,
-            0,
-            1
+            {
+                relcache      => $relcache,
+                table_mapping => $table_mapping,
+                obj_name      => $local_parent,
+                obj_alias     => undef,
+                parent        => $parent,
+                location      => $location,
+                is_function   => 0,
+                is_cte        => 1,
+                find_inh      => 0
+            }
         );
+
         push( @$ctes, $cte_data );
     }
 
@@ -1319,6 +1445,19 @@ sub recursive_from_finder($$$)
                     my $schema = $qual->{schema};
                     my $name   = $qual->{name};
                     $table_mapping->{BINDS}->{$where_start}->{rels}->{$schema}->{$alias}->{$name} = 1;
+
+                    if( defined( $rel->{$alias}->{inh} ) )
+                    {
+                        foreach my $qual( @{$rel->{$alias}->{inh}} )
+                        {
+                            my $obj_data = resolve_relation( $relcache, $qual );
+
+                            my $dep_schema = $obj_data->{schema};
+                            my $dep_name   = $obj_data->{name};
+
+                            $table_mapping->{BINDS}->{$where_start}->{rels}->{$dep_schema}->{$alias}->{$dep_name} = 1;
+                        }
+                    }
                 }
             }
         }
