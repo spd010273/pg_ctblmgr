@@ -332,7 +332,6 @@ sub add_table_mapping($)
     my $obj_data = resolve_relation( $relcache, $obj_name );
 
     return unless( $obj_data ); # Likely a CTE
-    print "Resolved '$obj_name' to schema:$obj_data->{schema},name:$obj_data->{name}\n";
 
     $obj_name      = $obj_data->{name};
     my $obj_schema = $obj_data->{schema};
@@ -1416,6 +1415,7 @@ sub recursive_from_finder($$$)
       )
     {
         my $where_start = $json_fragment->{where_start};
+
         foreach my $rel( @{$json_fragment->{from}} )
         {
             foreach my $alias( keys %$rel )
@@ -1434,12 +1434,16 @@ sub recursive_from_finder($$$)
                 else
                 {
                     $qual = resolve_relation( $relcache, $obj_name );
+
                     unless(
                                defined( $qual->{schema} )
                             && defined( $qual->{name} )
                           )
                     {
-                        _log( $LOG_LEVEL_DEBUG, "Removing unresolvable relation $obj_name" );
+                        _log(
+                            $LOG_LEVEL_DEBUG,
+                            "Removing unresolvable relation $obj_name"
+                        );
                         next;
                     }
                     my $schema = $qual->{schema};
@@ -1450,8 +1454,7 @@ sub recursive_from_finder($$$)
                     {
                         foreach my $qual( @{$rel->{$alias}->{inh}} )
                         {
-                            my $obj_data = resolve_relation( $relcache, $qual );
-
+                            my $obj_data   = resolve_relation( $relcache, $qual );
                             my $dep_schema = $obj_data->{schema};
                             my $dep_name   = $obj_data->{name};
 

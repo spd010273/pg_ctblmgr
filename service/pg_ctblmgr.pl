@@ -51,6 +51,7 @@ Readonly my $ENABLE_FAST_DELETE => 1;
 Readonly my $MAX_XID_LENGTH     => 10;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 1; # seconds for main loop
+Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
 
 Readonly my $TCP_KEEPALIVE          => 60;
 Readonly my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
@@ -1813,7 +1814,7 @@ undef( $handle );
 ## GLOBAL SHM VARIABLES
 my $WORKER_FILTER_TABLES = {};
 my $WORKER_STATUSES      = {};
-my $XID_MAP = [];
+my $XID_MAP              = [];
 
 tie(
     $WORKER_FILTER_TABLES,
@@ -1821,7 +1822,9 @@ tie(
     {
         key     => 'WORKER_FILTER_TABLES',
         create  => 1,
-        destroy => 1
+        destroy => 1,
+        limit   => 0,
+        size    => $DEFAULT_WFT_SIZE,
     }
 );
 tie(
