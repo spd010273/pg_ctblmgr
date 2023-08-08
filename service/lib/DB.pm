@@ -185,7 +185,7 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
                ${DEFAULT_SEEK_COUNT}::INTEGER,
                'wal-level'::VARCHAR,
                ?::VARCHAR,
-               'filter-table'::VARCHAR,
+               'filter-tables'::VARCHAR,
                ?::VARCHAR,
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR
@@ -218,7 +218,7 @@ Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
                NULL::INTEGER,
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR,
-               'filter-table'::VARCHAR,
+               'filter-tables'::VARCHAR,
                ?::VARCHAR
            )
   ORDER BY lsn DESC
@@ -237,7 +237,7 @@ Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
                ?::VARCHAR,
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR,
-               'filter-table'::VARCHAR,
+               'filter-tables'::VARCHAR,
                ?
            )
   ORDER BY lsn ASC

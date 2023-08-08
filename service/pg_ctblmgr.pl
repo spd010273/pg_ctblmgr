@@ -47,6 +47,7 @@ use QueryParser;
 
 # enables holding past transactions open for a trailing XID chain we can use
 # to lookup historic data
+
 Readonly my $ENABLE_FAST_DELETE => 1;
 Readonly my $MAX_XID_LENGTH     => 10;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
@@ -59,7 +60,7 @@ Readonly my $TCP_KEEPALIVE_COUNT    => 200; #720;
 Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
 our $OUTPUT_AUTOFLUSH = 1;
-our $|=1;
+our $|                = 1;
 
 ## GLOBAL VARIABLES
 $PARENT_PID  = $PROCESS_ID;
@@ -152,6 +153,7 @@ sub shm_cleanup()
     # will not be automatically be cleaned up by the kernel. This can be
     # done manually with ipcs / ipcrm
     return unless( $PROCESS_ID != $PARENT_PID );
+
     my $WORKER_FILTER_TABLES;
     my $WORKER_STATUSES;
     my @XID_MAP;
@@ -161,6 +163,7 @@ sub shm_cleanup()
         'IPC::Shareable',
         { key => 'WORKER_FILTER_TABLES' }
     );
+
     tie(
         $WORKER_STATUSES,
         'IPC::Shareable',
@@ -175,9 +178,11 @@ sub shm_cleanup()
             { key => 'XID' }
         );
     }
+
     tied( $WORKER_FILTER_TABLES )->clean_up_all();
-    tied( $WORKER_STATUSES )->clean_up_all();
-    tied( @XID_MAP )->clean_up_all() if( $ENABLE_FAST_DELETE );
+    tied( $WORKER_STATUSES      )->clean_up_all();
+    tied( @XID_MAP              )->clean_up_all() if( $ENABLE_FAST_DELETE );
+
     return;
 }
 
@@ -199,6 +204,7 @@ sub shm_pre_cleanup()
 sub get_distinct_filter_tables()
 {
     my $WORKER_FILTER_TABLES;
+
     tie(
         $WORKER_FILTER_TABLES,
         'IPC::Shareable',
@@ -207,6 +213,7 @@ sub get_distinct_filter_tables()
 
     my $DISTINCT_FILTER_TABLES = [];
     tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+
     foreach my $pid( keys %$WORKER_FILTER_TABLES )
     {
         foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$pid}} )
@@ -217,6 +224,7 @@ sub get_distinct_filter_tables()
             }
         }
     }
+
     tied( $WORKER_FILTER_TABLES )->shunlock();
 
     return $DISTINCT_FILTER_TABLES;
@@ -387,7 +395,7 @@ sub new_xid_placeholder($$$)
             return 0;
         }
 
-        $row = $sth->fetchrow_hashref();
+        $row           = $sth->fetchrow_hashref();
         $$new_snapshot = $row->{snapshot};
         $sth->finish();
         $$new_handle->do(
@@ -440,6 +448,7 @@ sub parent_loop($$$)
     }
 
     my $local_xid_map = {};
+
     if( $ENABLE_FAST_DELETE && !tied( $XID_MAP ) )
     {
         tie( $XID_MAP, 'IPC::Shareable', { key => 'XID' } );
@@ -474,11 +483,11 @@ sub parent_loop($$$)
     #         activity on the base tables which 'drive' our cache tables.
 
     my $DISTINCT_FILTER_TABLES = get_distinct_filter_tables();
-    my $all_filter_tables = join( ',', @$DISTINCT_FILTER_TABLES );
-    my $WORKER_DATA = {};
-    $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
-    my $wal_level = 'M';
-    my $dispatched_changes = {};
+    my $all_filter_tables      = join( ',', @$DISTINCT_FILTER_TABLES );
+    my $WORKER_DATA            = {};
+    $WORKER_DATA               = populate_worker_data( $handle, $WORKER_DATA );
+    my $wal_level              = 'M';
+    my $dispatched_changes     = {};
 
     while( 1 )
     {
@@ -487,13 +496,19 @@ sub parent_loop($$$)
         my $seekable_lsn;
         ## CACHE TABLE MANAGEMENT
         my $tmp_worker_data = {};
-        $tmp_worker_data = populate_worker_data( $handle, $tmp_worker_data );
+        $tmp_worker_data    = populate_worker_data(
+            $handle,
+            $tmp_worker_data
+        );
 
         # handle edge case startup with 0 workers
         unless( defined $tmp_worker_data )
         {
             # Idle until we have workers to start
-            _log( $LOG_LEVEL_DEBUG, "It appears there are no workers to create, idling until they exist" );
+            _log(
+                $LOG_LEVEL_DEBUG,
+                'It appears there are no workers to create, idling until they exist'
+            );
             sleep( 4 );
         }
         else
@@ -508,7 +523,11 @@ sub parent_loop($$$)
 
         if( defined( $WORKER_DATA ) && defined( $tmp_worker_data ) )
         {
-            check_for_new_cache_tables( $handle, $WORKER_DATA, $tmp_worker_data );
+            check_for_new_cache_tables(
+                $handle,
+                $WORKER_DATA,
+                $tmp_worker_data
+            );
         }
 
         if(
@@ -518,8 +537,12 @@ sub parent_loop($$$)
           )
         {
             # Cache table changes detected
-            _log( $LOG_LEVEL_INFO, 'Detected changes to cache table definitions' );
+            _log(
+                $LOG_LEVEL_INFO,
+                'Detected changes to cache table definitions'
+            );
             # Remove old children
+
             foreach my $pk_maintenance_object( keys %{$diff->{old}} )
             {
                 my $target_pid = $worker_mapping->{$pk_maintenance_object};
@@ -548,12 +571,22 @@ sub parent_loop($$$)
             # Add new children
             foreach my $pk_maintenance_object( keys %{$diff->{new}} )
             {
-                _log( $LOG_LEVEL_DEBUG, "Adding new worker for pk $pk_maintenance_object" );
-                # XXX new worker code - NEED TO ADD FT changes to WFT
-                my $worker_data = get_worker_list( $handle, $pk_maintenance_object );
+                _log(
+                    $LOG_LEVEL_DEBUG,
+                    "Adding new worker for pk $pk_maintenance_object"
+                );
+
+                my $worker_data = get_worker_list(
+                    $handle,
+                    $pk_maintenance_object
+                );
+
                 unless( $worker_data )
                 {
-                    _log( $LOG_LEVEL_ERROR, 'Need to spin up new child but could not locate maintenance object' );
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        'Need to spin up new child but could not locate maintenance object'
+                    );
                     next;
                 }
 
@@ -562,7 +595,7 @@ sub parent_loop($$$)
                 my $filter_tables       = $worker_data->{filter_tables};
                 my $maintenance_channel = $worker_data->{maintenance_channel};
                 my $ct_name             = $worker_data->{name};
-                my $child_pid = fork();
+                my $child_pid           = fork();
 
                 if( defined( $child_pid ) and $child_pid == 0 )
                 {
@@ -591,16 +624,16 @@ sub parent_loop($$$)
                     }
                     tied( $WORKER_FILTER_TABLES )->shunlock();
 
-                    $WORKER_STATUSES->{$child_pid}->{status}   = $WORKER_STATUS_STARTUP;
-                    $WORKER_STATUSES->{$child_pid}->{shutdown} = 0;
-                    $WORKER_STATUSES->{$child_pid}->{last_lsn} = undef;
+                    $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
+                    $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
+                    $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
                     $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
                     $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
                     _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
                 }
                 else
                 {
-                    _log( $LOG_LEVEL_FATAL, "Failed to fork worker process" );
+                    _log( $LOG_LEVEL_FATAL, 'Failed to fork worker process' );
                 }
             }
         }
@@ -615,6 +648,9 @@ sub parent_loop($$$)
         # after the relevent change is acknowledged, we 'seek' these changes, in that we acknowledge them with respect to
         # the replication slot.
         my $data;
+
+        _log( $LOG_LEVEL_DEBUG, "Peeking replication slot" );
+
         $data = &replication_peek(
             $handle,
             $all_filter_tables,
@@ -622,9 +658,12 @@ sub parent_loop($$$)
             \$last_peeked_lsn
         );
 
+        _log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" );
+
         if( $data )
         {
             # iterate over each change in outer loop - one change may go to one or more workers
+            _log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
             foreach my $change( @$data )
             {
                 $num_in_flight_changes++;
@@ -669,6 +708,8 @@ sub parent_loop($$$)
                     }
                 }
             }
+
+            _log( $LOG_LEVEL_DEBUG, "All changes dispatched" );
 
             # These are changes that are still considered in-flight
             foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
@@ -741,7 +782,10 @@ sub parent_loop($$$)
             # here we will maintain the local diaptched_changes versus the global applied lsns
             # if we find a dispatched change for this PID that is <= the PID's last lsn, we remove it
             # such that dispatched changes contains a list of outstanding (in-flight) LSNs
-            if( defined( $dispatched_changes->{$pid} ) && scalar( @{$dispatched_changes->{$pid}} ) > 0 )
+            if(
+                   defined( $dispatched_changes->{$pid} )
+                && scalar( @{$dispatched_changes->{$pid}} ) > 0
+              )
             {
                 my @ordered_changes = sort lsn_cmp @{$dispatched_changes->{$pid}};
                 my $remove_lsns = [];
@@ -757,7 +801,10 @@ sub parent_loop($$$)
                 {
                     my $index = 0;
                     $index++ until( $dispatched_changes->{$pid}->[$index] eq $remove_lsn );
-                    if( defined( $dispatched_changes->{$pid}->[$index] ) && $dispatched_changes->{$pid}->[$index] eq $remove_lsn )
+                    if(
+                           defined( $dispatched_changes->{$pid}->[$index] )
+                        && $dispatched_changes->{$pid}->[$index] eq $remove_lsn
+                      )
                     {
                         splice( @{$dispatched_changes->{$pid}}, $index, 1 );
                     }
