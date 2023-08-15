@@ -220,6 +220,7 @@ sub get_cache_table_definition($$$$$)
 
     my $name;
     my $namespace;
+
     parse_cache_table( $cache_table, \$namespace, \$name );
 
     my $get_def_query = <<END_SQL;
@@ -251,6 +252,7 @@ END_SQL
 
     $$def = $row->{definition};
     $sth = $handle->prepare( $CACHE_TABLE_COLUMNS );
+
 	return undef unless( $sth );
 
 	$sth->bind_param( 1, $namespace );
@@ -268,11 +270,9 @@ END_SQL
     }
 
     $sth->finish();
-
     $sth = $handle->prepare( $CACHE_TABLE_UNIQUE );
 
     return undef unless( $sth );
-
     $sth->bind_param( 1, $namespace );
     $sth->bind_param( 2, $name );
     $sth->bind_param( 3, $namespace );
@@ -346,7 +346,9 @@ sub command_check($$)
         $handle->do( 'ROLLBACK' );
         return undef;
     }
+
     my $index = 0;
+
     foreach my $unique_columns( @$uniques )
     {
         my $cols = join( ',', @$unique_columns );
@@ -357,7 +359,7 @@ sub command_check($$)
     }
 
     my $create_ind_ct = 'CREATE INDEX ix_allcols_ct ON tt_ct(';
-    my $create_ind_cur = 'CREATE INDEX ix_allcols_Cur ON tt_current(';
+    my $create_ind_cur = 'CREATE INDEX ix_allcols_cur ON tt_current(';
     my $col_type_q = <<"END_SQL";
     SELECT t.typname
       FROM pg_class c
@@ -375,14 +377,24 @@ sub command_check($$)
 END_SQL
 
     my $col_type_sth = $handle->prepare( $col_type_q );
-    return undef unless( $col_type_sth );
+    unless( $col_type_sth )
+    {
+        carp( "Could not prep column type query" );
+        return undef;
+    }
+
     my $cast_cols = [];
+    my $ind_cols = []; 
 
     foreach my $column( @$columns )
     {
         $col_type_sth->bind_param( 1, 'tt_current' );
         $col_type_sth->bind_param( 2, $column );
-        return undef unless( $col_type_sth->execute() );
+        unless( $col_type_sth->execute() )
+        {
+            carp( "Type check of column $column failed" );
+            return undef;
+        }
    
         my $type_row = $col_type_sth->fetchrow_hashref(); 
         my $type = $type_row->{typname};
@@ -390,15 +402,17 @@ END_SQL
         if( $type eq 'json' || $type eq 'jsonb' )
         {
             push( @$cast_cols, "${column}::TEXT" );
+            push( @$ind_cols, "( ${column}::TEXT )" );
         }
         else
         {
             push( @$cast_cols, $column );
+            push( @$ind_cols, $column );
         }
     }
-   
-    $create_ind_ct .= join( ',', @$cast_cols ) . ')';
-    $create_ind_cur .= join( ',', @$cast_cols ) . ')';
+ 
+    $create_ind_ct .= join( ',', @$ind_cols ) . ')';
+    $create_ind_cur .= join( ',', @$ind_cols ) . ')';
     $handle->do( $create_ind_ct );
     $handle->do( $create_ind_cur );
     my $join_predicate = '( ( '
@@ -455,7 +469,8 @@ END_SQL
          WHERE $es_where
     )
 END_SQL
-
+    print "$check_query_left\n";
+    print "$check_query_right\n";
     print "Checking table validity, this may take some time.\n";
     unless( $handle->do( $check_query_left ) )
     {
@@ -473,7 +488,12 @@ END_SQL
 
     my $count_sth = $handle->prepare( 'SELECT COUNT(*) AS count FROM tt_validation_left' );
 
-    return undef unless( $count_sth );
+    unless( $count_sth )
+    {
+        carp( "Failed to prep left count query" );
+        $handle->do( 'ROLLBACK' );
+        return undef;
+    }
 
     unless( $count_sth->execute() )
     {
@@ -503,6 +523,7 @@ END_SQL
     $handle->do( 'ROLLBACK' );
     if( $count_left > 0 || $count_right > 0 )
     {
+        carp( "Failed: L: $count_left, R: $count_right" );
         return 0;
     }
 

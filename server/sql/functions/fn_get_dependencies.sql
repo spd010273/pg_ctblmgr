@@ -87,7 +87,7 @@ BEGIN
             ON i.indrelid = c.oid
            AND i.indisunique IS TRUE
       GROUP BY c_n.nspname::VARCHAR,
-               c.oid::VARCHAR
+               c.oid
     ),
     tt_dependencies AS
     (

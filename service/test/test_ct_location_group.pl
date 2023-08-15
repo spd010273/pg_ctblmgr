@@ -7,7 +7,7 @@ use strict;
 use warnings;
 
 # Test will perform a change
-# check will return non-updated rows
+# check will return non-updated rows - should be 0
 # revert will put data back
 my $TEST_CASES = [
     {
@@ -15,12 +15,14 @@ my $TEST_CASES = [
         'test'   => "UPDATE tb_location SET name = add_translation( NULL, lower( get_translation( name ) ), 'en_US' ) WHERE location = ?",
         'check'  => "SELECT COUNT(*) AS count FROM ct_location_group WHERE location_name != lower( location_name ) AND location = ?",
         'revert' => "UPDATE tb_location SET name = add_translation( NULL, upper( get_translation( name ) ), 'en_US' ) WHERE location = ?",
+        'pre'    => 'SELECT COUNT(*) AS count FROM tb_location WHERE location = ? AND get_translation( name ) = lower( get_translation( name ) )'
     },
     {
         'name'   => 'UPDATE status',
-        'test'   => "UPDATE tb_location SET location_status = 2 WHERE location = ?",
-        'check'  => "SELECT COUNT(*) AS count FROM ct_location_group WHERE is_eligible_for_reset IS FALSE AND location = ?",
-        'revert' => "UPDATE tb_location SET location_status = 1 WHERE location = ?",
+        'test'   => 'UPDATE tb_location SET location_status = 2 WHERE location = ?',
+        'check'  => 'SELECT COUNT(*) AS count FROM ct_location_group WHERE is_eligible_for_reset IS FALSE AND location = ?',
+        'revert' => 'UPDATE tb_location SET location_status = 1 WHERE location = ?',
+        'pre'    => 'SELECT COUNT(*) AS count FROM tb_location WHERE location_status = 1 AND location = ?',
     }
 ];
 
@@ -63,7 +65,34 @@ PK: while( my $row = $sth->fetchrow_hashref() )
     my $check       = $case->{check};
     my $revert      = $case->{revert};
     my $title       = $case->{name};
+    my $pre         = $case->{pre};
 
+    # Check test start state
+    my $pre_check_sth = $handle->prepare( $pre );
+    
+    unless( $pre_check_sth )
+    {
+        print "Failed to check starting state for case $title, $pk_location\n";
+        next;
+    }
+
+    $pre_check_sth->bind_param( 1, $pk_location );
+
+    unless( $pre_check_sth->execute() )
+    {
+        print "Failed to validate starting state for case $title, $pk_location\n";
+        next;
+    }
+
+    my $count_row = $pre_check_sth->fetchrow_hashref();
+    if( $count_row->{count} == 0 )
+    {
+        print "Invalid starting state for $title, $pk_location\n";
+        next;
+    }
+
+    $pre_check_sth->finish();
+    # Make change
     my $test_sth    = $handle->prepare( $test );
 
     unless( $test_sth )
@@ -74,13 +103,13 @@ PK: while( my $row = $sth->fetchrow_hashref() )
 
     $test_sth->bind_param( 1, $pk_location );
 
-    my $t_start = [ gettimeofday() ];
-    my $t_end;
-
     unless( $test_sth->execute() )
     {
         print "Failed to execute test case $title for $pk_location\n";
     }
+
+    my $t_start = [ gettimeofday() ];
+    my $t_end;
 
     my $done = 0;
     my $iter = 0;
@@ -137,5 +166,30 @@ PK: while( my $row = $sth->fetchrow_hashref() )
         next;
     }
 
+    # Validate revert
+    my $post_check_sth = $handle->prepare( $check );
+    
+    unless( $post_check_sth )
+    {
+        print "Failed to check starting state for case $title, $pk_location\n";
+        next;
+    }
+
+    $post_check_sth->bind_param( 1, $pk_location );
+
+    unless( $post_check_sth->execute() )
+    {
+        print "Failed to validate starting state for case $title, $pk_location\n";
+        next;
+    }
+
+    $count_row = $post_check_sth->fetchrow_hashref();
+    if( $count_row->{count} == 0 )
+    {
+        print "Invalid starting state for $title, $pk_location\n";
+        next;
+    }
+
+    $post_check_sth->finish();
     sleep( 1 );
 }
