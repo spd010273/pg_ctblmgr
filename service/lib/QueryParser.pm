@@ -1671,7 +1671,35 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
         if( $index - 1 >= 0 )
         {
+            # Here we look for the next CTE in the statement, if present.
+            # This includes a recursive search in the case we run into something like:
+            # WITH ...
+            # (
+            #    <- This is the statement we are 'working on'
+            # ),
+            # tt_foo AS  <- We want this CTE's name
+            # (
+            #     WITH tt_bar AS
+            #     (
+            #         WITH tt_baz AS
+            #         (
+            #             ...
+            #         )
+            #             ...
+            #     )
+            #         ...
+            # )
+            #     ...
             $next_cte_name = $table_mapping->{BINDS}->{$starts[$index-1]}->{parent};
+        
+            my $recur_cte = $next_cte_name;
+
+            while( defined( $table_mapping->{CTES}->{$recur_cte}->{parent} ) )
+            {
+                $recur_cte = $table_mapping->{CTES}->{$recur_cte}->{parent};
+            }
+
+            $next_cte_name = $recur_cte;
         }
 
         if( !defined( $bind_end ) )
@@ -1773,7 +1801,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             return;
         }
 
-        #print "Proceeding mark: '$where_proceeding_clause_mark'\n";
+        print "Proceeding mark: '$where_proceeding_clause_mark'\n";
         my $preceeding_query  = substr( $new_q, 0, $bind_start );
         my $proceeding_query = substr(
             $new_q,

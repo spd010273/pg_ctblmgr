@@ -1699,6 +1699,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
+    # TODO This can take some time
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
     my $sth             = try_query( $handle, $tt_query );
@@ -2252,6 +2253,7 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
 
     my $join_clauses  = [];
     my $where_clauses = [];
+    my $index_elems   = [];
 
     foreach my $unique_columns( @$uniques )
     {
@@ -2263,24 +2265,53 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
             ' AND ',
             map { "tt.$_ IS NULL" } @$unique_columns
         );
+
+        my $index_elem = join( ',', @$unique_columns );
+
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
+        push( @$index_elems,   $index_elem   );
     }
 
+    my $delete_tt_name = "tt_base_data_${PROCESS_ID}";
     my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
     my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
     my $where_clause   = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
 
-    my $DELETE_Q = <<"END_SQL";
-    WITH tt_base_data AS
+    my $DELETE_TT_Q = << "END_SQL";
+    CREATE TEMP TABLE ${delete_tt_name} AS
     (
         $definition
-    ),
-    tt_rows_to_delete AS MATERIALIZED
+    )
+END_SQL
+
+    my $sth = &try_query( $handle, $DELETE_TT_Q, [] );
+    my $ind_ind = 0;
+
+    return 0 unless( $sth );
+    $sth->finish();
+
+    foreach my $ind( @$index_elems )
+    {
+        my $stmt = "CREATE INDEX ix_${delete_tt_name}_${ind_ind} ON ${delete_tt_name}( $ind ) ";
+        $ind_ind++;
+        unless( &try_query( $handle, $stmt, [] ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to create slow delete index"
+            );
+        }
+    }
+
+    # Create some indexes
+
+    my $DELETE_Q = <<"END_SQL";
+    WITH tt_rows_to_delete AS
     (
         SELECT $columns
           FROM $cache_table_schema.$cache_table_name vw
-     LEFT JOIN tt_base_data tt
+     LEFT JOIN $delete_tt_name tt
             ON $join_predicate
          WHERE $where_clause
     )
@@ -2289,8 +2320,14 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
           WHERE $join_predicate
 END_SQL
 
-    my $sth = &try_query( $handle, $DELETE_Q, [] );
-    return 0 unless( $sth );
+    $sth = &try_query( $handle, $DELETE_Q, [] );
+
+    unless( $sth )
+    {
+        $handle->do( "DROP TABLE IF EXISTS ${delete_tt_name}" );
+        return 0;
+    }
+
     $sth->finish();
     return 1;
 }

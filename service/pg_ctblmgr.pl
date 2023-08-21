@@ -649,7 +649,7 @@ sub parent_loop($$$)
         # the replication slot.
         my $data;
 
-        _log( $LOG_LEVEL_DEBUG, "Peeking replication slot" );
+        #_log( $LOG_LEVEL_DEBUG, "Peeking replication slot" );
 
         $data = &replication_peek(
             $handle,
@@ -658,7 +658,7 @@ sub parent_loop($$$)
             \$last_peeked_lsn
         );
 
-        _log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" );
+        #_log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" ) if( $last_peeked_lsn );
 
         if( $data )
         {
@@ -1409,6 +1409,7 @@ sub worker_entrypoint($$$$)
                     $changes
                 );
 
+                print "$query\n";
                 if( !&test_query( $handle, $query ) )
                 {
                     _log(
