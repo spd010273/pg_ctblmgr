@@ -18,8 +18,10 @@ use DBI;
 use Data::Dumper;
 use Getopt::Long;
 use File::Find;
+use File::Basename;
 use Try::Tiny;
 use Term::ANSIColor;
+use Cwd qw(abs_path);
 
 #### INTERNAL MODULES ####
 use FindBin;
@@ -185,6 +187,12 @@ sub process_file
         };
     }
 }
+
+my $program_path = abs_path( $PROGRAM_NAME );
+my $program_basename = basename( $PROGRAM_NAME );
+( my $program_dir = $program_path ) =~ s/DataPopulation[\/]$program_basename//;
+
+chdir( $program_dir ) or croak "Failed to go to proram directory: $!";
 
 find( { wanted => \&process_file, no_chdir => 1 }, 'DataPopulation/TestCase/' );
 
