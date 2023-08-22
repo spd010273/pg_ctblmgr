@@ -22,6 +22,12 @@ our $CONNECTION_MAP :Export( :MANDATORY );
 Readonly::Scalar our $BATCHED_CREATE     :Export( :MANDATORY ) => 1;
 Readonly::Scalar our $BATCH_SIZE         :Export( :MANDATORY ) => 1000000;
 Readonly::Scalar our $BULK_ACTION_CUTOFF :Export( :MANDATORY ) => 100000;
+
+Readonly::Scalar my $TCP_KEEPALIVE          => 60;
+Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
+Readonly::Scalar my $TCP_KEEPALIVE_COUNT    => 200; #720;
+Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
+
 Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
@@ -937,11 +943,80 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     return;
 }
 
+sub db_connect(;$) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT | UNDEF, optional => 1 }
+    );
+
+    # Fast conn check & ret
+    if( defined( $handle ) && $handle->ping() > 0 && $handle->pg_ping() > 0 )
+    {
+        return $handle;
+    }
+    else
+    {
+        if(
+              !defined( $CONNECTION_MAP )
+           || !defined( $CONNECTION_MAP->{connection_string} )
+           || !defined( $CONNECTION_MAP->{user_name} )
+          )
+        {
+            return undef;
+        }
+
+        $handle = DBI->connect(
+            $CONNECTION_MAP->{connection_string},
+            $CONNECTION_MAP->{user_name},
+            undef
+        );
+    }
+
+    # We're hitting this section iff initial connection does not succeed
+    my $connect_count = 0;
+    my $sleep_backoff = 1;
+
+    until( defined( $handle ) && $handle->ping() > 0 && $handle->pg_ping() > 0 )
+    {
+        if( $DEBUG )
+        {
+            _log( $LOG_LEVEL_INFO, "Not connected to DB, reconnecting..." );
+        }
+
+        $handle->disconnect() if( defined( $handle ) );
+        undef( $handle );
+
+        $connect_count++;
+        sleep( $sleep_backoff );
+        $sleep_backoff += int( rand( 2 ** $connect_count - 1 ) );
+
+        $handle = DBI->connect(
+            $CONNECTION_MAP->{connection_string},
+            $CONNECTION_MAP->{user_name},
+            undef
+        );
+
+        if( $connect_count > 5 )
+        {
+            # is our database still here? is the server down??
+            return undef;
+        }
+    }
+
+	_log( $LOG_LEVEL_INFO, "Reconnected to database" ) if( $connect_count > 0 );
+	$handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
+	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
+	$handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
+	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+    return $handle;
+}
+
 sub try_query($$;$) :Export( :MANDATORY )
 {
     my( $handle, $query, $params ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => ARRAYREF | UNDEF, optional => 1 },
     );
@@ -958,35 +1033,7 @@ sub try_query($$;$) :Export( :MANDATORY )
     $retry_counter++;
     return undef if( $retry_counter > $MAX_QUERY_RETRIES );
 
-    until( defined( $handle ) && $handle->pg_ping > 0 )
-    {
-        if( $DEBUG )
-        {
-            _log(
-                $LOG_LEVEL_INFO,
-                'Not connected to DB, attempting to reconnect...'
-            );
-            my $ret = $handle->pg_ping();
-            _log( $LOG_LEVEL_DEBUG, "DB handle pg_ping returned $ret" );
-        }
-
-        $try_count++;
-        sleep( $sleep_backoff );
-        undef( $handle );
-        $handle = DBI->connect(
-            $CONNECTION_MAP->{connection_string},
-            $CONNECTION_MAP->{user_name},
-            undef
-        );
-
-        $last_backoff_time = $sleep_backoff;
-        $sleep_backoff    += int( rand( 2 ** $try_count - 1 ) );
-
-        if( $try_count > 5 )
-        {
-            ## XXX Check if DB was dropped
-        }
-    }
+    $handle = &db_connect( $handle );
 
     # We're connected to the DB at this point
     if( $PARENT_PID == $PROCESS_ID )
@@ -1254,6 +1301,7 @@ sub replication_seek($$;$) :Export( :MANDATORY )
         { type => SCALAR, optional => 1 },
     );
 
+    $handle = &db_connect( $handle );
     my $seek_query;
     my $params = [];
     if( defined( $all_filter_tables ) )
@@ -1288,7 +1336,7 @@ sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
 {
     my( $handle, $lsn, $all_filter_tables ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALARREF },
         { type => SCALAR },
     );
@@ -1315,14 +1363,14 @@ sub replication_peek($$$$) :Export( :MANDATORY )
 {
     my( $handle, $filter_tables, $wal_level, $max_lsn ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => SCALAR },
         { type => SCALARREF },
     );
 
     my $sth;
-
+    $handle = &db_connect( $handle );
     if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
     {
         $sth = try_query(
@@ -1458,10 +1506,11 @@ sub check_ct_exists($) :Export( :MANDATORY )
 {
     my( $handle, $ct_hash ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => HASHREF },
     );
 
+    $handle = &db_connect( $handle );
     my $sth = try_query(
         $handle,
         $CHECK_CACHE_TABLE_EXISTS,
@@ -1523,10 +1572,11 @@ sub create_cache_table($$)
 {
     my( $handle, $ct_hash ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => HASHREF },
     );
 
+    $handle = &db_connect( $handle );
     my $schema       = $ct_hash->{schema};
     my $name         = $ct_hash->{name};
     my $definition   = $ct_hash->{definition};
@@ -1607,10 +1657,11 @@ sub create_cache_table_unique($$) :Export( :MANDATORY )
 {
     my( $handle, $ct_hash ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => HASHREF },
     );
 
+    $handle = &db_connect( $handle );
     my $index_columns = join( ',', @{$ct_hash->{unique_index}} );
     my $sth = try_query( $handle, "CREATE UNIQUE INDEX IF NOT EXISTS ix_$ct_hash->{name} ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )" );
 
@@ -1629,10 +1680,11 @@ sub test_query($$) :Export( :MANDATORY )
 {
     my( $handle, $query ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
     );
 
+    $handle = &db_connect( $handle );
     my $test_query = "WITH tt_test AS( $query ) SELECT * FROM tt_test LIMIT 0";
 
     my $sth = $handle->prepare( $test_query );
@@ -1648,10 +1700,11 @@ sub get_table_count($$) :Export( :MANDATORY )
 {
     my( $handle, $table_name ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
     );
 
+    $handle = &db_connect( $handle );
     my $query = "SELECT COUNT(*) as count FROM $table_name";
 
     my $sth = &try_query( $handle, $query );
@@ -1669,10 +1722,11 @@ sub get_def_count($$) :Export( :MANDATORY )
 {
     my( $handle, $definition ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
     );
 
+    $handle = &db_connect( $handle );
     my $def_q = <<END_SQL;
     WITH tt_def AS
     (
@@ -1696,11 +1750,12 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
 {
     my( $handle, $query, $ct_hash ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => HASHREF },
     );
 
+    $handle = &db_connect( $handle );
     # TODO This can take some time
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
@@ -1741,11 +1796,11 @@ sub drop_temp_table($$) :Export( :MANDATORY )
 {
     my( $handle, $temp_table ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => HASHREF },
     );
 
-    my $query = 'DROP TABLE ' . $temp_table->{name};
+    my $query = 'DROP TABLE IF EXISTS ' . $temp_table->{name};
     my $sth   = try_query( $handle, $query );
 
     return 0 unless( $sth );
@@ -1758,7 +1813,7 @@ sub get_cache_table_columns($$$) :Export( :MANDATORY )
 {
     my( $handle, $cache_table_schema, $cache_table_name ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => SCALAR },
     );
@@ -1785,7 +1840,7 @@ sub get_cache_table_unique($$$) :Export( :MANDATORY )
 {
     my( $handle, $cache_table_schema, $cache_table_name ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => SCALAR },
     );
@@ -1822,7 +1877,7 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
         $cache_hash
       ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => HASHREF },
         { type => HASHREF },
     );
@@ -1832,6 +1887,7 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
     my $table_columns      = $cache_hash->{cache_table_columns};
     my $uniques            = $cache_hash->{cache_table_uniques};
 
+    $handle = &db_connect( $handle );
     $handle->do( "SET application_name = 'update: $cache_table_name'" );
     my $join_clauses       = [];
     my $where_clauses      = [];
@@ -1945,7 +2001,7 @@ sub generate_insert_statement($$$) :Export( :MANDATORY )
         $cache_hash
       ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT | UNDEF },
         { type => HASHREF },
         { type => HASHREF },
     );
@@ -1955,6 +2011,7 @@ sub generate_insert_statement($$$) :Export( :MANDATORY )
     my $table_columns      = $cache_hash->{cache_table_columns};
     my $uniques            = $cache_hash->{cache_table_uniques};
 
+    $handle = &db_connect( $handle );
     $handle->do( "SET application_name = 'insert: $cache_table_name'" );
 
     my $join_clauses  = [];

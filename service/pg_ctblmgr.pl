@@ -54,11 +54,6 @@ Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 1; # seconds for main loop
 Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
 
-Readonly my $TCP_KEEPALIVE          => 60;
-Readonly my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
-Readonly my $TCP_KEEPALIVE_COUNT    => 200; #720;
-Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
-
 our $OUTPUT_AUTOFLUSH = 1;
 our $|                = 1;
 
@@ -98,11 +93,7 @@ sub _terminate(;$$$)
 
     if( $PROCESS_ID == $PARENT_PID )
     {
-        my $handle = DBI->connect(
-            $CONNECTION_MAP->{connection_string},
-            $CONNECTION_MAP->{user_name},
-            undef
-        );
+        my $handle = &db_connect();
 
         if( $handle )
         {
@@ -343,19 +334,11 @@ sub new_xid_placeholder($$$)
         { type => SCALARREF },
     );
 
-    $$new_handle = DBI->connect(
-        $CONNECTION_MAP->{connection_string},
-        $CONNECTION_MAP->{user_name},
-        undef
-    );
+    $$new_handle = &db_connect( $$new_handle );
 
     return 0 unless( $$new_handle );
 
     $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
-    $$new_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
-    $$new_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-    $$new_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
-    $$new_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
     $$new_handle->do( 'BEGIN' );
 
     my $sth = $$new_handle->prepare( 'SELECT txid_current() AS xid' );
@@ -419,21 +402,12 @@ sub parent_loop($$$)
     );
 
     my $XID_MAP = [];
-    my $handle = DBI->connect(
-        $CONNECTION_MAP->{connection_string},
-        $CONNECTION_MAP->{user_name},
-        undef
-    );
+    my $handle = &db_connect();
 
     if( !check_extension_running( $handle ) )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to secure advisory lock in parent process" );
     }
-
-    $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
-    $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-    $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
-    $handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
 
     if( !tied( $WORKER_FILTER_TABLES ) )
     {
@@ -541,7 +515,7 @@ sub parent_loop($$$)
                     $LOG_LEVEL_INFO,
                     'Detected changes to cache table definitions'
                 );
-                
+
                 # we don't want forking or termination of children to tamper with our handle
                 # so we undef it for when execve clones the memory space.
                 $handle->disconnect();
@@ -579,12 +553,8 @@ sub parent_loop($$$)
                         $LOG_LEVEL_DEBUG,
                         "Adding new worker for pk $pk_maintenance_object"
                     );
-                    
-                    $handle = DBI->connect(
-                        $CONNECTION_MAP->{connection_string},
-                        $CONNECTION_MAP->{user_name},
-                        undef
-                    );
+
+                    $handle = &db_connect( $handle );
                     my $worker_data = get_worker_list(
                         $handle,
                         $pk_maintenance_object
@@ -646,12 +616,9 @@ sub parent_loop($$$)
                         _log( $LOG_LEVEL_FATAL, 'Failed to fork worker process' );
                     }
                 }
-                
-                $handle = DBI->connect(
-                    $CONNECTION_MAP->{connection_string},
-                    $CONNECTION_MAP->{user_name},
-                    undef
-                );
+
+                # We've likely disconnected to prevent execve sillyness - reconnect now
+                $handle = &db_connect( $handle );
             }
         }
 
@@ -948,7 +915,11 @@ sub parent_loop($$$)
 
                     if( defined( $handle ) )
                     {
-                        $handle->do( 'ROLLBACK' );
+                        if( $handle->ping() > 0 && $handle->pg_ping() > 0 )
+                        {
+                            $handle->do( 'ROLLBACK' );
+                        }
+
                         $handle->disconnect();
                         undef( $handle );
 
@@ -1168,16 +1139,7 @@ sub worker_entrypoint($$$$)
     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
     tied( $WORKER_STATUSES )->shunlock();
 
-    my $handle = DBI->connect(
-        $CONNECTION_MAP->{connection_string},
-        $CONNECTION_MAP->{user_name},
-        undef
-    );
-
-    $handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
-    $handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-    $handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
-    $handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+    my $handle = &db_connect();
 
     _log( $LOG_LEVEL_FATAL, 'Worker failed to connect to DB' ) unless( $handle );
 
@@ -1534,11 +1496,7 @@ sub worker_entrypoint($$$$)
                 {
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                     # TODO, create aged_handle and SET TRANSACTION to aged_snapshot
-                    $aged_handle = DBI->connect(
-                        $CONNECTION_MAP->{connection_string},
-                        $CONNECTION_MAP->{user_name},
-                        undef
-                    );
+                    $aged_handle = &db_connect();
 
                     $tried_fast_delete = 1;
                     unless( $aged_handle )
@@ -1548,10 +1506,6 @@ sub worker_entrypoint($$$$)
                         goto FD_FALLBACK;
                     }
 
-                    $aged_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
-                    $aged_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-                    $aged_handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
-                    $aged_handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
                     $aged_handle->do( "SET application_name = '$EXTENSION_NAME historic $CACHE_HASH->{name}'" );
 
                     unless( $aged_handle->do( 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ' ) )
@@ -1857,7 +1811,7 @@ $CONNECTION_MAP->{user_name}         = $user;
 $CONNECTION_MAP->{dbname}            = $dbname;
 
 # Pre-flight checks
-my $handle = DBI->connect( $conn_string, $user, undef );
+my $handle = &db_connect();
 
 croak( 'Could not connect to the database' ) unless( $handle );
 
