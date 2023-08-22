@@ -892,7 +892,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     &create_cache_table( $handle, $ct_hash );
 
     &drop_dependencies( $handle );
-    my $sth = &try_query( $handle, "DROP TABLE $schema.$name" );
+    my $sth = &try_query( $handle, "DROP TABLE IF EXISTS $schema.$name" );
 
     unless( $sth )
     {
@@ -972,6 +972,7 @@ sub try_query($$;$) :Export( :MANDATORY )
 
         $try_count++;
         sleep( $sleep_backoff );
+        undef( $handle );
         $handle = DBI->connect(
             $CONNECTION_MAP->{connection_string},
             $CONNECTION_MAP->{user_name},

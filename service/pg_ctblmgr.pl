@@ -519,6 +519,9 @@ sub parent_loop($$$)
 
         my $diff = {};
 
+        # Worker management - handle new / changed / removed definitions
+        # Note that workers themselves will handle changes in definitions
+        # TODO: Verify filter tables is getting set correctly.
         if( defined( $WORKER_DATA ) && defined( $tmp_worker_data ) )
         {
             $diff = check_for_new_cache_tables(
@@ -526,115 +529,132 @@ sub parent_loop($$$)
                 $WORKER_DATA,
                 $tmp_worker_data
             );
-        }
 
-        if(
-               scalar( keys %{$diff->{new}}    ) > 0
-            || scalar( keys %{$diff->{change}} ) > 0
-            || scalar( keys %{$diff->{old}}    ) > 0
-          )
-        {
-            # Cache table changes detected
-            _log(
-                $LOG_LEVEL_INFO,
-                'Detected changes to cache table definitions'
-            );
-            # Remove old children
-
-            foreach my $pk_maintenance_object( keys %{$diff->{old}} )
+            if(
+                   scalar( keys %{$diff->{new}}    ) > 0
+                || scalar( keys %{$diff->{change}} ) > 0
+                || scalar( keys %{$diff->{old}}    ) > 0
+              )
             {
-                my $target_pid = $worker_mapping->{$pk_maintenance_object};
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                _log( $LOG_LEVEL_DEBUG, "Parent terminating child $target_pid" );
-                $WORKER_STATUSES->{$target_pid}->{shutdown} = 1;
-                tied( $WORKER_STATUSES )->shunlock();
-                # Unlock, wait for child to exit
-                my $kid;
-
-                do
-                {
-                    sleep( 1 );
-                    _log( $LOG_LEVEL_DEBUG, "Waiting on child $target_pid to exit..." );
-                    $kid = waitpid( $target_pid, WNOHANG );
-                } while( $kid > 0 );
-
-                waitpid( $target_pid, 0 );  # reap child
-                _log( $LOG_LEVEL_DEBUG, "Child $target_pid exited!" );
-                delete( $worker_mapping->{$pk_maintenance_object} );
-                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-                delete( $WORKER_FILTER_TABLES->{$target_pid} ); ## this may leak shm
-                tied( $WORKER_FILTER_TABLES )->shunlock();
-            }
-
-            # Add new children
-            foreach my $pk_maintenance_object( keys %{$diff->{new}} )
-            {
+                # Cache table changes detected
                 _log(
-                    $LOG_LEVEL_DEBUG,
-                    "Adding new worker for pk $pk_maintenance_object"
+                    $LOG_LEVEL_INFO,
+                    'Detected changes to cache table definitions'
                 );
+                
+                # we don't want forking or termination of children to tamper with our handle
+                # so we undef it for when execve clones the memory space.
+                $handle->disconnect();
+                undef( $handle );
+                # Remove old children
+                foreach my $pk_maintenance_object( keys %{$diff->{old}} )
+                {
+                    my $target_pid = $worker_mapping->{$pk_maintenance_object};
+                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                    _log( $LOG_LEVEL_DEBUG, "Parent terminating child $target_pid" );
+                    $WORKER_STATUSES->{$target_pid}->{shutdown} = 1;
+                    tied( $WORKER_STATUSES )->shunlock();
+                    # Unlock, wait for child to exit
+                    my $kid;
 
-                my $worker_data = get_worker_list(
-                    $handle,
-                    $pk_maintenance_object
-                );
+                    do
+                    {
+                        sleep( 1 );
+                        _log( $LOG_LEVEL_DEBUG, "Waiting on child $target_pid to exit..." );
+                        $kid = waitpid( $target_pid, WNOHANG );
+                    } while( $kid > 0 );
 
-                unless( $worker_data )
+                    waitpid( $target_pid, 0 );  # reap child
+                    _log( $LOG_LEVEL_DEBUG, "Child $target_pid exited!" );
+                    delete( $worker_mapping->{$pk_maintenance_object} );
+                    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+                    delete( $WORKER_FILTER_TABLES->{$target_pid} ); ## this may leak shm
+                    tied( $WORKER_FILTER_TABLES )->shunlock();
+                }
+
+                # Add new children
+                foreach my $pk_maintenance_object( keys %{$diff->{new}} )
                 {
                     _log(
-                        $LOG_LEVEL_ERROR,
-                        'Need to spin up new child but could not locate maintenance object'
+                        $LOG_LEVEL_DEBUG,
+                        "Adding new worker for pk $pk_maintenance_object"
                     );
-                    next;
-                }
-
-                $worker_data            = $worker_data->[0];
-                my $wal_level           = $worker_data->{wal_level};
-                my $filter_tables       = $worker_data->{filter_tables};
-                my $maintenance_channel = $worker_data->{maintenance_channel};
-                my $ct_name             = $worker_data->{name};
-                my $child_pid           = fork();
-
-                if( defined( $child_pid ) and $child_pid == 0 )
-                {
-                    &worker_entrypoint(
-                        $wal_level,
-                        $filter_tables,
-                        $maintenance_channel,
+                    
+                    $handle = DBI->connect(
+                        $CONNECTION_MAP->{connection_string},
+                        $CONNECTION_MAP->{user_name},
+                        undef
+                    );
+                    my $worker_data = get_worker_list(
+                        $handle,
                         $pk_maintenance_object
                     );
-                    exit( 0 );
-                }
-                elsif( defined( $child_pid ) and $child_pid > 0 )
-                {
-                    $worker_mapping->{$pk_maintenance_object} = $child_pid;
-                    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-
-                    foreach my $filter_table( @$filter_tables )
+                    $handle->disconnect();
+                    undef( $handle );
+                    unless( $worker_data )
                     {
-                        if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
-                        {
-                            $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} = [];
-                        }
-                        # Setup the pins (parsed XLOG queue) for each filter table
-                        # changes relevent to said changes will be pushed into this queue
-                        # by the parent and popped later by the workers
+                        _log(
+                            $LOG_LEVEL_ERROR,
+                            'Need to spin up new child but could not locate maintenance object'
+                        );
+                        next;
                     }
-                    tied( $WORKER_FILTER_TABLES )->shunlock();
 
-                    $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
-                    $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
-                    $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
-                    $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
-                    $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
-                    _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
+                    $worker_data            = $worker_data->[0];
+                    my $wal_level           = $worker_data->{wal_level};
+                    my $filter_tables       = $worker_data->{filter_tables};
+                    my $maintenance_channel = $worker_data->{maintenance_channel};
+                    my $ct_name             = $worker_data->{name};
+                    my $child_pid           = fork();
+
+                    if( defined( $child_pid ) and $child_pid == 0 )
+                    {
+                        &worker_entrypoint(
+                            $wal_level,
+                            $filter_tables,
+                            $maintenance_channel,
+                            $pk_maintenance_object
+                        );
+                        exit( 0 );
+                    }
+                    elsif( defined( $child_pid ) and $child_pid > 0 )
+                    {
+                        $worker_mapping->{$pk_maintenance_object} = $child_pid;
+                        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+
+                        foreach my $filter_table( @$filter_tables )
+                        {
+                            if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
+                            {
+                                $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} = [];
+                            }
+                            # Setup the pins (parsed XLOG queue) for each filter table
+                            # changes relevent to said changes will be pushed into this queue
+                            # by the parent and popped later by the workers
+                        }
+                        tied( $WORKER_FILTER_TABLES )->shunlock();
+
+                        $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
+                        $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
+                        $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
+                        $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
+                        $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
+                        _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
+                    }
+                    else
+                    {
+                        _log( $LOG_LEVEL_FATAL, 'Failed to fork worker process' );
+                    }
                 }
-                else
-                {
-                    _log( $LOG_LEVEL_FATAL, 'Failed to fork worker process' );
-                }
+                
+                $handle = DBI->connect(
+                    $CONNECTION_MAP->{connection_string},
+                    $CONNECTION_MAP->{user_name},
+                    undef
+                );
             }
         }
+
 
         ## CHANGE MANAGEMENT
         my $num_in_flight_changes   = 0; # number of changes we're queueing
