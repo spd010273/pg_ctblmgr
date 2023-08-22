@@ -521,7 +521,7 @@ sub parent_loop($$$)
 
         if( defined( $WORKER_DATA ) && defined( $tmp_worker_data ) )
         {
-            check_for_new_cache_tables(
+            $diff = check_for_new_cache_tables(
                 $handle,
                 $WORKER_DATA,
                 $tmp_worker_data
