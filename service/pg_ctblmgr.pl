@@ -351,7 +351,6 @@ sub new_xid_placeholder($$$)
 
     return 0 unless( $$new_handle );
 
-    $$new_handle->do( "SET application_name = '$EXTENSION_NAME fast delete'" );
     $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
     $$new_handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
     $$new_handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
@@ -401,6 +400,7 @@ sub new_xid_placeholder($$$)
         $$new_handle->do(
             "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid'"
         );
+        $$new_handle->do( 'SELECT 1' );
         return 1;
     }
 
@@ -437,13 +437,11 @@ sub parent_loop($$$)
 
     if( !tied( $WORKER_FILTER_TABLES ) )
     {
-        _log( $LOG_LEVEL_DEBUG, "SHM not tied" );
         tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
     }
 
     if( !tied( $WORKER_STATUSES ) )
     {
-        _log( $LOG_LEVEL_DEBUG, "STATs not tied" );
         tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } );
     }
 
@@ -1096,7 +1094,7 @@ sub worker_entrypoint($$$$)
         { type => SCALAR },
     );
 
-    &set_program_name( "$EXTENSION_NAME worker startup" );
+    &set_program_name( undef, "worker startup" );
     my $CACHE_HASH           = {};
     my $WORKER_FILTER_TABLES = {};
     my $WAL_DATA;
@@ -1175,14 +1173,17 @@ sub worker_entrypoint($$$$)
     # our query changes underneath us
     # TODO: Add detection and correction for the above
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
-    &set_program_name( "$EXTENSION_NAME idle $CACHE_HASH->{name}" );
+    &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
 
     if( $CACHE_HASH->{driver} eq 'postgresql' )
     {
+        my $ct_check_start = [ gettimeofday() ];
         &check_ct_exists(
             $handle,
             $CACHE_HASH
         );
+        my $ct_check_delta = tv_interval( $ct_check_start, [ gettimeofday() ] );
+        _log( $LOG_LEVEL_DEBUG, "CT startup validation took $ct_check_delta seconds" );
 
         # Main worker loop
         &worker_cache_refresh(
@@ -1193,8 +1194,12 @@ sub worker_entrypoint($$$$)
         );
 
         # Check state of the cache table prior to entry - we may have started after a partial table build!
+        my $count_check_start = [ gettimeofday() ];
+        &set_program_name( $handle, "size check: $CACHE_HASH->{name}" );
         my $desired_count = get_def_count( $handle, $CACHE_HASH->{definition} );
         my $current_count = get_table_count( $handle, $CACHE_HASH->{schema} . '.' . $CACHE_HASH->{name} );
+        my $count_delta   = tv_interval( $count_check_start, [ gettimeofday() ] );
+        _log( $LOG_LEVEL_DEBUG, "CT count check took $count_delta seconds" );
 
         if( $current_count != $desired_count )
         {
@@ -1204,6 +1209,7 @@ sub worker_entrypoint($$$$)
             tied( $WORKER_STATUSES )->shunlock();
         }
 
+        # MAIN LOOP
         while( 1 )
         {
             # Check for commanded exit or replacement
@@ -1409,7 +1415,6 @@ sub worker_entrypoint($$$$)
                     $changes
                 );
 
-                print "$query\n";
                 if( !&test_query( $handle, $query ) )
                 {
                     _log(
@@ -1486,7 +1491,7 @@ sub worker_entrypoint($$$$)
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_TEMP_TABLE;
                 tied( $WORKER_STATUSES )->shunlock();
-                $handle->do( "SET application_name = '$EXTENSION_NAME temp table $CACHE_HASH->{name}'" );
+                &set_program_name( $handle, "temp table $CACHE_HASH->{name}" );
                 my $temp_table_start = [ gettimeofday() ];
                 my $temp_table       = &generate_temp_table( $handle, $query, $CACHE_HASH );
 
@@ -1552,8 +1557,8 @@ sub worker_entrypoint($$$$)
 
                     _log(
                         $LOG_LEVEL_DEBUG,
-                        "Sucessfully established aged handle at snapshot $aged_snapshot "
-                      . "uxind XID $using_xid for target $youngest_xid"
+                        "Established aged handle at snapshot $aged_snapshot "
+                      . "with XID $using_xid, target $youngest_xid"
                     );
                 }
 
@@ -1594,7 +1599,8 @@ FD_FALLBACK:
                     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_FAST_DELETE;
                     tied( $WORKER_STATUSES )->shunlock();
-                    &set_program_name( "$EXTENSION_NAME fast delete $CACHE_HASH->{name}" );
+                    &set_program_name( $handle, "fast delete $CACHE_HASH->{name}" );
+                    &set_program_name( $aged_handle, "fast delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                     # Create temp table in aged handle && perform fast delete
                     my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
@@ -1672,7 +1678,8 @@ FD_FALLBACK:
                     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_SLOW_DELETE;
                     tied( $WORKER_STATUSES )->shunlock();
-                    &set_program_name( "$EXTENSION_NAME slow delete $CACHE_HASH->{name}" );
+
+                    &set_program_name( $handle, "slow delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
                     my $slow_delete_start = [ gettimeofday() ];
                     my $delete_result = generate_delete_statement(
@@ -1696,7 +1703,7 @@ FD_FALLBACK:
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_UPDATE;
                 tied( $WORKER_STATUSES )->shunlock();
-                &set_program_name( "$EXTENSION_NAME update $CACHE_HASH->{name}" );
+                &set_program_name( $handle, "update $CACHE_HASH->{name}" );
                 my $update_start = [ gettimeofday() ];
                 my $update_result = generate_update_statement(
                     $handle,
@@ -1723,7 +1730,7 @@ FD_FALLBACK:
                     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_INSERT;
                     tied( $WORKER_STATUSES )->shunlock();
-                    &set_program_name( "$EXTENSION_NAME insert $CACHE_HASH->{name}" );
+                    &set_program_name( $handle, "insert $CACHE_HASH->{name}" );
                     my $insert_start = [ gettimeofday() ];
                     my $insert_result = generate_insert_statement(
                         $handle,
@@ -1760,7 +1767,7 @@ FD_FALLBACK:
                     next;
                 }
 
-                &set_program_name( "$EXTENSION_NAME idle $CACHE_HASH->{name}" );
+                &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
                 _log( $LOG_LEVEL_DEBUG, "====================== Applied $max_peeked_lsn" );
                 $max_applied_lsn = $max_peeked_lsn;
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
@@ -1969,11 +1976,11 @@ else
     }
 
     # We've started workers, lets start processing WAL
-    _log( $LOG_LEVEL_DEBUG, "All workers started" );
+    _log( $LOG_LEVEL_INFO, "All workers started" );
     tied( $WORKER_STATUSES )->shunlock();
 }
 
-&set_program_name( "$EXTENSION_NAME parent process" );
+&set_program_name( undef, "parent process" );
 parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
 shm_cleanup();

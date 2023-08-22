@@ -262,7 +262,7 @@ CREATE TEMP TABLE tt_column_verify AS
     )
         SELECT *
           FROM tt_foo
-         LIMIT 1
+         LIMIT 0
 )
 END_SQL
 
@@ -1476,7 +1476,7 @@ sub check_ct_exists($) :Export( :MANDATORY )
     {
         $sth->finish();
         _log( $LOG_LEVEL_DEBUG, "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists" );
-        
+
         my $create_tt = $CREATE_COLUMN_CHECK_TABLE;
         $create_tt =~ s/__DEFINITION__/$ct_hash->{definition}/;
         $sth = try_query(
@@ -1529,6 +1529,7 @@ sub create_cache_table($$)
     my $schema       = $ct_hash->{schema};
     my $name         = $ct_hash->{name};
     my $definition   = $ct_hash->{definition};
+    $handle->do( "SET application_name = 'create: $name'" );
     my $create_query = $CREATE_CACHE_TABLE;
     $create_query    =~ s/__TABLE__/${schema}.${name}/;
     $create_query    =~ s/__DEFINITION__/$definition/;
@@ -1544,7 +1545,7 @@ sub create_cache_table($$)
     if( $BATCHED_CREATE )
     {
         _log( $LOG_LEVEL_DEBUG, "Performing batch population of $name" );
-
+        $handle->do( "SET application_name = 'batch populate: $name'" );
         my $done            = 0;
         my $offset          = 0;
         my $populate_q      = $CREATE_POPULATE;
@@ -1579,7 +1580,7 @@ sub create_cache_table($$)
 
     $sth->finish();
     $handle->do( "ANALYZE $schema.$name" );
-    
+
     foreach my $columns( @{$ct_hash->{indexes}} )
     {
         my $index_name = $columns;
@@ -1869,7 +1870,10 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
     if( $temp_table->{count} > $BULK_ACTION_CUTOFF )
     {
         my $columns = join( ',', @$table_columns );
-        _log( $LOG_LEVEL_DEBUG, "Performing large update optimization ($temp_table->{count} possible rows)" );
+        _log(
+            $LOG_LEVEL_DEBUG,
+            "Performing large update optimization ($temp_table->{count} possible rows)"
+        );
         $handle->do( 'BEGIN' );
         $handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
         my $delete_where = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
@@ -2102,7 +2106,9 @@ END_SQL
     }
 
     my $bind_points = '?' . ( ',?' x ( scalar( keys %$column_data_type_hash ) - 1 ) );
-    my $insert_q = "INSERT INTO $past_temp_table( " . join( ',', sort { $a cmp $b } keys %$column_data_type_hash ) . " ) VALUES ( $bind_points )";
+    my $insert_q    = "INSERT INTO $past_temp_table( "
+                    . join( ',', sort { $a cmp $b } keys %$column_data_type_hash )
+                    . " ) VALUES ( $bind_points )";
 
     my $insert_sth = $current_handle->prepare( $insert_q );
     unless( $insert_sth )
@@ -2119,7 +2125,12 @@ END_SQL
     if( $current_temp_table->{count} == $aged_sth->rows() )
     {
         # no rows previously existed
-        _log( $LOG_LEVEL_DEBUG, 'Fast delete early exit - no rows previously existed matching this filter or subset rough match' );
+        _log(
+            $LOG_LEVEL_DEBUG,
+            'Fast delete early exit - no rows previously existed '
+          . 'matching this filter or subset rough match'
+        );
+
         $aged_sth->finish();
         $insert_sth->finish();
         $aged_handle->do( 'ROLLBACK' );

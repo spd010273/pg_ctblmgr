@@ -1440,6 +1440,7 @@ sub recursive_from_finder($$$)
                             && defined( $qual->{name} )
                           )
                     {
+                        # We're here because the object is likely either a CTE or temp relation
                         _log(
                             $LOG_LEVEL_DEBUG,
                             "Removing unresolvable relation $obj_name"
@@ -1675,13 +1676,13 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             # This includes a recursive search in the case we run into something like:
             # WITH ...
             # (
-            #    <- This is the statement we are 'working on'
+            #    <- This is the statement we're currently concerned with
             # ),
             # tt_foo AS  <- We want this CTE's name
             # (
             #     WITH tt_bar AS
             #     (
-            #         WITH tt_baz AS
+            #         WITH tt_baz AS <- Next statement's parent will be this
             #         (
             #             ...
             #         )
@@ -1690,8 +1691,9 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
             #         ...
             # )
             #     ...
+
             $next_cte_name = $table_mapping->{BINDS}->{$starts[$index-1]}->{parent};
-        
+
             my $recur_cte = $next_cte_name;
 
             while( defined( $table_mapping->{CTES}->{$recur_cte}->{parent} ) )
@@ -1705,6 +1707,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         if( !defined( $bind_end ) )
         {
             my $parent = $table_mapping->{BINDS}->{$bind_start}->{parent};
+
             if( !defined( $parent ) || $index == 0 )
             {
                 $bind_end = length( $new_q );
@@ -1795,13 +1798,12 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         else
         {
             warn "Could not determine proceeding where clause mark\n";
-            print "Query fragment info:\n";
             $PARSE_ERROR = 1;
             #print Dumper( $table_mapping );
             return;
         }
 
-        print "Proceeding mark: '$where_proceeding_clause_mark'\n";
+        #print "Proceeding mark: '$where_proceeding_clause_mark'\n";
         my $preceeding_query  = substr( $new_q, 0, $bind_start );
         my $proceeding_query = substr(
             $new_q,

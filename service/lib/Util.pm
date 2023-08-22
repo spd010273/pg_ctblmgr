@@ -213,14 +213,20 @@ sub lsn_cmp($$) :Export( :MANDATORY )
     return -1;
 }
 
-sub set_program_name($) :Export( :MANDATORY )
+sub set_program_name($$) :Export( :MANDATORY )
 {
-    my( $program_name ) = validate_pos(
+    my( $handle, $program_name ) = validate_pos(
         @_,
+        { type => OBJECT | UNDEF },
         { type => SCALAR },
     );
 
-    $PROGRAM_NAME = $program_name;
+    if( $handle )
+    {
+        $handle->do( "SET application_name = '$program_name'" );
+    }
+
+    $PROGRAM_NAME = $EXTENSION_NAME . ' ' . $program_name;
     return;
 }
 
