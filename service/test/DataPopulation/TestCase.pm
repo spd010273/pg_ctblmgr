@@ -37,9 +37,10 @@ sub new ## class method
     my $new_object = bless( $class_spec, $class );
 
     my $cache_table_name = $new_object->CACHE_TABLE_NAME;
+
     if( not exists $cache_tables->{$cache_table_name} )
     {
-        croak 'Definition for cache table ' . $cache_table_name . ' not provided';
+        croak 'Missing Cache Table Definition: Definition for cache table ' . $cache_table_name . ' not provided';
     }
 
     $new_object->{definition_query} = $cache_tables->{$cache_table_name}->{definition};

@@ -124,7 +124,7 @@ if( $help )
     _usage();
 }
 
-print colored( "Settings: dbhost [$dbhost], dbport [$dbport], dbname [$dbname], dbuser [$dbuser], waittime [$waittime seconds]\n", 'bold bright_yellow' );
+print colored( "Settings: dbhost [$dbhost], dbport [$dbport], dbname [$dbname], dbuser [$dbuser], waittime [$waittime seconds]\n\n", 'bold bright_yellow' );
 
 ###################################################
 # Main: Initialization
@@ -162,16 +162,23 @@ sub process_file
 
         require $_;
 
-        my $test_case_instance = ${test_case_class}->new( $db_handle, $cache_tables );
+        my $test_case_instance;
 
         try
         {
+            $test_case_instance = ${test_case_class}->new( $db_handle, $cache_tables );
+
             $test_case_instance->TEST_CASE_NAME;
+
             push @$test_cases, $test_case_instance;
         }
         catch
         {
-            unless( $_ =~ 'not implemented' )
+            if( $_ =~ 'Missing Cache Table Definition' )
+            {
+                print_info( "Skipped $test_case_class - $_" );
+            }
+            elsif( not $_ =~ 'not implemented' )
             {
                 croak @_;
             }
