@@ -33,6 +33,7 @@ use DataPopulation::Util;
 # Arguments
 my $dbhost   = 'athena.internal';
 my $dbname   = 'postgres';
+my $dbuser   = 'postgres';
 my $dbport   = 5432; ## no critics
 my $waittime = 5;
 my $help     = 0;
@@ -108,6 +109,7 @@ unless(
     GetOptions(
         'dbhost=s'   => \$dbhost,
         'dbname=s'   => \$dbname,
+        'dbuser=s'   => \$dbuser,
         'dbport=s'   => \$dbport,
         'waittime=f' => \$waittime,
         'help'       => \$help,
@@ -122,7 +124,7 @@ if( $help )
     _usage();
 }
 
-print colored( "Settings: dbhost [$dbhost], dbname [$dbname], dbport [$dbport], waittime [$waittime seconds]\n", 'bold bright_yellow' );
+print colored( "Settings: dbhost [$dbhost], dbport [$dbport], dbname [$dbname], dbuser [$dbuser], waittime [$waittime seconds]\n", 'bold bright_yellow' );
 
 ###################################################
 # Main: Initialization
