@@ -1824,12 +1824,17 @@ sub recursive_from_finder($$$)
                 }
                 else
                 {
+                    ## New change - marker values are now multi-purpose:
+                    # 1 = free to bind to this relation
+                    # ARRAYREF = additional information to handle outer joins - bind with caution
+                    # 0 = outer join with no additional information - DO NOT BIND
                     my $marker = 1;
 
                     $qual = resolve_relation( $relcache, $obj_name );
 
                     if( defined( $rel->{$alias}->{is_outer} ) && $rel->{$alias}->{is_outer} eq 1 )
                     {
+                        $marker     = 0; # Outer join - set to DO NOT BIND unless we can satisfy requirements
                         my $number  = $rel->{$alias}->{number};
                         my $next    = $rel->{$alias}->{outer_dep}; # l = number - 1, r = number + 1, b = number - 1
                         my $desired;
@@ -1856,14 +1861,12 @@ sub recursive_from_finder($$$)
                                 {
                                     if( defined( $next_rel->{$other_alias} ) )
                                     {
-                                        print "Locating by alias\n";
                                         $dep_obj = $next_rel->{$other_alias}->{obj};
                                         last REL if( $dep_obj );
                                         #locate by alias
                                     }
                                     else
                                     {
-                                        print "Locating by number\n";
                                         #locate by number
                                         foreach my $next_alias( keys %$next_rel )
                                         {
@@ -1892,6 +1895,31 @@ sub recursive_from_finder($$$)
                                 if( defined( $dep_obj ) )
                                 {
                                     # setup $marker to have a mapping for this expression
+                                    if( ref( $dep_obj ) eq 'HASH' )
+                                    {
+                                        # XXX This may need special handling - we may not be able to map inverse from multiple relations
+                                        my $fake_table_mapping = {};
+                                        &recursive_from_finder(
+                                            $relcache,
+                                            $fake_table_mapping,
+                                            $dep_obj
+                                        );
+                                        
+                                        if( scalar( keys %{$fake_table_mapping->{BINDS}} ) > 1 )
+                                        {
+                                            _log(
+                                                $LOG_LEVEL_WARNING,
+                                                "Unfilterable outer join from $expr->{outer}->{rel}, alias $expr->{outer}->{alias}"
+                                            );
+                                            next;
+                                        }
+                                       
+                                        my @keys     = keys %{$fake_table_mapping->{BINDS}};
+                                        my $only_key = shift @keys; 
+                                        $dep_obj     = $fake_table_mapping->{BINDS}->{$only_key}->{rels};
+                                    }
+                                   
+                                    # We have sufficient info, convert to arrayref of bind info 
                                     $marker = [] if( ref( $marker ) eq '' );
                                     push(
                                         @$marker,
