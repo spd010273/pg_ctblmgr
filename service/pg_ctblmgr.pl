@@ -654,8 +654,10 @@ sub parent_loop($$$)
                 $num_in_flight_changes++;
                 if( !$WT_LOCKED )
                 {
+                    my $lock_time = [ gettimeofday() ];
                     tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
                     $WT_LOCKED = 1;
+                    my $lock_delta = tv_interval( $lock_time, [ gettimeofday() ] );
                 }
 
                 foreach my $pid( keys %{$WORKER_FILTER_TABLES} )

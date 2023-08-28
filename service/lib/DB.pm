@@ -2391,12 +2391,8 @@ END_SQL
 
     $sth = &try_query( $handle, $DELETE_Q, [] );
 
-    unless( $sth )
-    {
-        $handle->do( "DROP TABLE IF EXISTS ${delete_tt_name}" );
-        return 0;
-    }
-
+    $handle->do( "DROP TABLE IF EXISTS ${delete_tt_name}" );
+    return 0 unless( $sth );
     $sth->finish();
     return 1;
 }

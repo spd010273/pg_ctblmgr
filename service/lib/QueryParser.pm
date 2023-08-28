@@ -429,22 +429,261 @@ sub add_table_mapping($)
     return;
 }
 
-sub get_joined_rels($$$$;$)
+sub get_dependent_column($$$;$)
 {
-    my(
-        $json_fragment,
-        $parent,
-        $table_mapping,
-        $relcache,
-        $union_flag
-      ) = validate_pos(
+    my( $json_fragment, $relcache, $alias, $relation ) = validate_pos(
         @_,
         { type => HASHREF },
-        { type => SCALAR | UNDEF },
         { type => HASHREF },
-        { type => HASHREF },
-        { type => SCALAR | UNDEF, optional => 1 },
+        { type => SCALAR  },               # the outer relation's alias
+        { type => SCALAR, optional => 1 }, # the outer relation's name
     );
+
+    # Parsed join expression to determine dependent keys
+    # For example, if we determine a relation is dependent on another (is outer join'd - right, left, or full outer)
+    # we need to determine a way to filter the temp table later, so we examine the predicate used in the outer join
+    # to determine which key(s) the outer table depends on. Concrete example:
+    #
+    #     SELECT f.baz
+    #       FROM tb_foo f
+    #  LEFT JOIN tb_bar b
+    #         ON b.bar = f.foo
+    #
+    #  In this example, tb_bar is the outer relation and is dependent on tb_foo through the predicate
+    #  `ON b.bar = f.foo`. We have determined that tb_bar is dependent on tb_foo outside of this function (look where this is called)
+    #  but now  we need to examine the predicate.
+    #
+    #  Much later in the filtering process, when we're processing changes, we may receive a change to tb_bar. We cannot filter tb_bar directly
+    #  as it is involved in an outer join. We can, however, use the nature of its join to reduce the set we'll be operating on.
+    #  We would like to filter the definition query, given a change to tb_bar, using a statement such as:
+    #
+    #  SELECT bar AS foo FROM tb_bar WHERE <condition>
+    #
+    #  We can then treat an update of one or more key(s) in tb_bar to be an update to tb_foo instead, which we can then successfully filter
+    #  without impacting the query's correctness (only the number of tuples output). This can safely be used on anti joins as well.
+
+    my $schema;
+    my $table;
+
+    if( $relation )
+    {
+        my @components = split( '.', $relation );
+
+        if( scalar( @components ) > 2 )
+        {
+            return; # screw this. someone used a period in their table/schema names. SELECT * FROM "try.renaming.youre"."stuff__pl.ease"
+        }
+
+        if( scalar( @components ) == 2 )
+        {
+            # we would have previously looked up the relation in the relcache so we should have the fully qual'd name
+            $schema = shift( @components );
+            $table  = shift( @components );
+        }
+        else
+        {
+            $table = shift( @components );
+        }
+    }
+
+    my $exprs = [];
+
+    if( exists( $json_fragment->{args} ) && ref( $json_fragment->{args} ) eq 'ARRAY' )
+    {
+        # compound boolean expression
+        foreach my $subfrag( @{$json_fragment->{args}} )
+        {
+            next if( !exists( $subfrag->{lexpr} ) || !exists( $subfrag->{rexpr} ) );
+            next if( !exists( $subfrag->{name} ) || ref( $subfrag->{name} ) ne 'ARRAY' || $subfrag->{name}->[0] ne '=' );
+        }
+    }
+    elsif( exists( $json_fragment->{lexpr} ) && exists( $json_fragment->{rexpr} ) )
+    {
+        if( !exists( $json_fragment->{name} ) || ref( $json_fragment->{name} ) ne 'ARRAY' || $json_fragment->{name}->[0] ne '=' )
+        {
+            _log( $LOG_LEVEL_WARNING, "Failed to parse outer join predicate - no equality op" );
+            return;
+        }
+
+        my $subexpr = {};
+        if( $json_fragment->{lexpr}->{name} eq 'COLUMNREF' )
+        {
+            if( exists( $json_fragment->{lexpr}->{fields} ) && ref( $json_fragment->{lexpr}->{fields} ) eq 'ARRAY' )
+            {
+                $subexpr->{l} = $json_fragment->{lexpr}->{fields};
+            }
+        }
+
+        if( $json_fragment->{rexpr}->{name} eq 'COLUMNREF' )
+        {
+            if( exists( $json_fragment->{rexpr}->{fields} ) && ref( $json_fragment->{rexpr}->{fields} ) eq 'ARRAY' )
+            {
+                $subexpr->{r} = $json_fragment->{rexpr}->{fields};
+            }
+        }
+
+        if( defined $subexpr->{r} && defined $subexpr->{l} )
+        {
+            push( @$exprs, $subexpr );
+        }
+    }
+
+    # We've filtered down to equality ops, we hope for one or more possible comparisons IE:
+    #  ...
+    # LEFT JOIN tb_foo f
+    #        ON f.foo = a.foo  <- exprs will contain this
+    #       AND f.foo = b.foo  <- exprs will contain this
+    #       AND TRUE
+    #       AND f.foo > random()::INTEGER
+
+    my $parsed_exprs = [];
+    foreach my $expr( @$exprs )
+    {
+        next unless( exists( $expr->{l} ) && exists( $expr->{r} ) );
+        my $parsed_expr  = {};
+        my $left_column  = $expr->{l}->[scalar(@{$expr->{l}}) - 1];
+        my $right_column = $expr->{r}->[scalar(@{$expr->{r}}) - 1];
+
+        if( $schema )
+        {
+            if( $expr->{l}->[0] eq $schema )
+            {
+                if( defined( $table ) && $expr->{l}->[1] eq $table )
+                {
+                    $parsed_expr->{outer}->{column} = $left_column;
+                    $parsed_expr->{outer}->{alias}  = $alias;
+                    $parsed_expr->{outer}->{rel}    = $relation if( $relation );
+
+                    $parsed_expr->{other}->{column} = $right_column;
+
+                    if( scalar( @{$expr->{r}} ) == 2 )
+                    {
+                        #could be an alias or table name
+                        my $rel = resolve_relation( $relcache, $expr->{r}->[0] );
+
+                        if( $rel )
+                        {
+                            $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                        }
+                        else
+                        {
+                            $parsed_expr->{other}->{alias} = $expr->{r}->[0];
+                        }
+                    }
+                    elsif( scalar( @{$expr->{r}} ) == 3 )
+                    {
+                        $parsed_expr->{other}->{rel} = $expr->{r}->[0] . '.' . $expr->{r}->[1];
+                    }
+                }
+            }
+            elsif( $expr->{r}->[0] eq $schema )
+            {
+                if( defined( $table ) && $expr->{r}->[1] eq $table )
+                {
+                    $parsed_expr->{outer}->{column} = $right_column;
+                    $parsed_expr->{outer}->{alias}  = $alias;
+                    $parsed_expr->{outer}->{rel}    = $relation if( $relation );
+
+                    $parsed_expr->{other}->{column} = $left_column;
+
+                    if( scalar( @{$expr->{l}} ) == 2 )
+                    {
+                        my $rel = resolve_relation( $relcache, $expr->{l}->[0] );
+
+                        if( $rel )
+                        {
+                            $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                        }
+                        else
+                        {
+                            $parsed_expr->{other}->{alias} = $expr->{l}->[0];
+                        }
+                    }
+                    elsif( scalar( @{$expr->{l}} ) == 3 )
+                    {
+                        $parsed_expr->{other}->{rel} = $expr->{l}->[0] . '.' . $expr->{l}->[1];
+                    }
+                }
+            }
+        }
+        else
+        {
+            if( ( defined( $table ) && $expr->{l}->[0] eq $table ) || $expr->{l}->[0] eq $alias )
+            {
+                $parsed_expr->{outer}->{column} = $left_column;
+                $parsed_expr->{outer}->{alias}  = $alias;
+                $parsed_expr->{outer}->{rel}    = $relation if( $relation );
+
+                $parsed_expr->{other}->{column} = $right_column;
+
+                if( scalar( @{$expr->{r}} ) == 2 )
+                {
+                    my $rel = resolve_relation( $relcache, $expr->{r}->[0] );
+
+                    if( $rel )
+                    {
+                        $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                    }
+                    else
+                    {
+                        $parsed_expr->{other}->{alias} = $expr->{r}->[0];
+                    }
+                }
+                elsif( scalar( @{$expr->{r}} ) == 3 )
+                {
+                    $parsed_expr->{other}->{rel} = $expr->{r}->[0] . '.' . $expr->{r}->[1];
+                }
+            }
+            elsif( ( defined( $table ) && $expr->{r}->[0] eq $table ) || $expr->{r}->[0] eq $alias )
+            {
+                $parsed_expr->{outer}->{column} = $right_column;
+                $parsed_expr->{outer}->{alias}  = $alias;
+                $parsed_expr->{outer}->{rel}    = $relation if( $relation );
+
+                $parsed_expr->{other}->{column} = $left_column;
+
+                if( scalar( @{$expr->{l}} ) == 2 )
+                {
+                    my $rel = resolve_relation( $relcache, $expr->{l}->[0] );
+
+                    if( $rel )
+                    {
+                        $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                    }
+                    else
+                    {
+                        $parsed_expr->{other}->{alias} = $expr->{l}->[0];
+                    }
+                }
+                elsif( scalar( @{$expr->{l}} ) == 3 )
+                {
+                    $parsed_expr->{other}->{rel} = $expr->{l}->[0] . '.' . $expr->{l}->[1];
+                }
+            }
+        }
+
+        next unless( exists( $parsed_expr->{outer} ) && exists( $parsed_expr->{other} ) );
+        push( @$parsed_exprs, $parsed_expr );
+    }
+
+    return undef if( scalar( @$parsed_exprs ) == 0 );
+    return $parsed_exprs;
+}
+
+sub get_joined_rels($$)
+{
+    my( $map, $number ) = validate_pos(
+        @_,
+        { type => HASHREF },
+        { type => SCALARREF },
+    );
+
+    my $json_fragment = $map->{fragment};
+    my $parent        = $map->{parent};
+    my $table_mapping = $map->{table_mapping};
+    my $relcache      = $map->{relcache};
+    my $union_flag    = $map->{union_flag};
+    my $is_outer      = $map->{is_outer};
 
     #NOTE: We parse location to determine where the WHERE clause should go
     # Location parsing here is important if our parent statement does not
@@ -493,19 +732,87 @@ sub get_joined_rels($$$$;$)
         $location = $supplemental_location;
     }
 
+    my $outer_dep      = '';
+    my $right_is_outer = 0;
+    my $left_is_outer  = 0;
+    my $join_expr;
+
     if( defined $json_fragment && defined( $json_fragment->{larg} ) )
     {
+        # Note on handedness - left / right is reference to larg / rarg. A relation is considered outer if it is the non-inner joined side of the relation
+        # IE:
+        #     SELECT foo
+        #       FROM tb_bar b
+        #  LEFT JOIN tb_foo f <- This is the outer relation, and would be rarg, right_is_outer would be set
+        #         ON b.baz = f.baz
+        #
+        #     SELECT foo
+        #       FROM tb_bar b <- This is the outer relation, and would be larg. left_is_outer would be set
+        # RIGHT JOIN tb_foo f
+        #         ON f.baz = b.baz
+        if( defined( $json_fragment->{name} ) && $json_fragment->{name} eq 'JOINEXPR' )
+        {
+            if(
+                  defined( $json_fragment->{jointype} )
+               && $json_fragment->{jointype} ne 'INNER' # X join Y, X natural join Y, X inner join Y
+              )
+            {
+                # We've located an outer join'd relation(s)
+                if( $json_fragment->{jointype} eq 'LEFT' )
+                {
+                    $right_is_outer = 1;
+                    $outer_dep      = 'l';
+                    $join_expr      = $json_fragment->{quals};
+                }
+                elsif( $json_fragment->{jointype} eq 'RIGHT' )
+                {
+                    $left_is_outer  = 1;
+                    $outer_dep      = 'r';
+                    $join_expr      = $json_fragment->{quals};
+                }
+                elsif( $json_fragment->{jointype} eq 'FULL' )
+                {
+                    $right_is_outer = 1;
+                    $left_is_outer  = 1;
+                    $outer_dep      = 'b';
+                    $join_expr      = $json_fragment->{quals};
+                }
+                else
+                {
+                    _log( $LOG_LEVEL_WARNING, "Unimplemented join type detected: $json_fragment->{jointype}" );
+                }
+
+                # XXX We need to figure out the join predicate
+
+            }
+            elsif(
+                    defined( $json_fragment->{jointype} )
+                 && $json_fragment->{jointype} eq 'INNER'
+                 )
+            {
+                $left_is_outer  = 0;
+                $right_is_outer = 0;
+                $is_outer       = 0;
+                $outer_dep      = '';
+                undef( $join_expr );
+            }
+        }
+
         my $from_list = &get_joined_rels(
-            $json_fragment->{larg},
-            $parent,
-            $table_mapping,
-            $relcache,
-            $union_flag
+            {
+                fragment      => $json_fragment->{larg},
+                parent        => $parent,
+                table_mapping => $table_mapping,
+                relcache      => $relcache,
+                union_flag    => $union_flag,
+                is_outer      => $left_is_outer,
+                join_expr     => $join_expr,
+            },
+            $number
         );
 
         if( defined( $json_fragment->{rarg} ) )
         {
-
             if( $json_fragment->{rarg}->{name} eq 'RANGEFUNCTION' )
             { # SRF Function
                 # According to parsenodes.h - each element of this List is a
@@ -537,15 +844,26 @@ sub get_joined_rels($$$$;$)
                     $location = $function_call->{rarg}->{location};
                 }
 
+                $$number++;
+                my $frag = {
+                    $function_alias => {
+                        obj      => $function_name,
+                        type     => 'FUNCTION',
+                        location => $location,
+                        number   => $$number,
+                    }
+                };
+
+                if( $is_outer || $right_is_outer )
+                {
+                    $frag->{$function_alias}->{is_outer} = 1;
+                    $frag->{$function_alias}->{outer_dep} = $outer_dep;
+                    $frag->{$function_alias}->{expr} = get_dependent_column( $join_expr, $relcache, $function_alias ) if( $join_expr );
+                }
+
                 push(
                     @$from_list,
-                    {
-                        $function_alias => {
-                            obj      => $function_name,
-                            type     => 'FUNCTION',
-                            location => $location,
-                        }
-                    }
+                    $frag
                 );
 
                 add_table_mapping(
@@ -593,17 +911,26 @@ sub get_joined_rels($$$$;$)
                     $location = $json_fragment->{rarg}->{location};
                 }
 
+                $$number++;
                 my $frag = {
                     $alias => {
                         obj      => $right_relation,
                         type     => 'RELATION',
                         location => $location,
+                        number   => $$number,
                     }
                 };
 
                 if( defined( $inh ) )
                 {
                     $frag->{$alias}->{inh} = $inh;
+                }
+
+                if( $is_outer || $right_is_outer )
+                {
+                    $frag->{$alias}->{is_outer} = 1;
+                    $frag->{$alias}->{outer_dep} = $outer_dep;
+                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias, $right_relation ) if( $join_expr );
                 }
 
                 push(
@@ -633,31 +960,45 @@ sub get_joined_rels($$$$;$)
                     $location = $json_fragment->{rarg}->{location};
                 }
 
-                push(
-                    @$from_list,
-                    {
-                        $alias => {
-                            obj      => &parse_select(
-                                $json_fragment->{rarg}->{subquery},
-                                $parent,
-                                $table_mapping,
-                                $relcache,
-                                $union_flag
-                            ),
-                            type     => 'SUBSELECT',
-                            location => $location,
-                        }
+                $$number++;
+
+                my $frag = {
+                    $alias => {
+                        obj      => &parse_select(
+                            $json_fragment->{rarg}->{subquery},
+                            $parent,
+                            $table_mapping,
+                            $relcache,
+                            $union_flag
+                        ),
+                        type     => 'SUBSELECT',
+                        location => $location,
+                        number   => $$number,
                     }
-                );
+                };
+
+                if( $is_outer || $right_is_outer )
+                {
+                    $frag->{$alias}->{is_outer} = 1;
+                    $frag->{$alias}->{outer_dep} = $outer_dep;
+                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias ) if( $join_expr );
+                }
+
+                push( @$from_list, $frag );
             }
             elsif( $json_fragment->{rarg}->{name} eq 'JOINEXPR' )
             {
                 my $sub_join = &get_joined_rels(
-                    $json_fragment->{rarg},
-                    $parent,
-                    $table_mapping,
-                    $relcache,
-                    $union_flag
+                    {
+                        fragment      => $json_fragment->{rarg},
+                        parent        => $parent,
+                        table_mapping => $table_mapping,
+                        relcache      => $relcache,
+                        union_flag    => $union_flag,
+                        is_outer      => $right_is_outer,
+                        join_expr     => $join_expr,
+                    },
+                    $number
                 );
 
                 foreach my $rel( @$sub_join )
@@ -716,15 +1057,29 @@ sub get_joined_rels($$$$;$)
                 }
             );
 
-            return [
-                {
-                    $function_alias => {
-                        obj      => $function_name,
-                        type     => 'FUNCTION',
-                        location => $json_fragment->{location},
-                    }
+            $$number++;
+            my $frag = {
+                $function_alias => {
+                    obj => $function_name,
+                    type => 'FUNCTION',
+                    location => $json_fragment->{location},
+                    number   => $$number,
                 }
-            ];
+            };
+
+            if( $is_outer || $left_is_outer )
+            {
+                $outer_dep = 'r' unless( $outer_dep && length( $outer_dep ) > 0 );
+                $frag->{$function_alias}->{is_outer} = 1;
+                $frag->{$function_alias}->{outer_dep} = $outer_dep;
+                if( $join_expr || $map->{join_expr} )
+                {
+                    $frag->{$function_alias}->{expr} = get_dependent_column( $map->{join_expr}, $relcache, $function_alias ) if( $is_outer );
+                    $frag->{$function_alias}->{expr} = get_dependent_column( $join_expr, $relcache, $function_alias ) if( $left_is_outer );
+                }
+            }
+
+            return [ $frag ];
         }
         elsif( $json_fragment->{name} eq 'RANGEVAR' )
         {
@@ -761,11 +1116,13 @@ sub get_joined_rels($$$$;$)
                 }
             );
 
+            $$number++;
             my $frag = {
                     $alias => {
                         obj      => $left_relation,
                         type     => 'RELATION',
                         location => $json_fragment->{location},
+                        number   => $$number,
                     }
             };
 
@@ -775,13 +1132,25 @@ sub get_joined_rels($$$$;$)
                 # XXX another spot to inject deps
             }
 
+            if( $is_outer || $left_is_outer )
+            {
+                $outer_dep = 'r' unless( $outer_dep && length( $outer_dep ) > 0 );
+                $frag->{$alias}->{is_outer} = 1;
+                $frag->{$alias}->{outer_dep} = $outer_dep;
+                if( $join_expr || $map->{join_expr} )
+                {
+                    $frag->{$alias}->{expr} = get_dependent_column( $map->{join_expr}, $relcache, $alias, $left_relation ) if( $is_outer );
+                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias, $left_relation ) if( $left_is_outer );
+                }
+            }
+
             return [ $frag ];
         }
         elsif( $json_fragment->{name} eq 'RANGESUBSELECT' )
         {
             my $alias = $json_fragment->{alias}->{aliasname};
-            return [
-                {
+            $$number++;
+            my $frag = {
                     $alias => {
                         obj      => &parse_select(
                                         $json_fragment->{subquery},
@@ -792,9 +1161,23 @@ sub get_joined_rels($$$$;$)
                                      ),
                         type     => 'SUBSELECT',
                         location => -1,
+                        number   => $$number,
                     }
+            };
+
+            if( $is_outer || $left_is_outer )
+            {
+                $outer_dep = 'r' unless( $outer_dep && length( $outer_dep ) > 0 );
+                $frag->{$alias}->{is_outer} = 1;
+                $frag->{$alias}->{outer_dep} = $outer_dep;
+                if( $join_expr || $map->{join_expr} )
+                {
+                    $frag->{$alias}->{expr} = get_dependent_column( $map->{join_expr}, $relcache, $alias ) if( $is_outer );
+                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias ) if( $left_is_outer );
                 }
-            ];
+            }
+
+            return [ $frag ];
         }
         else
         {
@@ -1011,12 +1394,17 @@ sub parse_from_clause($$$$;$)
         { type => SCALAR | UNDEF, optional => 1 },
     );
 
+    my $recur_number = 0;
     my $result = &get_joined_rels(
-        $json_fragment->[0],
-        $parent,
-        $table_mapping,
-        $relcache,
-        $union_flag
+        {
+            fragment      => $json_fragment->[0],
+            parent        => $parent,
+            table_mapping => $table_mapping,
+            relcache      => $relcache,
+            union_flag    => $union_flag,
+            is_outer      => 0,
+        },
+        \$recur_number
     );
 
     return $result;
@@ -1053,6 +1441,7 @@ sub parse_select($$$$;$)
     my $statement_info = {};
     my $where_start;
     my $where_end;
+
     if( defined( $json_fragment->{fromClause} ) )
     { # From clause with / without joins
         $statement_info->{from} = &parse_from_clause(
@@ -1063,6 +1452,7 @@ sub parse_select($$$$;$)
             $union_flag
         );
 
+        # XXX we can fixup here
     }
     elsif(
             defined( $json_fragment->{rarg} )
@@ -1409,6 +1799,7 @@ sub recursive_from_finder($$$)
         { type => HASHREF },
     );
 
+    # NOTE that we CANNOT allow outer joins to have binds
     if(
           defined( $json_fragment->{from} )
        && ref( $json_fragment->{from} ) eq 'ARRAY'
@@ -1433,7 +1824,95 @@ sub recursive_from_finder($$$)
                 }
                 else
                 {
+                    my $marker = 1;
+
                     $qual = resolve_relation( $relcache, $obj_name );
+
+                    if( defined( $rel->{$alias}->{is_outer} ) && $rel->{$alias}->{is_outer} eq 1 )
+                    {
+                        my $number  = $rel->{$alias}->{number};
+                        my $next    = $rel->{$alias}->{outer_dep}; # l = number - 1, r = number + 1, b = number - 1
+                        my $desired;
+
+                        if( $next eq 'r' )
+                        {
+                            $desired = $number + 1;
+                        }
+                        elsif( $next eq 'b' || $next eq 'l' )
+                        {
+                            $desired = $number - 1;
+                        }
+
+
+                        if( defined( $rel->{$alias}->{expr} ) && scalar( @{$rel->{$alias}->{expr}} ) > 0 && $desired )
+                        {
+                            foreach my $expr( @{$rel->{$alias}->{expr}} )
+                            {
+                                my $other_alias  = $expr->{other}->{alias};
+                                my $other_column = $expr->{other}->{column};
+                                my $dep_obj;
+
+                                REL: foreach my $next_rel( @{$json_fragment->{from}} )
+                                {
+                                    if( defined( $next_rel->{$other_alias} ) )
+                                    {
+                                        print "Locating by alias\n";
+                                        $dep_obj = $next_rel->{$other_alias}->{obj};
+                                        last REL if( $dep_obj );
+                                        #locate by alias
+                                    }
+                                    else
+                                    {
+                                        print "Locating by number\n";
+                                        #locate by number
+                                        foreach my $next_alias( keys %$next_rel )
+                                        {
+                                            if( $next_rel->{$next_alias}->{number} && $next_rel->{$next_alias}->{number} == $desired )
+                                            {
+                                                if( $next_alias ne $other_alias )
+                                                {
+                                                    # this can happen for subselects / weirdly nested expressions - solve on a case-by-case
+                                                    _log(
+                                                        $LOG_LEVEL_WARNING,
+                                                        "Skipping risky outer handling for relation $expr->{outer}->{rel} "
+                                                      . "with alias $expr->{outer}->{alias}"
+                                                    );
+                                                    last REL;
+                                                }
+
+                                                $dep_obj = $next_rel->{$next_alias}->{obj};
+
+                                                last REL;
+                                            }
+                                        }
+
+                                    }
+                                }
+
+                                if( defined( $dep_obj ) )
+                                {
+                                    # setup $marker to have a mapping for this expression
+                                    $marker = [] if( ref( $marker ) eq '' );
+                                    push(
+                                        @$marker,
+                                        {
+                                            target_relation => $dep_obj,
+                                            target_column   => $other_column,
+                                            target_alias    => $other_alias,
+                                            outer_relation  => $expr->{outer}->{rel},
+                                            outer_alias     => $expr->{outer}->{alias},
+                                            outer_column    => $expr->{outer}->{column},
+                                        }
+                                    );
+                                }
+                                else
+                                {
+                                    _log( $LOG_LEVEL_WARNING, "Failed to find outer predicate expression dependency" );
+                                    print Dumper( $expr );
+                                }
+                            }
+                        }
+                    }
 
                     unless(
                                defined( $qual->{schema} )
@@ -1449,7 +1928,7 @@ sub recursive_from_finder($$$)
                     }
                     my $schema = $qual->{schema};
                     my $name   = $qual->{name};
-                    $table_mapping->{BINDS}->{$where_start}->{rels}->{$schema}->{$alias}->{$name} = 1;
+                    $table_mapping->{BINDS}->{$where_start}->{rels}->{$schema}->{$alias}->{$name} = $marker;
 
                     if( defined( $rel->{$alias}->{inh} ) )
                     {
@@ -1459,7 +1938,7 @@ sub recursive_from_finder($$$)
                             my $dep_schema = $obj_data->{schema};
                             my $dep_name   = $obj_data->{name};
 
-                            $table_mapping->{BINDS}->{$where_start}->{rels}->{$dep_schema}->{$alias}->{$dep_name} = 1;
+                            $table_mapping->{BINDS}->{$where_start}->{rels}->{$dep_schema}->{$alias}->{$dep_name} = $marker;
                         }
                     }
                 }
@@ -1522,6 +2001,7 @@ sub find_table_aliases($$$$$) :Export( :MANDATORY )
         $PARSE_ERROR = 0;
     }
 
+    # lets do a fixup for outer joined relations
     return $query_data;
 }
 
@@ -1696,12 +2176,15 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
 
             my $recur_cte = $next_cte_name;
 
-            while( defined( $table_mapping->{CTES}->{$recur_cte}->{parent} ) )
+            if( $recur_cte )
             {
-                $recur_cte = $table_mapping->{CTES}->{$recur_cte}->{parent};
-            }
+                while( defined( $table_mapping->{CTES}->{$recur_cte}->{parent} ) )
+                {
+                    $recur_cte = $table_mapping->{CTES}->{$recur_cte}->{parent};
+                }
 
-            $next_cte_name = $recur_cte;
+                $next_cte_name = $recur_cte;
+            }
         }
 
         if( !defined( $bind_end ) )

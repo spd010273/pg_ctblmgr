@@ -36,7 +36,7 @@ sub get_random_test_case()
 }
 
 
-my $handle = DBI->connect( 'dbi:Pg:dbname=thd_restore;host=10.1.1.147;port=5432', 'postgres', undef );
+my $handle = DBI->connect( 'dbi:Pg:dbname=thd;host=10.1.1.147;port=5432', 'postgres', undef );
 
 die( 'Failed to connect' ) unless( $handle );
 
