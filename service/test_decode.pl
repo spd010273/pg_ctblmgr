@@ -259,7 +259,7 @@ my $definition = <<END_SQL;
         ON ec.entity = r.creator
  LEFT JOIN tb_entity em
         ON em.entity = r.modifier
- LEFT JOIN ONLY tb_reset_issue ri
+ LEFT JOIN tb_reset_issue ri
         ON ri.creator = ec.entity
        AND ri.modifier = em.entity
  LEFT JOIN ONLY tb_issue i

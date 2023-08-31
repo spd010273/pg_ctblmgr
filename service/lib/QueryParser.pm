@@ -384,7 +384,22 @@ sub add_table_mapping($)
             {
                 my $dep_schema = $relcache->{oid}->{$dep}->{schema};
                 my $dep_name   = $relcache->{oid}->{$dep}->{name};
+
                 # XXX
+                if( $table_mapping->{DEPS}->{$obj_schema}->{$obj_name} )
+                {
+                    push(
+                        @{$table_mapping->{DEPS}->{$obj_schema}->{$obj_name}},
+                        { schema => $dep_schema, name => $dep_name }
+                    );
+                }
+                else
+                {
+                    $table_mapping->{DEPS}->{$obj_schema}->{$obj_name} = [ {
+                        schema => $dep_schema,
+                        name   => $dep_name
+                    } ];
+                }
             }
         }
     }
@@ -488,7 +503,6 @@ sub get_dependent_column($$$;$)
     }
 
     my $exprs = [];
-
     if( exists( $json_fragment->{args} ) && ref( $json_fragment->{args} ) eq 'ARRAY' )
     {
         # compound boolean expression
@@ -901,6 +915,7 @@ sub get_joined_rels($$)
 
                 my $alias = $right_relation;
                 my $inh;
+                my $find_inh = 0;
                 if(
                        defined( $json_fragment->{rarg}->{inh} )
                     && $json_fragment->{rarg}->{inh}
@@ -929,9 +944,10 @@ sub get_joined_rels($$)
                     }
                 };
 
-                if( defined( $inh ) )
+                if( defined( $inh ) && scalar( @$inh ) > 0 )
                 {
                     $frag->{$alias}->{inh} = $inh;
+                    $find_inh = 1;
                 }
 
                 if( $is_outer || $right_is_outer )
@@ -956,7 +972,7 @@ sub get_joined_rels($$)
                         location      => $location,
                         is_function   => 0,
                         is_cte        => 0,
-                        find_inh      => 0
+                        find_inh      => $find_inh,
                     }
                 );
             }
@@ -1943,7 +1959,11 @@ sub recursive_from_finder($$$)
 
                                     # We have sufficient info, convert to arrayref of bind info
                                     $marker = [] if( ref( $marker ) eq '' );
-
+                                    my $is_inh = 0;
+                                    if( $rel->{$alias}->{inh} && scalar( @{$rel->{$alias}->{inh}} ) > 0 )
+                                    {
+                                        $is_inh = 1;
+                                    }
                                     push(
                                         @$marker,
                                         {
@@ -1955,6 +1975,7 @@ sub recursive_from_finder($$$)
                                             outer_schema    => $outer_info->{schema},
                                             outer_alias     => $expr->{outer}->{alias},
                                             outer_column    => $expr->{outer}->{column},
+                                            is_inh          => $is_inh,
                                         }
                                     );
                                 }
@@ -2180,9 +2201,12 @@ sub recursive_bind_helper($$)
         my $target_relation = $bind_info->{target_relation};
         my $target_column   = $bind_info->{target_column};
         my $target_alias    = $bind_info->{target_alias};
+        my $is_inh          = $bind_info->{is_inh};
+        my $ONLY            = 'ONLY';
 
+        $ONLY = '' if( defined( $is_inh ) && $is_inh == 1 );
         my $q = <<"END_SQL";
-$target_column IN( SELECT $outer_column FROM $outer_schema.$outer_relation WHERE
+$target_column IN( SELECT $outer_column FROM $ONLY $outer_schema.$outer_relation WHERE
 END_SQL
         if( $filters )
         {
@@ -2309,11 +2333,13 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
                     elsif( ref( $bind_infos ) eq 'ARRAY' )
                     {
                         my $has_binds = 0;
+                        my $inh_match = 0;
                         foreach my $bind_info( @$bind_infos )
                         {
                             $has_binds = 1 if( defined( $filters->{$bind_info->{outer_schema}}->{$bind_info->{outer_relation}} ) );
+                            $inh_match = 1 if( $bind_info->{outer_schema} eq $schema && $bind_info->{outer_relation} eq $table_name );
                         }
-                        next unless( $has_binds );
+                        next unless( $has_binds && $inh_match );
                         my $chain = {};
                         my $ret = &recursive_bind_helper(
                             {
@@ -2324,7 +2350,6 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
                             },
                             $chain
                         );
-
                         my $results = &chain_assembler( $chain );
                         push( @$where_entries, @$results );
                     }
