@@ -374,6 +374,7 @@ sub add_table_mapping($)
 
     if( $find_inh )
     {
+        # uh i forgot why this is here
         if(
                defined( $relcache->{deps}->{$obj_schema} )
             && defined( $relcache->{deps}->{$obj_schema}->{$obj_name} )
@@ -491,11 +492,18 @@ sub get_dependent_column($$$;$)
     if( exists( $json_fragment->{args} ) && ref( $json_fragment->{args} ) eq 'ARRAY' )
     {
         # compound boolean expression
+        my $parsed_subexprs = [];
         foreach my $subfrag( @{$json_fragment->{args}} )
         {
-            next if( !exists( $subfrag->{lexpr} ) || !exists( $subfrag->{rexpr} ) );
-            next if( !exists( $subfrag->{name} ) || ref( $subfrag->{name} ) ne 'ARRAY' || $subfrag->{name}->[0] ne '=' );
+            my $subexprs = &get_dependent_column( $subfrag, $relcache, $alias, $relation );
+            if( defined $subexprs && ref( $subexprs ) eq 'ARRAY' && scalar( @$subexprs ) > 0 )
+            {
+                push( @$parsed_subexprs, @$subexprs );
+            }
         }
+
+        return $parsed_subexprs if( scalar( @$parsed_subexprs ) > 0 );
+        return undef;
     }
     elsif( exists( $json_fragment->{lexpr} ) && exists( $json_fragment->{rexpr} ) )
     {
@@ -1452,7 +1460,6 @@ sub parse_select($$$$;$)
             $union_flag
         );
 
-        # XXX we can fixup here
     }
     elsif(
             defined( $json_fragment->{rarg} )
@@ -1904,7 +1911,7 @@ sub recursive_from_finder($$$)
                                             $fake_table_mapping,
                                             $dep_obj
                                         );
-                                        
+
                                         if( scalar( keys %{$fake_table_mapping->{BINDS}} ) > 1 )
                                         {
                                             _log(
@@ -1913,21 +1920,39 @@ sub recursive_from_finder($$$)
                                             );
                                             next;
                                         }
-                                       
+
                                         my @keys     = keys %{$fake_table_mapping->{BINDS}};
-                                        my $only_key = shift @keys; 
+                                        my $only_key = shift @keys;
                                         $dep_obj     = $fake_table_mapping->{BINDS}->{$only_key}->{rels};
                                     }
-                                   
-                                    # We have sufficient info, convert to arrayref of bind info 
+
+                                    my $dep_info   = resolve_relation( $relcache, $dep_obj );
+                                    my $outer_info = resolve_relation( $relcache, $expr->{outer}->{rel} );
+
+                                    if( !defined( $dep_info ) || !defined( $dep_info->{schema} ) || !defined( $dep_info->{name} ) )
+                                    {
+                                        _log( $LOG_LEVEL_WARNING, "Could not resolve outer target relation $dep_obj\n" );
+                                        next;
+                                    }
+
+                                    if( !defined( $outer_info ) || !defined( $outer_info->{schema} ) || !defined( $outer_info->{name} ) )
+                                    {
+                                        _log( $LOG_LEVEL_WARNING, "Could not resolve outer joined relation $expr->{outer}->{rel}" );
+                                        next;
+                                    }
+
+                                    # We have sufficient info, convert to arrayref of bind info
                                     $marker = [] if( ref( $marker ) eq '' );
+
                                     push(
                                         @$marker,
                                         {
-                                            target_relation => $dep_obj,
+                                            target_relation => $dep_info->{name},
                                             target_column   => $other_column,
                                             target_alias    => $other_alias,
-                                            outer_relation  => $expr->{outer}->{rel},
+                                            target_schema   => $dep_info->{schema},
+                                            outer_relation  => $outer_info->{name},
+                                            outer_schema    => $outer_info->{schema},
                                             outer_alias     => $expr->{outer}->{alias},
                                             outer_column    => $expr->{outer}->{column},
                                         }
@@ -2033,14 +2058,214 @@ sub find_table_aliases($$$$$) :Export( :MANDATORY )
     return $query_data;
 }
 
-sub apply_filters($$$$$) :Export( :MANDATORY )
+sub bind_filters($)
+{
+    my( $map ) = validate_pos(
+        @_,
+        { type => HASHREF },
+    );
+
+    my $handle   = $map->{handle};
+    my $filters  = $map->{filters};
+    my $schema   = $map->{schema};
+    my $relation = $map->{relation};
+    my $alias    = $map->{alias};
+    my $entries  = [];
+
+    foreach my $key( keys( %{$filters->{$schema}->{$relation}} ) )
+    {
+        my $typmod = &get_typmods(
+            $handle,
+            $schema,
+            $relation,
+            $key
+        );
+
+        if( !defined( $typmod ) )
+        {
+            warn(
+                "Invalid column for relation $relation - "
+              . "$key. Column appears to have no type\n"
+            );
+            next;
+        }
+
+        my $type = $typmod->{$key};
+        my $vals;
+        my $where_entry;
+        my $vals_array = $filters->{$schema}->{$relation}->{$key};
+        $where_entry   = "${alias}." if( $alias );
+        $where_entry  .= $key;
+
+        if( scalar( @$vals_array ) > 1 )
+        {
+            $vals = ' IN( '
+                  . join(
+                        ', ',
+                        map { "'${_}'::${type}" } @$vals_array
+                    )
+                  . ' )';
+        }
+        elsif( scalar( @$vals_array ) > 0 )
+        {
+            $vals = " = ('" .  $vals_array->[0] . "' )::$type ";
+        }
+        else
+        {
+            warn "No vinds for $schema.$relation.$key\n";
+            next;
+        }
+
+        $where_entry .= $vals;
+        push( @$entries, $where_entry );
+    }
+
+    return $entries if( scalar( @$entries ) > 0 );
+    return undef;
+}
+
+sub chain_assembler($)
+{
+    my( $chain ) = validate_pos(
+        @_,
+        { type => HASHREF },
+    );
+
+    my $results = [];
+    foreach my $chain_tail( @{$chain->{__ENDS__}} )
+    {
+        my $chain_end = $chain_tail->{q};
+        my $chain_alias = $chain_tail->{alias};
+        my $length = 0;
+        my $next_q = $chain->{$chain_end};
+
+        while( defined( $next_q ) && $next_q ne $chain->{__START__} )
+        {
+            $length++;
+            $chain_end = "${chain_end} ${next_q}";
+            $next_q    = $chain->{$next_q};
+        }
+
+        $chain_end = "${chain_alias}.${chain_end}" if( $chain_alias );
+        $chain_end .= ( ')' x $length );
+        push( @$results, $chain_end );
+    }
+
+    return $results;
+}
+
+sub recursive_bind_helper($$)
+{
+    my( $map, $chain ) = validate_pos(
+        @_,
+        { type => HASHREF },
+        { type => HASHREF },
+    );
+
+    my $filters   = $map->{filters};
+    my $next_bind = $map->{next_bind};
+    my $handle    = $map->{handle};
+    my $RELS      = $map->{RELS};
+
+    return unless( defined( $next_bind ) && ref( $next_bind ) eq 'ARRAY' );
+
+    my $result_queries = [];
+    foreach my $bind_info( @$next_bind )
+    {
+        my $outer_schema    = $bind_info->{outer_schema};
+        my $outer_relation  = $bind_info->{outer_relation};
+        my $outer_column    = $bind_info->{outer_column};
+        my $outer_alias     = $bind_info->{outer_alias};
+        my $target_schema   = $bind_info->{target_schema};
+        my $target_relation = $bind_info->{target_relation};
+        my $target_column   = $bind_info->{target_column};
+        my $target_alias    = $bind_info->{target_alias};
+
+        my $q = <<"END_SQL";
+$target_column IN( SELECT $outer_column FROM $outer_schema.$outer_relation WHERE
+END_SQL
+        if( $filters )
+        {
+            # ONLY SET for the first call
+            my $binds = &bind_filters( {
+                handle   => $handle,
+                filters  => $filters,
+                schema   => $outer_schema,
+                relation => $outer_relation,
+            } );
+
+            $q .= ' ' . join( ' AND ', @$binds ) . ') ' if( $binds );;
+            if( defined( $chain->{__START__} ) )
+            {
+                push( @{$chain->{__START__}}, $q );
+            }
+            else
+            {
+                $chain->{__START__} = [ $q ];
+            }
+        }
+
+        push( @$result_queries, $q );
+        my $next_next_binds = $RELS->{$target_schema}->{$target_alias}->{$target_relation};
+
+        my $ret_qs = &recursive_bind_helper(
+            {
+                filters     => undef, # apply filters to only the outer-most call
+                handle      => $handle,
+                next_bind   => $next_next_binds,
+                RELS        => $RELS,
+            },
+            $chain,
+        );
+
+        if( !defined( $ret_qs ) )
+        {
+            if( defined( $chain->{__ENDS__} ) )
+            {
+                push( @{$chain->{__ENDS__}}, { q => $q, alias => $target_alias } );
+            }
+            else
+            {
+                $chain->{__ENDS__} = [ { q => $q, alias => $target_alias } ];
+            }
+        }
+
+        foreach my $ret_q( @$ret_qs )
+        {
+            $chain->{$ret_q} = $q;
+        }
+
+        # Tail recursive, iterative nightmare
+        # We need to track query permutations that can happen so that we can appropriately nest them
+        #
+        # Consider the following structure
+        #           /--D--F---
+        #      /-B-<
+        #     /     \--E------
+        # -A-<
+        #     \--C------------
+        #
+        # Each branch in the chain means we have another query nesting that we need to handle. In this
+        # case our chains will be
+        # [
+        #  [ A, B, D, F ]
+        #  [ A, B, E ]
+        #  [ A, C ]
+        # ]
+    }
+
+    return $result_queries;
+}
+
+sub apply_filters($$$$$;$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $query_data,
         $table_mapping,
         $definition,
-        $filters
+        $filters,
+        $outer_join_mode
       ) = validate_pos(
         @_,
         { type => OBJECT },
@@ -2048,6 +2273,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
         { type => HASHREF },
         { type => SCALAR },
         { type => HASHREF },
+        { type => SCALAR, optional => 1 },
     );
 
     # Lets use the filters we've received and search for the tables, their
@@ -2056,6 +2282,7 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
     # Phase I will result in a keyed array telling us which CTE or query will
     # need a filter applied
     my $where_expressions = {};
+
     foreach my $position( keys %{$table_mapping->{BINDS}} )
     {
         #print "P: $position\n";
@@ -2073,63 +2300,59 @@ sub apply_filters($$$$$) :Export( :MANDATORY )
                 foreach my $table_name( keys %{$RELS->{$schema}->{$alias}} )
                 {
                     #print "T: $table_name\n";
-                    if( defined( $filters->{$schema}->{$table_name} ) )
+                    my $bind_infos = $RELS->{$schema}->{$alias}->{$table_name};
+                    if( ref( $bind_infos ) eq '' && $bind_infos == 0 )
                     {
-                        foreach my $key( keys %{$filters->{$schema}->{$table_name}} )
+                        _log( $LOG_LEVEL_DEBUG, "Skipping unbindable relation $table_name - involved in outer join" );
+                        next;
+                    }
+                    elsif( ref( $bind_infos ) eq 'ARRAY' )
+                    {
+                        my $has_binds = 0;
+                        foreach my $bind_info( @$bind_infos )
                         {
-                            #print "K: $key\n";
-                            my $typmod = &get_typmods(
-                                $handle,
-                                $schema,
-                                $table_name,
-                                $key
+                            $has_binds = 1 if( defined( $filters->{$bind_info->{outer_schema}}->{$bind_info->{outer_relation}} ) );
+                        }
+                        next unless( $has_binds );
+                        my $chain = {};
+                        my $ret = &recursive_bind_helper(
+                            {
+                             handle     => $handle,
+                             next_bind  => $bind_infos,
+                             RELS       => $RELS,
+                             filters    => $filters,
+                            },
+                            $chain
+                        );
+
+                        my $results = &chain_assembler( $chain );
+                        push( @$where_entries, @$results );
+                    }
+                    else
+                    {
+                        if( defined( $filters->{$schema}->{$table_name} ) )
+                        {
+                            my $binds = &bind_filters(
+                                {
+                                    handle => $handle,
+                                    filters => $filters,
+                                    schema => $schema,
+                                    relation => $table_name,
+                                    alias    => $alias,
+                                }
                             );
 
-                            if( !defined( $typmod ) )
+                            if( $binds )
                             {
-                                warn(
-                                    "Invalid column for table $schema."
-                                  . "$table_name - $key. Column appears "
-                                  . "to have no type\n"
-                                );
-                                next;
+                                push( @$where_entries, @$binds );
                             }
-
-                            my $type        = $typmod->{$key};
-                            my $where_entry = "${alias}.${key} ";
-
-                            if( scalar( @{$filters->{$schema}->{$table_name}->{$key}} ) > 1 )
-                            {
-                                my $values = [];
-
-                                foreach my $value( @{$filters->{$schema}->{$table_name}->{$key}} )
-                                {
-                                    push( @$values, "( '${value}' )::$type" );
-                                }
-
-                                $where_entry .= 'IN( '
-                                              . join( ', ', @$values )
-                                              .' ) ';
-                            }
-                            elsif( scalar( @{$filters->{$schema}->{$table_name}->{$key}} ) > 0 )
-                            {
-                                my $value     = $filters->{$schema}->{$table_name}->{$key}->[0];
-                                $where_entry .= "= ( '${value}' )::$type";
-                            }
-                            else
-                            {
-                                warn "No binds for $schema.$table_name.$key\n";
-                                next;
-                            }
-
-                            push( @$where_entries, $where_entry );
                         }
                     }
-
                 }
             }
         }
 
+        #print Dumper( $where_entries );
         my $where_entry;
 
         if( scalar( @$where_entries ) > 0 )

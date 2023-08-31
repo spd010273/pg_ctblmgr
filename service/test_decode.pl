@@ -254,9 +254,16 @@ $CONNECTION_MAP->{user_name} = 'postgres';
 #END_SQL
 my $definition = <<END_SQL;
     SELECT r.reset
-      FROM ( SELECT * FROM ONLY tb_reset ) r
+      FROM ONLY tb_reset r
+ LEFT JOIN tb_entity ec
+        ON ec.entity = r.creator
+ LEFT JOIN tb_entity em
+        ON em.entity = r.modifier
  LEFT JOIN ONLY tb_reset_issue ri
-        ON ri.reset = r.reset
+        ON ri.creator = ec.entity
+       AND ri.modifier = em.entity
+ LEFT JOIN ONLY tb_issue i
+        ON i.issue = ri.issue
 END_SQL
 
 # This script is helpful for debugging the query parser without loading in / doing all the extra stuff pg_ctblmgr does
@@ -267,12 +274,12 @@ unless( $handle )
     die( "failed to connect\n" );
 }
 
-my $test_change = { 'public' => { 'tb_reset_issue' => { 'issue' => [ 1 ] } } };
+my $test_change = { 'public' => { 'tb_issue' => { 'issue' => [ 1 ] } } };
 my $filter_tables = [ 'public.tb_reset' ];
 my $relcache = get_relcache( $handle );
 my $table_mapping = {};
 my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
 #print Dumper( $data );
-print Dumper( $table_mapping );
+#print Dumper( $table_mapping );
 my $substituted_query = apply_filters( $handle, $data, $table_mapping, $definition, $test_change );
-#print "$substituted_query\n";
+print "$substituted_query\n";
