@@ -2429,7 +2429,7 @@ sub chain_assembler($)
 
     my $frag = { q => $results };
     $frag->{move_to} = $move_to if( $move_to );
-    print Dumper( $frag );
+
     return $frag;
 }
 
