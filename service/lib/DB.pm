@@ -1759,6 +1759,7 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
     # TODO This can take some time
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
+    print "$tt_query\n";
     my $sth             = try_query( $handle, $tt_query );
 
     if( $sth )

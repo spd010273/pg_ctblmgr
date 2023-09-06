@@ -55,6 +55,62 @@ INNER JOIN pg_inherits inh
         ON inh.inhparent = c.oid
 END_SQL
 
+Readonly::Scalar my $FK_COLUMN_CACHE => <<END_SQL;
+    SELECT n.nspname AS schema,
+           c.relname AS table,
+           a.attname AS column,
+           nf.nspname AS foreign_schema,
+           cf.relname AS foreign_table,
+           array_agg( af.attname ) AS foreign_columns
+      FROM pg_class c
+INNER JOIN pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN pg_constraint co
+        ON co.contype = 'f'
+       AND co.conrelid = c.oid
+       AND a.attnum = ANY( co.conkey )
+INNER JOIN pg_class cf
+        ON cf.oid = co.confrelid
+INNER JOIN pg_attribute af
+        ON af.attrelid = cf.oid
+       AND af.attnum > 0
+       AND af.attisdropped IS FALSE
+       AND af.attnum = ANY( co.confkey )
+INNER JOIN pg_namespace nf
+        ON nf.oid = cf.relnamespace
+  GROUP BY co.oid,
+           n.nspname,
+           c.relname,
+           a.attname,
+           nf.nspname,
+           cf.relname
+     UNION ALL
+    SELECT n.nspname AS schema,
+           c.relname AS table,
+           a.attname AS column,
+           n.nspname AS foreign_schema,
+           c.relname AS foreign_table,
+           array_agg( a.attname ) AS foreign_columns
+      FROM pg_class c
+INNER JOIN pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attnum > 0
+       AND a.attisdropped IS FALSE
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN pg_constraint co
+        ON co.contype = 'p'
+       AND co.conrelid = c.oid
+       AND a.attnum = ANY( co.conkey )
+  GROUP BY n.nspname,
+           c.relname,
+           a.attname
+END_SQL
+
 Readonly::Scalar my $GET_RELATION_TYPEMODS => <<END_SQL;
     SELECT a.attname::VARCHAR AS column,
            t.typname::VARCHAR AS type
@@ -123,9 +179,7 @@ sub get_relcache($) :Export( :MANDATORY )
         { type => OBJECT },
     );
 
-    my $query = $OID_CACHE;
-
-    my $sth = try_query( $handle, $query, undef );
+    my $sth = try_query( $handle, $OID_CACHE, undef );
 
     unless( $sth )
     {
@@ -158,6 +212,29 @@ sub get_relcache($) :Export( :MANDATORY )
 
     $sth->finish();
 
+    $sth = try_query( $handle, $FK_COLUMN_CACHE, undef );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_FATAL, "Failed to get foreign keys for cache table" );
+    }
+
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        my $schema          = $row->{schema};
+        my $table           = $row->{table};
+        my $column          = $row->{column};
+        my $foreign_schema  = $row->{foreign_schema};
+        my $foreign_table   = $row->{foreign_table};
+        my $foreign_columns = $row->{foreign_columns};
+
+        foreach my $f_column( @$foreign_columns )
+        {
+            $cache->{fks}->{$schema}->{$table}->{$column}->{$foreign_schema}->{$foreign_table}->{$f_column} = 1;
+        }
+    }
+
+    $sth->finish();
 
     return $cache;
 }
@@ -207,6 +284,50 @@ sub get_typmods($$$;$)
     }
 
     return;
+}
+
+sub resolve_fk($$$$)
+{
+    my( $relcache, $schema, $table, $column ) = validate_pos(
+        @_,
+        { type => HASHREF },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+    );
+
+    my $fks = {};
+    unless(
+               defined( $relcache->{fks}->{$schema} )
+            && defined( $relcache->{fks}->{$schema}->{$table} )
+            && defined( $relcache->{fks}->{$schema}->{$table}->{$column} )
+          )
+    {
+        return undef;
+    }
+
+    my $keys = $relcache->{fks}->{$schema}->{$table}->{$column};
+
+    foreach my $f_schema( keys %$keys )
+    {
+        foreach my $f_table( keys %{$keys->{$f_schema}} )
+        {
+            my $relname = "$f_schema.$f_table";
+
+            if( !defined( $fks->{$relname} ) )
+            {
+                $fks->{$relname} = [];
+            }
+
+            foreach my $f_column( keys %{$keys->{$f_schema}->{$f_table}} )
+            {
+                push( @{$fks->{$relname}}, $f_column );
+            }
+        }
+    }
+    # For models with surrogate foreign keys, we expect keys to be 1:1, but using natural keys we can get odd multivariate results
+
+    return $fks;
 }
 
 sub resolve_relation($$)
@@ -1813,6 +1934,44 @@ sub parse_select($$$$;$)
     return $statement_info;
 }
 
+sub check_cte_has_relation($$$$)
+{
+    my( $table_mapping, $relcache, $dep_rel, $rel ) = validate_pos(
+        @_,
+        { type => HASHREF },
+        { type => HASHREF },
+        { type => SCALAR },
+        { type => SCALAR },
+    );
+
+    my $relinfo = resolve_relation( $relcache, $rel );
+
+    unless( defined( $relinfo ) )
+    {
+        return 0;
+    }
+
+    foreach my $bindpoint( keys %{$table_mapping->{BINDS}} )
+    {
+        my $bindinfo = $table_mapping->{BINDS}->{$bindpoint};
+        if(
+                defined( $bindinfo->{rels} )
+             && defined( $bindinfo->{rels}->{$relinfo->{schema}} )
+          )
+        {
+            foreach my $alias( keys %{$bindinfo->{rels}->{$relinfo->{schema}}} )
+            {
+                if( defined( $bindinfo->{rels}->{$relinfo->{schema}}->{$alias}->{$relinfo->{name}} ) )
+                {
+                    return { alias => $alias };
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 sub recursive_from_finder($$$)
 {
     my( $relcache, $table_mapping, $json_fragment ) = validate_pos(
@@ -1874,6 +2033,7 @@ sub recursive_from_finder($$$)
 
                         if( defined( $rel->{$alias}->{expr} ) && scalar( @{$rel->{$alias}->{expr}} ) > 0 && $desired )
                         {
+                            my $cannot_bind = 0;
                             foreach my $expr( @{$rel->{$alias}->{expr}} )
                             {
                                 my $other_alias  = $expr->{other}->{alias};
@@ -1945,16 +2105,95 @@ sub recursive_from_finder($$$)
                                     my $dep_info   = resolve_relation( $relcache, $dep_obj );
                                     my $outer_info = resolve_relation( $relcache, $expr->{outer}->{rel} );
 
-                                    if( !defined( $dep_info ) || !defined( $dep_info->{schema} ) || !defined( $dep_info->{name} ) )
+                                    if( !defined( $outer_info ) || !defined( $outer_info->{schema} ) || !defined( $outer_info->{name} ) )
                                     {
-                                        _log( $LOG_LEVEL_WARNING, "Could not resolve outer target relation $dep_obj\n" );
+                                        _log( $LOG_LEVEL_DEBUG, "Could not resolve outer joined relation $expr->{outer}->{rel}" );
                                         next;
                                     }
 
-                                    if( !defined( $outer_info ) || !defined( $outer_info->{schema} ) || !defined( $outer_info->{name} ) )
+                                    my $target_alias    = $other_alias;
+                                    my $target_schema   = $dep_info->{schema};
+                                    my $target_relation = $dep_info->{name};
+                                    my $target_column   = $other_column;
+
+                                    my $dep_in_cte;
+                                    if( !defined( $dep_info ) || !defined( $dep_info->{schema} ) || !defined( $dep_info->{name} ) )
                                     {
-                                        _log( $LOG_LEVEL_WARNING, "Could not resolve outer joined relation $expr->{outer}->{rel}" );
-                                        next;
+                                        # We have an outer join that is dependent on a CTE - do extra checks to see if this can be resolved
+                                        my $info = &resolve_fk(
+                                            $relcache,
+                                            $outer_info->{schema},
+                                            $outer_info->{name},
+                                            $expr->{outer}->{column}
+                                        );
+
+                                        $cannot_bind = 1;
+
+                                        if( defined( $info ) && defined( $table_mapping->{CTES}->{$dep_obj} ) )
+                                        {
+                                            # sanity check the target CTE expression to verify that the resolved FK info actually exists there
+                                            foreach my $rel( keys %$info )
+                                            {
+                                                my $alternate_rels;
+                                                my $result = &check_cte_has_relation(
+                                                    $table_mapping,
+                                                    $relcache,
+                                                    $dep_obj,
+                                                    $rel
+                                                );
+                                                my $relinfo     = resolve_relation( $relcache, $rel );
+                                                $alternate_rels = get_inheritance( $relcache, $rel ) if( !$result );
+
+                                                if(
+                                                       !$result
+                                                    && defined( $alternate_rels )
+                                                    && scalar( @$alternate_rels ) > 0
+                                                  )
+                                                {
+                                                    # Check the case where inherited relations are present, this can happen with self joins
+                                                    foreach my $alternate_rel( @$alternate_rels )
+                                                    {
+                                                        $result = &check_cte_has_relation(
+                                                            $table_mapping,
+                                                            $relcache,
+                                                            $dep_obj,
+                                                            $alternate_rel
+                                                        );
+
+                                                        if( ref( $result ) eq 'HASH' && $result->{alias} )
+                                                        {
+                                                            $target_alias = $result->{alias};
+                                                        }
+
+                                                        $relinfo = resolve_relation( $relcache, $alternate_rel ) if( $result );
+                                                    }
+                                                }
+
+                                                if( $result && $relinfo )
+                                                {
+                                                    $dep_in_cte      = 1;
+                                                    $cannot_bind     = 0;
+                                                    $dep_in_cte      = $dep_obj;
+                                                    $target_relation = $relinfo->{name};
+                                                    $target_schema   = $relinfo->{schema};
+                                                    $target_alias    = $result->{alias};
+                                                }
+                                            }
+                                        }
+
+                                        if( $cannot_bind )
+                                        {
+                                            _log(
+                                                $LOG_LEVEL_WARNING,
+                                                "Could not resolve outer target relation $dep_obj from $expr->{outer}->{rel}."
+                                              . " Filters will not be able to be applied for this relation and updates will be slow."
+                                              . " Consider using a resolvable relation between $expr->{outer}->{rel} and $dep_obj rather"
+                                              . " than joining directly to $dep_obj"
+                                            );
+                                            next;
+                                        }
+
+                                        # XXX We need to add information that allows the bind data to be displaced to the correct CTE
                                     }
 
                                     # We have sufficient info, convert to arrayref of bind info
@@ -1967,15 +2206,16 @@ sub recursive_from_finder($$$)
                                     push(
                                         @$marker,
                                         {
-                                            target_relation => $dep_info->{name},
-                                            target_column   => $other_column,
-                                            target_alias    => $other_alias,
-                                            target_schema   => $dep_info->{schema},
+                                            target_relation => $target_relation,
+                                            target_column   => $target_column,
+                                            target_alias    => $target_alias,
+                                            target_schema   => $target_schema,
                                             outer_relation  => $outer_info->{name},
                                             outer_schema    => $outer_info->{schema},
                                             outer_alias     => $expr->{outer}->{alias},
                                             outer_column    => $expr->{outer}->{column},
                                             is_inh          => $is_inh,
+                                            dep_in_cte      => $dep_in_cte,
                                         }
                                     );
                                 }
@@ -1984,6 +2224,11 @@ sub recursive_from_finder($$$)
                                     _log( $LOG_LEVEL_WARNING, "Failed to find outer predicate expression dependency" );
                                     print Dumper( $expr );
                                 }
+                            }
+
+                            if( $cannot_bind )
+                            {
+                                $marker = 0;
                             }
                         }
                     }
@@ -2133,7 +2378,7 @@ sub bind_filters($)
         }
         else
         {
-            warn "No vinds for $schema.$relation.$key\n";
+            warn "No binds for $schema.$relation.$key\n";
             next;
         }
 
@@ -2153,18 +2398,28 @@ sub chain_assembler($)
     );
 
     my $results = [];
+    my $move_to;
+
     foreach my $chain_tail( @{$chain->{__ENDS__}} )
     {
-        my $chain_end = $chain_tail->{q};
+        my $chain_end   = $chain_tail->{q};
         my $chain_alias = $chain_tail->{alias};
         my $length = 0;
-        my $next_q = $chain->{$chain_end};
+        my $next_q = $chain->{$chain_end}->{q};
+
+        $move_to = $chain_tail->{cte} if( $chain_tail->{cte} );
 
         while( defined( $next_q ) && $next_q ne $chain->{__START__} )
         {
             $length++;
             $chain_end = "${chain_end} ${next_q}";
-            $next_q    = $chain->{$next_q};
+            $next_q    = $chain->{$next_q}->{q};
+        }
+
+        if( $length == 0 )
+        {
+            $chain_end .= ' ' . $next_q if( $next_q );
+            $length++;
         }
 
         $chain_end = "${chain_alias}.${chain_end}" if( $chain_alias );
@@ -2172,7 +2427,10 @@ sub chain_assembler($)
         push( @$results, $chain_end );
     }
 
-    return $results;
+    my $frag = { q => $results };
+    $frag->{move_to} = $move_to if( $move_to );
+    print Dumper( $frag );
+    return $frag;
 }
 
 sub recursive_bind_helper($$)
@@ -2187,10 +2445,12 @@ sub recursive_bind_helper($$)
     my $next_bind = $map->{next_bind};
     my $handle    = $map->{handle};
     my $RELS      = $map->{RELS};
+    my $BINDS     = $map->{BINDS};
 
     return unless( defined( $next_bind ) && ref( $next_bind ) eq 'ARRAY' );
 
     my $result_queries = [];
+
     foreach my $bind_info( @$next_bind )
     {
         my $outer_schema    = $bind_info->{outer_schema};
@@ -2202,12 +2462,15 @@ sub recursive_bind_helper($$)
         my $target_column   = $bind_info->{target_column};
         my $target_alias    = $bind_info->{target_alias};
         my $is_inh          = $bind_info->{is_inh};
+        my $dep_in_cte      = $bind_info->{dep_in_cte};
         my $ONLY            = 'ONLY';
 
         $ONLY = '' if( defined( $is_inh ) && $is_inh == 1 );
         my $q = <<"END_SQL";
 $target_column IN( SELECT $outer_column FROM $ONLY $outer_schema.$outer_relation WHERE
 END_SQL
+        my $new_rels = $RELS;
+
         if( $filters )
         {
             # ONLY SET for the first call
@@ -2219,44 +2482,57 @@ END_SQL
             } );
 
             $q .= ' ' . join( ' AND ', @$binds ) . ') ' if( $binds );;
-            if( defined( $chain->{__START__} ) )
+            $chain->{__START__} = $q;
+        }
+
+        my $cte;
+        if( $bind_info->{dep_in_cte} )
+        {
+            foreach my $pos( keys %$BINDS )
             {
-                push( @{$chain->{__START__}}, $q );
-            }
-            else
-            {
-                $chain->{__START__} = [ $q ];
+                if( $BINDS->{$pos}->{parent} && $BINDS->{$pos}->{parent} eq $bind_info->{dep_in_cte} )
+                {
+                    ## XXX context switching here
+                    $new_rels = $BINDS->{$pos}->{rels};
+                    $cte = $bind_info->{dep_in_cte};
+                    last;
+                }
             }
         }
 
+        my $q_frag = { q => $q };
+        $q_frag->{cte} = $cte if( $cte );
         push( @$result_queries, $q );
-        my $next_next_binds = $RELS->{$target_schema}->{$target_alias}->{$target_relation};
+        my $next_next_binds = $new_rels->{$target_schema}->{$target_alias}->{$target_relation};
 
         my $ret_qs = &recursive_bind_helper(
             {
                 filters     => undef, # apply filters to only the outer-most call
                 handle      => $handle,
                 next_bind   => $next_next_binds,
-                RELS        => $RELS,
+                RELS        => $new_rels,
+                BINDS       => $BINDS,
             },
             $chain,
         );
 
         if( !defined( $ret_qs ) )
         {
+            my $frag = { q => $q, alias => $target_alias };
+            $frag->{cte} = $cte if( $cte );
             if( defined( $chain->{__ENDS__} ) )
             {
-                push( @{$chain->{__ENDS__}}, { q => $q, alias => $target_alias } );
+                push( @{$chain->{__ENDS__}}, $frag );
             }
             else
             {
-                $chain->{__ENDS__} = [ { q => $q, alias => $target_alias } ];
+                $chain->{__ENDS__} = [ $frag ];
             }
         }
 
         foreach my $ret_q( @$ret_qs )
         {
-            $chain->{$ret_q} = $q;
+            $chain->{$ret_q} = { q => $q };
         }
 
         # Tail recursive, iterative nightmare
@@ -2311,7 +2587,7 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
     {
         #print "P: $position\n";
         next if( $position < 0 );
-
+        my $BINDS         = $table_mapping->{BINDS};
         my $RELS          = $table_mapping->{BINDS}->{$position}->{rels};
         my $where_entries = [];
 
@@ -2347,11 +2623,47 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
                              next_bind  => $bind_infos,
                              RELS       => $RELS,
                              filters    => $filters,
+                             BINDS      => $BINDS,
                             },
                             $chain
                         );
+
                         my $results = &chain_assembler( $chain );
-                        push( @$where_entries, @$results );
+
+                        if( defined( $results->{move_to} ) )
+                        {
+                            # Relocate this query to another CTE / Expression
+                            # to do this, we locate the position of the CTE found in {move_to} and inject our @$results there
+                            my $cte_found = 0;
+                            foreach my $target_position( keys %{$table_mapping->{BINDS}} )
+                            {
+                                if(
+                                    defined( $table_mapping->{BINDS}->{$target_position}->{parent} )
+                                    && $table_mapping->{BINDS}->{$target_position}->{parent} eq $results->{move_to}
+                                  )
+                                {
+                                    $cte_found = 1;
+                                    if( !defined( $where_expressions->{$target_position} ) )
+                                    {
+                                        $where_expressions->{$target_position} = [];
+                                    }
+
+                                    push( @{$where_expressions->{$target_position}}, @{$results->{q}} );
+
+                                    last;
+                                }
+                            }
+
+                            if( !$cte_found )
+                            {
+                                # there may be a case where we'll need to search the CTE parent->child LUT in table_mapping
+                                _log( $LOG_LEVEL_ERROR, "Assemble outer join can be injected to $results->{move_to} but $results->{move_to} could not be found" );
+                            }
+                        }
+                        else
+                        {
+                            push( @$where_entries, @{$results->{q}} );
+                        }
                     }
                     else
                     {
@@ -2377,7 +2689,20 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
             }
         }
 
-        #print Dumper( $where_entries );
+        if( $where_expressions->{$position} )
+        {
+            push( @{$where_expressions->{$position}}, @$where_entries );
+        }
+        else
+        {
+            $where_expressions->{$position} = $where_entries;
+        }
+    }
+
+
+    foreach my $position( keys %$where_expressions )
+    {
+        my $where_entries = $where_expressions->{$position};
         my $where_entry;
 
         if( scalar( @$where_entries ) > 0 )
@@ -2396,6 +2721,10 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
             }
 
             $where_expressions->{$position} = $where_entry;
+        }
+        else
+        {
+            delete( $where_expressions->{$position} );
         }
     }
 

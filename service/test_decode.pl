@@ -253,17 +253,18 @@ $CONNECTION_MAP->{user_name} = 'postgres';
 #        ON fm2.fiscal_month = fc2.month
 #END_SQL
 my $definition = <<END_SQL;
-    SELECT r.reset
-      FROM ONLY tb_reset r
- LEFT JOIN tb_entity ec
-        ON ec.entity = r.creator
- LEFT JOIN tb_entity em
-        ON em.entity = r.modifier
- LEFT JOIN tb_reset_issue ri
-        ON ri.creator = ec.entity
-       AND ri.modifier = em.entity
- LEFT JOIN ONLY tb_issue i
-        ON i.issue = ri.issue
+WITH tt_regress AS
+(
+    SELECT r.reset, r.end_date
+      FROM ONLY public.tb_reset r
+INNER JOIN public.tb_reset_status rs
+        ON rs.reset_status = r.reset_status
+       AND rs.reset_status > 0
+)
+    SELECT ttr.reset
+      FROM tt_regress ttr
+ LEFT JOIN ONLY public.tb_reset_issue ri
+        ON ri.reset = ttr.reset
 END_SQL
 
 # This script is helpful for debugging the query parser without loading in / doing all the extra stuff pg_ctblmgr does
@@ -274,7 +275,7 @@ unless( $handle )
     die( "failed to connect\n" );
 }
 
-my $test_change = { 'public' => { 'tb_issue' => { 'issue' => [ 1 ] } } };
+my $test_change = { 'public' => { 'tb_reset_issue' => { 'issue' => [ 1 ] } } };
 my $filter_tables = [ 'public.tb_reset' ];
 my $relcache = get_relcache( $handle );
 my $table_mapping = {};
