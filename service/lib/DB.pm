@@ -956,6 +956,8 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     &rename_cache_table_indexes( $handle, $ct_hash );
     $handle->do( 'SET client_min_messages TO DEFAULT' );
     $handle->do( 'COMMIT' );
+
+    _log( $LOG_LEVEL_DEBUG, "Cache table $name has been successfully replaced" );
     return;
 }
 
@@ -1697,8 +1699,6 @@ sub rename_cache_table_indexes($$)
             );
         }
     }
-
-    _log( $LOG_LEVEL_DEBUG, "Cache table indexes renamed" );
 
     return;
 }
