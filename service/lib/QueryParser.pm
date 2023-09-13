@@ -2416,9 +2416,9 @@ sub chain_assembler($)
             $next_q    = $chain->{$next_q}->{q};
         }
 
-        if( $length == 0 )
+        if( $length == 0 && defined( $next_q ) )
         {
-            $chain_end .= ' ' . $next_q if( $next_q );
+            $chain_end .= ' ' . $next_q;
             $length++;
         }
 

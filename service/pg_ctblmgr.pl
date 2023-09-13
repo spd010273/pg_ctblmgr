@@ -440,6 +440,7 @@ sub parent_loop($$$)
          );
     }
 
+    my $last_current_lsn;
     my $last_peeked_lsn;
     my $max_peeked_lsn;
     my $max_idle_lsn;
@@ -635,6 +636,7 @@ sub parent_loop($$$)
         my $data;
 
         #_log( $LOG_LEVEL_DEBUG, "Peeking replication slot" );
+        $last_current_lsn = &get_current_lsn( $handle );
         $data = &replication_peek(
             $handle,
             $all_filter_tables,
@@ -823,10 +825,29 @@ sub parent_loop($$$)
 
         if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
         {
-            $max_idle_lsn = $last_peeked_lsn;
+            if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
+            {
+                _log( $LOG_LEVEL_DEBUG, "System appears idle, advancing slot to current lsn $last_current_lsn" );
+                $max_idle_lsn = $last_current_lsn;
+            }
+            else
+            {
+                $max_idle_lsn = $last_peeked_lsn;
+            }
         }
+        _log( $LOG_LEVEL_DEBUG, "In flight: $num_in_flight_changes, outstanding: $num_outstanding_changes" );
 
         $seekable_lsn = $max_idle_lsn;
+
+        if( $last_seeked_lsn )
+        {
+            _log( $LOG_LEVEL_DEBUG, "Last SEEK: $last_seeked_lsn" );
+        }
+
+        if( $max_idle_lsn )
+        {
+            _log( $LOG_LEVEL_DEBUG, "Max IDLE: $max_idle_lsn" );
+        }
 
         # Safety check - CANNOT seek past any in-flight change
         if(

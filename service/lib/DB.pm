@@ -1027,6 +1027,7 @@ sub db_connect(;$) :Export( :MANDATORY )
 	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
 	$handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
 	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+#    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $DEBUG );
     return $handle;
 }
 
@@ -1308,6 +1309,32 @@ sub get_worker_list($;$) :Export( :MANDATORY )
 
     $sth->finish();
     return undef;
+}
+
+sub get_current_lsn($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    $handle = &db_connect( $handle );
+
+    my $sth = $handle->prepare( 'SELECT pg_catalog.pg_current_wal_lsn() AS lsn' );
+
+    unless( $sth && $sth->execute() )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to get current LSN' );
+        return undef;
+    }
+
+    my $row = $sth->fetchrow_hashref();
+
+    my $lsn = $row->{lsn};
+
+    $sth->finish();
+    return undef unless( $lsn );
+    return $lsn;
 }
 
 sub replication_seek($$;$) :Export( :MANDATORY )
@@ -1740,7 +1767,11 @@ sub test_query($$) :Export( :MANDATORY )
     my $sth = $handle->prepare( $test_query );
 
     return 0 if( !defined( $sth ) );
-    return 0 unless( $sth->execute() );
+    unless( $sth->execute() )
+    {
+        print "Failed to exec: $test_query\n";
+        return 0;
+    }
 
     $sth->finish();
     return 1;
@@ -1809,7 +1840,6 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
     # TODO This can take some time
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
-    print "$tt_query\n";
     my $sth             = try_query( $handle, $tt_query );
 
     if( $sth )
