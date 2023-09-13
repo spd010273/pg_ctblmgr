@@ -787,7 +787,8 @@ sub drop_dependencies($)
     );
 
     my $q = <<'END_SQL';
-        SELECT drop_statement
+        SELECT drop_statement,
+               object_name
           FROM tt_dependent_objects
       ORDER BY rank DESC
 END_SQL
@@ -804,7 +805,7 @@ END_SQL
     {
         unless( $handle->do( $row->{drop_statement} ) )
         {
-            _log( $LOG_LEVEL_ERROR, "Failed to drop dependent object" );
+            _log( $LOG_LEVEL_ERROR, "Failed to drop dependent object $row->{object_name}" );
             return 0;
         }
     }
@@ -820,7 +821,8 @@ sub recreate_dependencies($)
     );
 
     my $q = <<'END_SQL';
-        SELECT create_statement
+        SELECT create_statement,
+               object_name
           FROM tt_dependent_objects
       ORDER BY rank ASC
 END_SQL
@@ -837,7 +839,7 @@ END_SQL
     {
         unless( $handle->do( $row->{create_statement} ) )
         {
-            _log( $LOG_LEVEL_ERROR, 'Failed to recreate dependent object' );
+            _log( $LOG_LEVEL_ERROR, "Failed to recreate dependent object $row->{object_name}" );
             return 0;
         }
     }
@@ -867,7 +869,6 @@ sub replace_cache_table($$) :Export( :MANDATORY )
 
     my $ct_hash = {};
 
-    _log( $LOG_LEVEL_DEBUG, "replace cache table entry" );
     unless( &get_ct_definition( $handle, $pk_maintenance_object, $ct_hash ) )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
@@ -877,14 +878,11 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     $handle->do( "SET application_name = 'replace $ct_hash->{name}'" );
 
     my $name          = $ct_hash->{name};
-    $ct_hash->{name} .= '_temp';
-    my $temp_name     = $ct_hash->{name};
     my $schema        = $ct_hash->{schema};
     my $definition    = $ct_hash->{definition};
 
     $handle->do( 'BEGIN' );
     $handle->do( "SET client_min_messages = 'ERROR'" );
-    $handle->do( "DROP TABLE IF EXISTS $temp_name CASCADE" );
 
     unless( &create_dependent_temp_table( $handle, $ct_hash ) )
     {
@@ -895,10 +893,22 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         );
     }
 
+    $ct_hash->{name} .= '_temp';
+    my $temp_name     = $ct_hash->{name};
+
+    # note: This statement is intentionally not set to cascade - it's a safety mechanism in case we did not
+    # drop dependent objects.
+    $handle->do( "DROP TABLE IF EXISTS $temp_name" );
+
     &create_cache_table( $handle, $ct_hash );
 
-    &drop_dependencies( $handle );
-    my $sth = &try_query( $handle, "DROP TABLE IF EXISTS $schema.$name" );
+    unless( &drop_dependencies( $handle ) )
+    {
+        $handle->do( 'ROLLBACK' );
+        _log( $LOG_LEVEL_FATAL, "Failed to drop dependent objects" );
+    }
+
+    my $sth = &try_query( $handle, "DROP TABLE IF EXISTS $schema.$name CASCADE" );
 
     unless( $sth )
     {
@@ -930,15 +940,21 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         _log( $LOG_LEVEL_FATAL, "Failed to analyze replacement cache table" );
     }
 
-    &recreate_dependencies( $handle );
-    unless( $handle->do( "ALTER INDEX ix_$temp_name RENAME TO ix_$name" ) )
+    unless( &recreate_dependencies( $handle ) )
+    {
+        $handle->do( 'ROLLBACK' );
+        _log( $LOG_LEVEL_FATAL, "Failed to recreate dependencies\n" );
+    }
+
+    unless( $handle->do( "ALTER INDEX IF EXISTS ix_$temp_name RENAME TO ix_$name" ) )
     {
         _log( $LOG_LEVEL_ERROR, "Failed to rename index for $name" );
     }
 
     &drop_dependency_temp_table( $handle );
-    $handle->do( 'SET client_min_messages TO DEFAULT' );
     $ct_hash->{name} = $name;
+    &rename_cache_table_indexes( $handle, $ct_hash );
+    $handle->do( 'SET client_min_messages TO DEFAULT' );
     $handle->do( 'COMMIT' );
     return;
 }
@@ -1517,12 +1533,13 @@ sub check_ct_exists($) :Export( :MANDATORY )
         [ $ct_hash->{schema}, $ct_hash->{name} ]
     );
 
+    # If there are anny issues, we'll fail through to replacement sub
     unless( $sth )
     {
-        _log( $LOG_LEVEL_FATAL, "Failed to verify that $ct_hash->{schema}.$ct_hash->{name} exists" );
+        _log( $LOG_LEVEL_ERROR, "Failed to verify that $ct_hash->{schema}.$ct_hash->{name} exists" );
     }
 
-    if( $sth->rows() > 0 )
+    if( $sth && $sth->rows() > 0 )
     {
         $sth->finish();
         _log( $LOG_LEVEL_DEBUG, "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists" );
@@ -1650,6 +1667,39 @@ sub create_cache_table($$)
     }
 
     _log( $LOG_LEVEL_DEBUG, "Cache Table $schema.$name created" );
+    return;
+}
+
+sub rename_cache_table_indexes($$)
+{
+    my( $handle, $ct_hash ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => HASHREF },
+    );
+
+    foreach my $columns( @{$ct_hash->{indexes}} )
+    {
+        my $index_name = $columns;
+
+        $index_name =~ s/[^[:alnum:]]/_/g;
+
+        my $temp_index_name = "ix_$ct_hash->{name}_temp_$index_name";
+        my $new_index_name  = "ix_$ct_hash->{name}_$index_name";
+
+        my $def = "ALTER INDEX IF EXISTS $temp_index_name RENAME TO $new_index_name";
+
+        unless( $handle->do( $def ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to rename index - this may cause issues the next time a table is redefined"
+            );
+        }
+    }
+
+    _log( $LOG_LEVEL_DEBUG, "Cache table indexes renamed" );
+
     return;
 }
 

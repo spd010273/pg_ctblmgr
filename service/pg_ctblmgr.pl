@@ -1241,7 +1241,10 @@ sub worker_entrypoint($$$$)
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
                 tied( $WORKER_STATUSES )->shunlock();
 
-                &replace_cache_table( $handle, $pk_maintenance_object );
+                unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
+                {
+                    _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed after command to replace" );
+                }
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
                 $WORKER_STATUSES->{$worker_pid}->{replace} = 0;
@@ -1276,7 +1279,17 @@ sub worker_entrypoint($$$$)
                         $filter_tables,
                         $CACHE_HASH
                     );
-                    &replace_cache_table( $handle, $pk_maintenance_object );
+                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
+                    tied( $WORKER_STATUSES )->shunlock();
+                    unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
+                    {
+                        _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed" );
+                    }
+                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                    $WORKER_STATUSES->{$worker_pid}->{status}  = $WORKER_STATUS_IDLE;
+                    $WORKER_STATUSES->{$worker_pid}->{replacE} = 0;
+                    tied( $WORKER_STATUSES )->shunlock();
                 }
             }
 
