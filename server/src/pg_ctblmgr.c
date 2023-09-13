@@ -185,8 +185,11 @@ static void pg_ctblmgr_decode_startup(
     if( data->filter_tables == NIL )
     {
         table = ( struct pgc_table * ) palloc0( sizeof( struct pgc_table ) );
-        table->all_schemas = true;
-        table->all_tables = true;
+
+        table->all_schemas  = true;
+        table->all_tables   = true;
+        table->table_name   = NULL;
+        table->schema_name  = NULL;
         data->filter_tables = lappend( NIL, table );
     }
 
@@ -436,11 +439,17 @@ static void pg_ctblmgr_decode_change(
             if(
                   (
                       table->all_schemas
-                   || strcmp( table->schema_name, schema_name ) == 0
+                   || (
+                           table->schema_name != NULL
+                        && strcmp( table->schema_name, schema_name ) == 0
+                      )
                   )
                && (
                       table->all_tables
-                   || strcmp( table->table_name, table_name   ) == 0
+                   || (
+                           table->table_name != NULL
+                        && strcmp( table->table_name, table_name ) == 0
+                      )
                   )
               )
             {
@@ -991,6 +1000,9 @@ static bool parse_table_identifier( List * qual_tables, List ** table_list )
     {
         string = ( char * ) lfirst( cell );
         table  = ( struct pgc_table * ) palloc0( sizeof( struct pgc_table ) );
+
+        table->table_name  = NULL;
+        table->schema_name = NULL;
 
         if( string[0] == '*' && string[1] == '.' )
         {
@@ -5144,7 +5156,7 @@ static void SelectStmt_out( StringInfo str, SelectStmt * node )
 
     appendStringInfo( str, ",\"op\":\"%s\"", enum_SetOperation( node->op ) );
     appendStringInfo( str, ",\"all\":%s", node->all ? "true" : "false" );
-    
+
     if( node->larg )
     {
         appendStringInfo( str, ",\"larg\":" );

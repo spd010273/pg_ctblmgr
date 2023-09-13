@@ -635,7 +635,6 @@ sub parent_loop($$$)
         my $data;
 
         #_log( $LOG_LEVEL_DEBUG, "Peeking replication slot" );
-
         $data = &replication_peek(
             $handle,
             $all_filter_tables,
@@ -643,7 +642,7 @@ sub parent_loop($$$)
             \$last_peeked_lsn
         );
 
-        #_log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" ) if( $last_peeked_lsn );
+        _log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" ) if( $last_peeked_lsn );
 
         if( $data )
         {
@@ -1227,26 +1226,36 @@ sub worker_entrypoint($$$$)
                 tied( $WORKER_STATUSES )->shunlock();
 
                 my $dct = try_query( $handle, "DROP TABLE $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
+
                 unless( $dct )
                 {
-                    _log( $LOG_LEVEL_ERROR, "Failed to drop cache table $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        "Failed to drop cache table $CACHE_HASH->{schema}.$CACHE_HASH->{name}"
+                    );
                 }
+
                 exit( 0 );
             }
 
             if( defined $replace && $replace == 1 )
             {
                 _log( $LOG_LEVEL_DEBUG, "Commanded to replace $CACHE_HASH->{name}" );
+
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
                 tied( $WORKER_STATUSES )->shunlock();
 
                 unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
                 {
-                    _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed after command to replace" );
+                    _log(
+                        $LOG_LEVEL_FATAL,
+                        "Replacement of $CACHE_HASH->{name} failed after command to replace"
+                    );
                 }
+
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
+                $WORKER_STATUSES->{$worker_pid}->{status}  = $WORKER_STATUS_IDLE;
                 $WORKER_STATUSES->{$worker_pid}->{replace} = 0;
                 tied( $WORKER_STATUSES )->shunlock();
             }
@@ -1279,13 +1288,16 @@ sub worker_entrypoint($$$$)
                         $filter_tables,
                         $CACHE_HASH
                     );
+
                     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
                     tied( $WORKER_STATUSES )->shunlock();
+
                     unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
                     {
                         _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed" );
                     }
+
                     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                     $WORKER_STATUSES->{$worker_pid}->{status}  = $WORKER_STATUS_IDLE;
                     $WORKER_STATUSES->{$worker_pid}->{replacE} = 0;
@@ -1294,7 +1306,7 @@ sub worker_entrypoint($$$$)
             }
 
             # Process changes
-            my $changes = {};
+            my $changes  = {};
             my $WAL_DATA = {};
 
             # Quickly dequeue items to hold ex lock for minimum time
