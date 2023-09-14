@@ -625,18 +625,28 @@ sub parent_loop($$$)
 
 
         ## CHANGE MANAGEMENT
+        ##==================
+
         my $num_in_flight_changes   = 0; # number of changes we're queueing
         my $num_outstanding_changes = 0; # number of changes we've queued previously
         my $WT_LOCKED               = 0;
 
         ### LSN / Change Management
-        # Here we peek changes (get them but do not change the slot's LSN). These changes are then passed to child processes and,
-        # after the relevent change is acknowledged, we 'seek' these changes, in that we acknowledge them with respect to
-        # the replication slot.
+        ###========================
+
+        # Here we peek changes (get them but do not change the slot's LSN).
+        # These changes are then passed to child processes and, after the
+        # relevent change is acknowledged, we 'seek' these changes, in that
+        # we acknowledge them with respect to the replication slot.
+
         my $data;
 
-        #_log( $LOG_LEVEL_DEBUG, "Peeking replication slot" );
+        # Always get the "last_current_lsn" before peeking - that way we can never
+        # miss changes on a presumably idle system that could have happened between
+        # calls to get_current_lsn and replication_peek()
+
         $last_current_lsn = &get_current_lsn( $handle );
+
         $data = &replication_peek(
             $handle,
             $all_filter_tables,
@@ -644,7 +654,7 @@ sub parent_loop($$$)
             \$last_peeked_lsn
         );
 
-        _log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" ) if( $last_peeked_lsn );
+        #_log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" ) if( $last_peeked_lsn );
 
         if( $data )
         {
@@ -758,9 +768,11 @@ sub parent_loop($$$)
         }
 
         tied( $WORKER_STATUSES )->shunlock();
+
         # maintain dispatched_changes list relative to last_lsn reported by each worker.
         # Post this loop, dispatched_changes will reflect outstanding lsn changes for each worker
         # meaning that we cannot seek past the youngest lsn
+
         my $youngest_in_flight_lsn;
 
         foreach my $pid( keys %$worker_lsns )
@@ -770,6 +782,7 @@ sub parent_loop($$$)
             # here we will maintain the local diaptched_changes versus the global applied lsns
             # if we find a dispatched change for this PID that is <= the PID's last lsn, we remove it
             # such that dispatched changes contains a list of outstanding (in-flight) LSNs
+
             if(
                    defined( $dispatched_changes->{$pid} )
                 && scalar( @{$dispatched_changes->{$pid}} ) > 0
@@ -819,15 +832,21 @@ sub parent_loop($$$)
         }
 
         ## LSN increment logic
-        #
-        # max_idle_lsn contains the LSN of the first BEGIN change preceeding any change we're actually concerned about
-        # IFF no changes have happened - we set it to last_peeked_lsn so that we have a consistent LSN to seek to during idle times.
+        ##====================
+
+        # max_idle_lsn contains the LSN of the first BEGIN change preceeding any
+        # change we're actually concerned about. IFF no changes have happened,
+        # we set it to last_peeked_lsn so that we have a consistent LSN to seek
+        # to during idle times.
 
         if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
         {
             if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
             {
-                _log( $LOG_LEVEL_DEBUG, "System appears idle, advancing slot to current lsn $last_current_lsn" );
+                _log(
+                    $LOG_LEVEL_DEBUG,
+                    "System appears idle, advancing slot to current lsn $last_current_lsn"
+                );
                 $max_idle_lsn = $last_current_lsn;
             }
             else
@@ -835,19 +854,24 @@ sub parent_loop($$$)
                 $max_idle_lsn = $last_peeked_lsn;
             }
         }
-        _log( $LOG_LEVEL_DEBUG, "In flight: $num_in_flight_changes, outstanding: $num_outstanding_changes" );
+
+        #_log(
+        #    $LOG_LEVEL_DEBUG,
+        #    "In-flight: $num_in_flight_changes, "
+        #  . "Outstanding: $num_outstanding_changes"
+        #);
 
         $seekable_lsn = $max_idle_lsn;
 
-        if( $last_seeked_lsn )
-        {
-            _log( $LOG_LEVEL_DEBUG, "Last SEEK: $last_seeked_lsn" );
-        }
+        #if( $last_seeked_lsn )
+        #{
+        #    _log( $LOG_LEVEL_DEBUG, "Last SEEK: $last_seeked_lsn" );
+        #}
 
-        if( $max_idle_lsn )
-        {
-            _log( $LOG_LEVEL_DEBUG, "Max IDLE: $max_idle_lsn" );
-        }
+        #if( $max_idle_lsn )
+        #{
+        #    _log( $LOG_LEVEL_DEBUG, "Max IDLE: $max_idle_lsn" );
+        #}
 
         # Safety check - CANNOT seek past any in-flight change
         if(
@@ -880,7 +904,13 @@ sub parent_loop($$$)
         sleep( $SLEEP_TIMER );
 
         ## WORKER HEALTH CHECKS
+        ##=====================
+
+        # TODO
+
         ## XID CHAIN MANAGEMENT
+        ##=====================
+
         if( $ENABLE_FAST_DELETE )
         {
             tied( $XID_MAP )->shlock( LOCK_SH | LOCK_NB );
@@ -891,23 +921,23 @@ sub parent_loop($$$)
                 my $new_xid;
                 my $new_snapshot;
 
-                if( new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
+                if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
                 {
-                    tied( $XID_MAP )->shlock( LOCK_EX );
-                    $local_xid_map->{$new_xid} = $new_handle;
-                    push(
-                        @$XID_MAP,
-                        {
-                            xid      => $new_xid,
-                            snapshot => $new_snapshot,
-                            in_use   => []
-                        }
-                    );
-                }
-                else
-                {
+                    tied( $XID_MAP )->shunlock();
                     _log( $LOG_LEVEL_DEBUG, "Could not generate new XID chain member" );
+                    next;
                 }
+
+                tied( $XID_MAP )->shlock( LOCK_EX );
+                $local_xid_map->{$new_xid} = $new_handle;
+                push(
+                    @$XID_MAP,
+                    {
+                        xid      => $new_xid,
+                        snapshot => $new_snapshot,
+                        in_use   => []
+                    }
+                );
             }
             else
             {
@@ -918,87 +948,98 @@ sub parent_loop($$$)
 
                 foreach my $elem( @$XID_MAP )
                 {
-                    if( scalar( @{$elem->{in_use}} ) == 0 )
+                    if(
+                           scalar( @{$elem->{in_use}} ) == 0
+                        && (
+                                !defined( $candidate_replace )
+                             || $elem->{xid} < $candidate_replace
+                           )
+                      )
                     {
-                        if( !defined $candidate_replace || $elem->{xid} < $candidate_replace )
-                        {
-                            $candidate_replace     = $elem->{xid};
-                            $candidate_replace_ind = $replace_ind;
-                        }
+                        $candidate_replace     = $elem->{xid};
+                        $candidate_replace_ind = $replace_ind;
                     }
 
                     $replace_ind++;
                 }
 
-                if( defined( $candidate_replace ) )
-                {
-                    tied( $XID_MAP )->shlock( LOCK_EX );
-                    my $handle = $local_xid_map->{$candidate_replace};
-
-                    if( defined( $handle ) )
-                    {
-                        if( $handle->ping() > 0 && $handle->pg_ping() > 0 )
-                        {
-                            $handle->do( 'ROLLBACK' );
-                        }
-
-                        $handle->disconnect();
-                        undef( $handle );
-
-                        my $snapshot;
-                        my $new_xid;
-
-                        delete( $local_xid_map->{$candidate_replace} );
-
-                        if( new_xid_placeholder( \$handle, \$new_xid, \$snapshot ) )
-                        {
-                            if( $XID_MAP->[$candidate_replace_ind]->{xid} == $candidate_replace )
-                            {
-                                # note: this code is duplicated to handle updating XID_MAP in-place. Due to oddities in
-                                # how IPC::Shareable handles arrayrefs, the elements must be manipulated using push/pop
-                                # /shift/unshift. Futher complicating matters, this needs to share scope with the knots
-                                # created with tie() and tied(). Without this - cases where LOCK_SH get upgraded to LOCK_EX
-                                # will result in a deadlock on the same PID, unless scope of LOCK_SH call and LOCK_EX call
-                                # are the same.
-                                my $ind = 0;
-                                my @backup;
-
-                                while( $ind != $candidate_replace_ind )
-                                {
-                                    push( @backup, shift( @$XID_MAP ) );
-                                    $ind++;
-                                }
-
-                                shift( @$XID_MAP ); # throw away from sh,
-                                unshift( @$XID_MAP, { snapshot => $snapshot, xid => $new_xid, in_use => [] } ); # replace tossed element in-place
-
-                                while( scalar( @backup ) > 0 )
-                                {
-                                    unshift( @$XID_MAP, pop( @backup ) );
-                                }
-
-                                $local_xid_map->{$new_xid} = $handle;
-                            }
-                            else
-                            {
-                                _log( $LOG_LEVEL_ERROR, "XID Chain replacement invalid - index $candidate_replace_ind is invalid for XID" );
-                            }
-                        }
-                        else
-                        {
-                            _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
-                        }
-                    }
-                    else
-                    {
-                        _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
-                    }
-                }
-                else
+                if( !defined( $candidate_replace ) )
                 {
                     _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
                 }
+
+                tied( $XID_MAP )->shlock( LOCK_EX );
+                my $handle = $local_xid_map->{$candidate_replace};
+
+                if( !defined( $handle ) )
+                {
+                    _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                if( $handle->ping() > 0 && $handle->pg_ping() > 0 )
+                {
+                    $handle->do( 'ROLLBACK' );
+                }
+
+                $handle->disconnect();
+                undef( $handle );
+
+                my $snapshot;
+                my $new_xid;
+
+                delete( $local_xid_map->{$candidate_replace} );
+
+                if( !new_xid_placeholder( \$handle, \$new_xid, \$snapshot ) )
+                {
+                    _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                if( $XID_MAP->[$candidate_replace_ind]->{xid} != $candidate_replace )
+                {
+                    _log( $LOG_LEVEL_ERROR, "XID Chain replacement invalid - index $candidate_replace_ind is invalid for XID" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                # note: this code is duplicated to handle updating XID_MAP in-place. Due to oddities in
+                # how IPC::Shareable handles arrayrefs, the elements must be manipulated using push/pop
+                # /shift/unshift. Futher complicating matters, this needs to share scope with the knots
+                # created with tie() and tied(). Without this - cases where LOCK_SH get upgraded to LOCK_EX
+                # will result in a deadlock on the same PID, unless scope of LOCK_SH call and LOCK_EX call
+                # are the same.
+                my $ind = 0;
+                my @backup;
+
+                while( $ind != $candidate_replace_ind )
+                {
+                    push( @backup, shift( @$XID_MAP ) );
+                    $ind++;
+                }
+
+                shift( @$XID_MAP ); # throw away from sh,
+                unshift(
+                    @$XID_MAP,
+                    {
+                        snapshot => $snapshot,
+                        xid      => $new_xid,
+                        in_use   => [],
+                    }
+                ); # replace tossed element in-place
+
+                while( scalar( @backup ) > 0 )
+                {
+                    unshift( @$XID_MAP, pop( @backup ) );
+                }
+
+                $local_xid_map->{$new_xid} = $handle;
             }
+
             tied( $XID_MAP )->shunlock();
         }
     }
