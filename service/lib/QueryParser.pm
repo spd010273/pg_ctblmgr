@@ -27,7 +27,8 @@ Readonly::Scalar my $OID_CACHE => <<END_SQL;
            c.relname::VARCHAR AS obj_name,
            c.oid,
            'r' AS type,
-           NULL::OID AS dep
+           NULL::OID AS dep,
+           c.reltuples::BIGINT AS size
       FROM pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
@@ -37,7 +38,8 @@ INNER JOIN pg_namespace n
            p.proname::VARCHAR AS obj_name,
            p.oid,
            'f' AS type,
-           NULL::OID AS dep
+           NULL::OID AS dep,
+           NULL::BIGINT AS size
       FROM pg_proc p
 INNER JOIN pg_namespace n
         ON n.oid = p.pronamespace
@@ -47,7 +49,8 @@ INNER JOIN pg_namespace n
            c.relname::VARCHAR AS obj_name,
            c.oid,
            'p' AS type,
-           inh.inhrelid AS dep
+           inh.inhrelid AS dep,
+           NULL::BIGINT AS size
       FROM pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
@@ -193,9 +196,16 @@ sub get_relcache($) :Export( :MANDATORY )
         my $name   = $row->{obj_name};
         my $oid    = $row->{oid};
         my $dep    = $row->{dep};
+        my $size   = $row->{size};
+
         $cache->{rels}->{$schema}->{$name} = $oid if( $row->{type} eq 'r' );
         $cache->{func}->{$schema}->{$name} = $oid if( $row->{type} eq 'f' );
         $cache->{oid}->{$oid} = { schema => $schema, name => $name };
+
+        if( $OUTER_FALLBACK_TO_LARGEST )
+        {
+            $cache->{size}->{$schema}->{$name} = $size if( $row->{type} eq 'r' );
+        }
 
         if( $row->{type} eq 'p' )
         {
@@ -1782,6 +1792,27 @@ sub parse_select($$$$;$)
                 $where_end = $json_fragment->{groupClause}->[0]->{location};
             }
         }
+
+        # used to handle outer filtering in cases where multiple tables are involved.
+        # This gets copied over to the table_mapping struct
+        if( ref( $json_fragment->{groupClause} ) eq 'ARRAY' )
+        {
+            my $arr = [];
+            foreach my $group_elem( @{$json_fragment->{groupClause}} )
+            {
+                my $column = $group_elem->{fields}->[scalar(@{$group_elem->{fields}}) - 1];
+                my $alias  = $group_elem->{fields}->[0] if( scalar( @{$group_elem->{fields}} ) > 1 );
+
+                my $elem = { col => $column };
+                $elem->{alias} = $alias if( $alias );
+                push( @$arr, $elem );
+            }
+
+            if( scalar( @$arr ) > 0 )
+            {
+                $statement_info->{has_group} = $arr;
+            }
+        }
     }
 
     if( defined( $json_fragment->{havingClause} ) )
@@ -2403,10 +2434,9 @@ sub chain_assembler($)
     {
         my $chain_end   = $chain_tail->{q};
         my $chain_alias = $chain_tail->{alias};
-        my $length = 0;
-        my $next_q = $chain->{$chain_end}->{q};
-
-        my $move_to = $chain_tail->{cte} if( $chain_tail->{cte} );
+        my $length      = 0;
+        my $next_q      = $chain->{$chain_end}->{q};
+        my $move_to     = $chain_tail->{cte} if( $chain_tail->{cte} );
 
         while( defined( $next_q ) && $next_q ne $chain->{__START__} )
         {
@@ -2424,8 +2454,13 @@ sub chain_assembler($)
         $chain_end = "${chain_alias}.${chain_end}" if( $chain_alias );
         $chain_end .= ( ')' x $length );
         my $frag = { q => $chain_end };
-
         $frag->{move_to} = $move_to if( $move_to );
+
+        $frag->{rel} = $chain_tail->{rel} if( $chain_tail->{rel} );
+        $frag->{col} = $chain_tail->{col} if( $chain_tail->{col} );
+        $frag->{alias} = $chain_tail->{alias} if( $chain_tail->{alias} );
+        $frag->{schema} = $chain_tail->{schema} if( $chain_tail->{schema} );
+
         push( @$results, $frag );
     }
 
@@ -2517,7 +2552,13 @@ END_SQL
 
         if( !defined( $ret_qs ) )
         {
-            my $frag = { q => $q, alias => $target_alias };
+            my $frag = {
+                q      => $q,
+                alias  => $target_alias,
+                rel    => $target_relation,
+                col    => $target_column,
+                schema => $target_schema
+            };
             $frag->{cte} = $cte if( $cte );
             if( defined( $chain->{__ENDS__} ) )
             {
@@ -2556,15 +2597,15 @@ END_SQL
     return $result_queries;
 }
 
-sub apply_filters($$$$$;$) :Export( :MANDATORY )
+sub apply_filters($$$$$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $query_data,
         $table_mapping,
         $definition,
+        $relcache,
         $filters,
-        $outer_join_mode
       ) = validate_pos(
         @_,
         { type => OBJECT },
@@ -2572,7 +2613,7 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
         { type => HASHREF },
         { type => SCALAR },
         { type => HASHREF },
-        { type => SCALAR, optional => 1 },
+        { type => HASHREF },
     );
 
     # Lets use the filters we've received and search for the tables, their
@@ -2607,14 +2648,18 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
                     }
                     elsif( ref( $bind_infos ) eq 'ARRAY' )
                     {
+                        # DEVNOTE: This is where we handle outer-joined ( LEFT / RIGHT / FULL OUTER ) relations.
                         my $has_binds = 0;
                         my $inh_match = 0;
+
                         foreach my $bind_info( @$bind_infos )
                         {
                             $has_binds = 1 if( defined( $filters->{$bind_info->{outer_schema}}->{$bind_info->{outer_relation}} ) );
                             $inh_match = 1 if( $bind_info->{outer_schema} eq $schema && $bind_info->{outer_relation} eq $table_name );
                         }
+
                         next unless( $has_binds && $inh_match );
+
                         my $chain = {};
                         my $ret = &recursive_bind_helper(
                             {
@@ -2629,8 +2674,94 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
 
                         my $results = &chain_assembler( $chain );
 
+                        my $largest_result;
                         foreach my $result( @$results )
                         {
+                            if(
+                                  $OUTER_GROUPED_RELS_ONLY
+                               && scalar( @$results ) > 1
+                               && defined( $result->{col} )
+                               && defined( $BINDS->{$position}->{has_group} )
+                               && ref( $BINDS->{$position}->{has_group} ) eq 'ARRAY'
+                              )
+                            {
+                                my $skip = 0;
+                                # If we've found a group by clause, we only want to allow
+                                # a filter for everything but the last relation
+                                if( scalar( @{$BINDS->{$position}->{has_group}} ) > 1 )
+                                {
+                                    my $ind = 0;
+                                    my $lim = scalar( @{$BINDS->{$position}->{has_group}} ) - 1;
+                                    foreach my $group_elem( @{$BINDS->{$position}->{has_group}} )
+                                    {
+                                        last if( $ind == $lim );
+                                        if( $group_elem->{col} eq $result->{col} )
+                                        {
+                                            $skip = 0;
+                                            last;
+                                        }
+
+                                        $skip = 1;
+                                        $ind++;
+                                    }
+                                }
+
+                                my $name;
+                                $name = $result->{alias} . '.' if( $result->{alias} );
+                                $name .= $result->{col};
+                                _log( $LOG_LEVEL_DEBUG, "Skipping filtering of $name due to OUTER_GROUPED_RELS_ONLY setting" ) if( $skip );
+                                next if( $skip );
+                            }
+                            elsif(
+                                      $OUTER_FALLBACK_TO_LARGEST
+                                   && scalar( @$results ) > 1
+                                 )
+                            {
+                                if( !defined( $largest_result ) )
+                                {
+                                    #find the largest result
+                                    my $largest_size = 0;
+                                    my $largest_rel;
+                                    my $largest_schema;
+                                    foreach my $check_result( @$results )
+                                    {
+                                        if( defined( $check_result->{rel} ) && defined( $check_result->{schema} ) )
+                                        {
+                                            my $size = $relcache->{size}->{$check_result->{schema}}->{$check_result->{rel}};
+
+                                            if( $size > $largest_size )
+                                            {
+                                                $largest_size   = $size;
+                                                $largest_rel    = $check_result->{rel};
+                                                $largest_schema = $check_result->{schema};
+                                            }
+                                        }
+                                    }
+
+                                    if( $largest_size > 0 )
+                                    {
+                                        $largest_result->{size}   = $largest_size;
+                                        $largest_result->{rel}    = $largest_rel;
+                                        $largest_result->{schema} = $largest_schema;
+                                    }
+
+                                }
+
+                                if( defined( $largest_result ) )
+                                {
+                                    # Skip if we arent the largest result, this is a sketchy cardinality assumption
+                                    # and assumes A LOT about the underlying model
+                                    if( $largest_result->{rel} ne $result->{rel} )
+                                    {
+                                        _log(
+                                            $LOG_LEVEL_DEBUG,
+                                            "Skipping small relation ( $result->{rel} ) used in multi-rel outer join"
+                                        );
+                                        next;
+                                    }
+                                }
+                            }
+
                             if( defined( $result->{move_to} ) )
                             {
                                 # Relocate this query to another CTE / Expression

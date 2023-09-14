@@ -48,8 +48,6 @@ use QueryParser;
 # enables holding past transactions open for a trailing XID chain we can use
 # to lookup historic data
 
-Readonly my $ENABLE_FAST_DELETE => 1;
-Readonly my $MAX_XID_LENGTH     => 10;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 1; # seconds for main loop
 Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
@@ -1483,6 +1481,7 @@ sub worker_entrypoint($$$$)
                     $CACHE_HASH->{parse_tree},
                     $CACHE_HASH->{table_mapping},
                     $CACHE_HASH->{definition},
+                    $CACHE_HASH->{relcache},
                     $changes
                 );
 

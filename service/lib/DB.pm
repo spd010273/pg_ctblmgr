@@ -19,10 +19,6 @@ use Util;
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 
-Readonly::Scalar our $BATCHED_CREATE     :Export( :MANDATORY ) => 1;
-Readonly::Scalar our $BATCH_SIZE         :Export( :MANDATORY ) => 1000000;
-Readonly::Scalar our $BULK_ACTION_CUTOFF :Export( :MANDATORY ) => 100000;
-
 Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_KEEPALIVE_COUNT    => 200; #720;
@@ -958,7 +954,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     $handle->do( 'COMMIT' );
 
     _log( $LOG_LEVEL_DEBUG, "Cache table $name has been successfully replaced" );
-    return;
+    return 1;
 }
 
 sub db_connect(;$) :Export( :MANDATORY )

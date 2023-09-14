@@ -8,30 +8,57 @@ use English qw( -no_match_vars );
 
 $OUTPUT_AUTOFLUSH = 1;
 
-Readonly::Scalar our $DEBUG                     :Export( :MANDATORY ) => 1;
-Readonly::Scalar our $CLEAN_UP                  :Export( :MANDATORY ) => 0; # Emergency shm cleanup
-Readonly::Scalar our $LOG_LEVEL_FATAL           :Export( :MANDATORY ) => 5;
-Readonly::Scalar our $LOG_LEVEL_ERROR           :Export( :MANDATORY ) => 4;
-Readonly::Scalar our $LOG_LEVEL_WARNING         :Export( :MANDATORY ) => 3;
-Readonly::Scalar our $LOG_LEVEL_INFO            :Export( :MANDATORY ) => 2;
-Readonly::Scalar our $LOG_LEVEL_DEBUG           :Export( :MANDATORY ) => 1;
-Readonly::Scalar our $WORKER_STATUS_STARTUP     :Export( :MANDATORY ) => 1;
-Readonly::Scalar our $WORKER_STATUS_RUNNING     :Export( :MANDATORY ) => 2; #not used?
-Readonly::Scalar our $WORKER_STATUS_IDLE        :Export( :MANDATORY ) => 3;
-Readonly::Scalar our $WORKER_STATUS_EXITED      :Export( :MANDATORY ) => 4;
-Readonly::Scalar our $WORKER_STATUS_INSERT      :Export( :MANDATORY ) => 5;
-Readonly::Scalar our $WORKER_STATUS_SLOW_DELETE :Export( :MANDATORY ) => 6;
-Readonly::Scalar our $WORKER_STATUS_FAST_DELETE :Export( :MANDATORY ) => 7;
-Readonly::Scalar our $WORKER_STATUS_UPDATE      :Export( :MANDATORY ) => 8;
-Readonly::Scalar our $WORKER_STATUS_TEMP_TABLE  :Export( :MANDATORY ) => 9;
-Readonly::Scalar our $WORKER_STATUS_QUERY_PARSE :Export( :MANDATORY ) => 10;
-Readonly::Scalar our $WORKER_STATUS_REPLACE     :Export( :MANDATORY ) => 11;
-Readonly::Scalar our $EXTENSION_NAME            :Export( :MANDATORY ) => 'pg_ctblmgr';
-Readonly::Scalar our $SCHEMA_NAME               :Export( :MANDATORY ) => 'pgctblmgr';
-Readonly::Scalar our $SQL_STATE_ADMIN_TERM      :Export( :MANDATORY ) => '57P01';
-Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014';
-Readonly::Scalar our $MAX_QUERY_RETRIES         :Export( :MANDATORY ) => 5;
+Readonly::Scalar our $DEBUG                      :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $CLEAN_UP                   :Export( :MANDATORY ) => 0; # Emergency shm cleanup
+Readonly::Scalar our $LOG_LEVEL_FATAL            :Export( :MANDATORY ) => 5;
+Readonly::Scalar our $LOG_LEVEL_ERROR            :Export( :MANDATORY ) => 4;
+Readonly::Scalar our $LOG_LEVEL_WARNING          :Export( :MANDATORY ) => 3;
+Readonly::Scalar our $LOG_LEVEL_INFO             :Export( :MANDATORY ) => 2;
+Readonly::Scalar our $LOG_LEVEL_DEBUG            :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $WORKER_STATUS_STARTUP      :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $WORKER_STATUS_RUNNING      :Export( :MANDATORY ) => 2; #not used?
+Readonly::Scalar our $WORKER_STATUS_IDLE         :Export( :MANDATORY ) => 3;
+Readonly::Scalar our $WORKER_STATUS_EXITED       :Export( :MANDATORY ) => 4;
+Readonly::Scalar our $WORKER_STATUS_INSERT       :Export( :MANDATORY ) => 5;
+Readonly::Scalar our $WORKER_STATUS_SLOW_DELETE  :Export( :MANDATORY ) => 6;
+Readonly::Scalar our $WORKER_STATUS_FAST_DELETE  :Export( :MANDATORY ) => 7;
+Readonly::Scalar our $WORKER_STATUS_UPDATE       :Export( :MANDATORY ) => 8;
+Readonly::Scalar our $WORKER_STATUS_TEMP_TABLE   :Export( :MANDATORY ) => 9;
+Readonly::Scalar our $WORKER_STATUS_QUERY_PARSE  :Export( :MANDATORY ) => 10;
+Readonly::Scalar our $WORKER_STATUS_REPLACE      :Export( :MANDATORY ) => 11;
+Readonly::Scalar our $EXTENSION_NAME             :Export( :MANDATORY ) => 'pg_ctblmgr';
+Readonly::Scalar our $SCHEMA_NAME                :Export( :MANDATORY ) => 'pgctblmgr';
+Readonly::Scalar our $SQL_STATE_ADMIN_TERM       :Export( :MANDATORY ) => '57P01';
+Readonly::Scalar our $SQL_STATE_ADMIN_CANC       :Export( :MANDATORY ) => '57014';
 
+# User globals
+# Number of times to retry a query prior to giving up and going into an error condition
+Readonly::Scalar our $MAX_QUERY_RETRIES          :Export( :MANDATORY ) => 5;
+
+# Enable fast delete functionality - 1 is enable, 0 is disable
+Readonly::Scalar our $ENABLE_FAST_DELETE         :Export( :MANDATORY ) => 1;
+
+# Entry length for historic transaction storage. This allows fast delete to work
+Readonly::Scalar our $MAX_XID_LENGTH             :Export( :MANDATORY ) => 10;
+
+# When creating cache tables, use LIMIT / OFFSET to populate the table rather than one insert
+Readonly::Scalar our $BATCHED_CREATE             :Export( :MANDATORY ) => 1;
+
+# Batch size for the above batched create mode
+Readonly::Scalar our $BATCH_SIZE                 :Export( :MANDATORY ) => 1000000;
+
+# Number of temp table tuple we toggle into a bulk update mode ( delete + insert ) rather than doing update
+Readonly::Scalar our $BULK_ACTION_CUTOFF         :Export( :MANDATORY ) => 100000;
+
+# In cases where multiple relations are involved in a single outer join, the filter for the outer
+# relation only goes to the grouped relation, if present.
+Readonly::Scalar our $OUTER_GROUPED_RELS_ONLY    :Export( :MANDATORY ) => 1;
+
+# In cases where multiple relations are involved in a single outer join, and no group by is present
+# we will only filter the largest relation
+Readonly::Scalar our $OUTER_FALLBACK_TO_LARGEST  :Export( :MANDATORY ) => 1;
+
+# Globals initialized at runtime start
 our $PARENT_PID :Export( :MANDATORY ) = 0;
 our $SLOT_NAME  :Export( :MANDATORY ) = '';
 our $DAEMONIZE  :Export( :MANDATORY ) = 0;
