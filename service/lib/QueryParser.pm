@@ -1975,6 +1975,7 @@ sub check_cte_has_relation($$$$)
         { type => SCALAR },
     );
 
+    _log( $LOG_LEVEL_DEBUG, "Checking if CTE $dep_rel has $rel" );
     my $relinfo = resolve_relation( $relcache, $rel );
 
     unless( defined( $relinfo ) )
@@ -1982,9 +1983,11 @@ sub check_cte_has_relation($$$$)
         return 0;
     }
 
+    my $is_correct = 0;
     foreach my $bindpoint( keys %{$table_mapping->{BINDS}} )
     {
         my $bindinfo = $table_mapping->{BINDS}->{$bindpoint};
+
         if(
                 defined( $bindinfo->{rels} )
              && defined( $bindinfo->{rels}->{$relinfo->{schema}} )
@@ -1994,7 +1997,17 @@ sub check_cte_has_relation($$$$)
             {
                 if( defined( $bindinfo->{rels}->{$relinfo->{schema}}->{$alias}->{$relinfo->{name}} ) )
                 {
-                    return { alias => $alias };
+                    my $frag = { alias => $alias };
+                    if( $table_mapping->{BINDS}->{$bindpoint}->{parent} && $table_mapping->{BINDS}->{$bindpoint}->{parent} eq $dep_rel )
+                    {
+                        $frag->{correct} = 1;
+                    }
+                    else
+                    {
+                        $frag->{actual} = $table_mapping->{BINDS}->{$bindpoint}->{parent};
+                    }
+
+                    return $frag;
                 }
             }
         }
@@ -2146,8 +2159,9 @@ sub recursive_from_finder($$$)
                                     my $target_schema   = $dep_info->{schema};
                                     my $target_relation = $dep_info->{name};
                                     my $target_column   = $other_column;
-
+                                    my $target_cte;
                                     my $dep_in_cte;
+
                                     if( !defined( $dep_info ) || !defined( $dep_info->{schema} ) || !defined( $dep_info->{name} ) )
                                     {
                                         # We have an outer join that is dependent on a CTE - do extra checks to see if this can be resolved
@@ -2202,9 +2216,18 @@ sub recursive_from_finder($$$)
 
                                                 if( $result && $relinfo )
                                                 {
-                                                    $dep_in_cte      = 1;
+                                                    if( $result->{actual} )
+                                                    {
+                                                        # Check_cte_has_relation suggested the correct CTE for applying this filter later
+                                                        #
+                                                        $dep_in_cte = $result->{actual};
+                                                    }
+                                                    else
+                                                    {
+                                                        $dep_in_cte = $dep_obj;
+                                                    }
+
                                                     $cannot_bind     = 0;
-                                                    $dep_in_cte      = $dep_obj;
                                                     $target_relation = $relinfo->{name};
                                                     $target_schema   = $relinfo->{schema};
                                                     $target_alias    = $result->{alias};
@@ -2673,8 +2696,8 @@ sub apply_filters($$$$$$) :Export( :MANDATORY )
                         );
 
                         my $results = &chain_assembler( $chain );
-
                         my $largest_result;
+
                         foreach my $result( @$results )
                         {
                             if(
