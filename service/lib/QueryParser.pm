@@ -2398,7 +2398,6 @@ sub chain_assembler($)
     );
 
     my $results = [];
-    my $move_to;
 
     foreach my $chain_tail( @{$chain->{__ENDS__}} )
     {
@@ -2407,7 +2406,7 @@ sub chain_assembler($)
         my $length = 0;
         my $next_q = $chain->{$chain_end}->{q};
 
-        $move_to = $chain_tail->{cte} if( $chain_tail->{cte} );
+        my $move_to = $chain_tail->{cte} if( $chain_tail->{cte} );
 
         while( defined( $next_q ) && $next_q ne $chain->{__START__} )
         {
@@ -2424,13 +2423,13 @@ sub chain_assembler($)
 
         $chain_end = "${chain_alias}.${chain_end}" if( $chain_alias );
         $chain_end .= ( ')' x $length );
-        push( @$results, $chain_end );
+        my $frag = { q => $chain_end };
+
+        $frag->{move_to} = $move_to if( $move_to );
+        push( @$results, $frag );
     }
 
-    my $frag = { q => $results };
-    $frag->{move_to} = $move_to if( $move_to );
-
-    return $frag;
+    return $results;
 }
 
 sub recursive_bind_helper($$)
@@ -2630,39 +2629,42 @@ sub apply_filters($$$$$;$) :Export( :MANDATORY )
 
                         my $results = &chain_assembler( $chain );
 
-                        if( defined( $results->{move_to} ) )
+                        foreach my $result( @$results )
                         {
-                            # Relocate this query to another CTE / Expression
-                            # to do this, we locate the position of the CTE found in {move_to} and inject our @$results there
-                            my $cte_found = 0;
-                            foreach my $target_position( keys %{$table_mapping->{BINDS}} )
+                            if( defined( $result->{move_to} ) )
                             {
-                                if(
-                                    defined( $table_mapping->{BINDS}->{$target_position}->{parent} )
-                                    && $table_mapping->{BINDS}->{$target_position}->{parent} eq $results->{move_to}
-                                  )
+                                # Relocate this query to another CTE / Expression
+                                # to do this, we locate the position of the CTE found in {move_to} and inject our @$results there
+                                my $cte_found = 0;
+                                foreach my $target_position( keys %{$table_mapping->{BINDS}} )
                                 {
-                                    $cte_found = 1;
-                                    if( !defined( $where_expressions->{$target_position} ) )
+                                    if(
+                                        defined( $table_mapping->{BINDS}->{$target_position}->{parent} )
+                                        && $table_mapping->{BINDS}->{$target_position}->{parent} eq $result->{move_to}
+                                      )
                                     {
-                                        $where_expressions->{$target_position} = [];
+                                        $cte_found = 1;
+                                        if( !defined( $where_expressions->{$target_position} ) )
+                                        {
+                                            $where_expressions->{$target_position} = [];
+                                        }
+
+                                        push( @{$where_expressions->{$target_position}}, $result->{q} );
+
+                                        last;
                                     }
+                                }
 
-                                    push( @{$where_expressions->{$target_position}}, @{$results->{q}} );
-
-                                    last;
+                                if( !$cte_found )
+                                {
+                                    # there may be a case where we'll need to search the CTE parent->child LUT in table_mapping
+                                    _log( $LOG_LEVEL_ERROR, "Assemble outer join can be injected to $result->{move_to} but $result->{move_to} could not be found" );
                                 }
                             }
-
-                            if( !$cte_found )
+                            else
                             {
-                                # there may be a case where we'll need to search the CTE parent->child LUT in table_mapping
-                                _log( $LOG_LEVEL_ERROR, "Assemble outer join can be injected to $results->{move_to} but $results->{move_to} could not be found" );
+                                push( @$where_entries, $result->{q} );
                             }
-                        }
-                        else
-                        {
-                            push( @$where_entries, @{$results->{q}} );
                         }
                     }
                     else
