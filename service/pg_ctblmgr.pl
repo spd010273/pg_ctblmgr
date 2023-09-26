@@ -49,7 +49,7 @@ use QueryParser;
 # to lookup historic data
 
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
-Readonly my $SLEEP_TIMER        => 1; # seconds for main loop
+Readonly my $SLEEP_TIMER        => 0.5; # seconds for main loop
 Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
 
 our $OUTPUT_AUTOFLUSH = 1;
@@ -899,7 +899,7 @@ sub parent_loop($$$)
             }
         }
 
-        sleep( $SLEEP_TIMER );
+        select( undef, undef, undef, $SLEEP_TIMER );
 
         ## WORKER HEALTH CHECKS
         ##=====================
@@ -1838,7 +1838,7 @@ FD_FALLBACK:
                 tied( $WORKER_STATUSES )->shunlock();
             }
 
-            sleep( $SLEEP_TIMER );
+            select( undef, undef, undef, $SLEEP_TIMER );
         } # postgres driver main loop
     }
     else
