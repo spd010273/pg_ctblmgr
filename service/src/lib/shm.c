@@ -2805,9 +2805,9 @@ static bool _shm_sysv(
                 errno = save_errno;
                 return false;
             }
-
-            return true;
         }
+
+        return true;
     }
 
     if( op == SHM_ATTACH )

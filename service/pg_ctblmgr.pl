@@ -48,6 +48,7 @@ use QueryParser;
 # enables holding past transactions open for a trailing XID chain we can use
 # to lookup historic data
 
+Readonly my $REFRESH_ON_START   => 1;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 0.5; # seconds for main loop
 Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
@@ -1237,16 +1238,25 @@ sub worker_entrypoint($$$$)
         );
 
         # Check state of the cache table prior to entry - we may have started after a partial table build!
-        my $count_check_start = [ gettimeofday() ];
-        &set_program_name( $handle, "size check: $CACHE_HASH->{name}" );
-        my $desired_count = get_def_count( $handle, $CACHE_HASH->{definition} );
-        my $current_count = get_table_count( $handle, $CACHE_HASH->{schema} . '.' . $CACHE_HASH->{name} );
-        my $count_delta   = tv_interval( $count_check_start, [ gettimeofday() ] );
-        _log( $LOG_LEVEL_DEBUG, "CT count check took $count_delta seconds" );
-
-        if( $current_count != $desired_count )
+        unless( $REFRESH_ON_START )
         {
-            _log( $LOG_LEVEL_INFO, "Out of date cache table detected on worker startup, initiating rebuild." );
+            my $count_check_start = [ gettimeofday() ];
+            &set_program_name( $handle, "size check: $CACHE_HASH->{name}" );
+            my $desired_count = get_def_count( $handle, $CACHE_HASH->{definition} );
+            my $current_count = get_table_count( $handle, $CACHE_HASH->{schema} . '.' . $CACHE_HASH->{name} );
+            my $count_delta   = tv_interval( $count_check_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "CT count check took $count_delta seconds" );
+
+            if( $current_count != $desired_count )
+            {
+                _log( $LOG_LEVEL_INFO, "Out of date cache table detected on worker startup, initiating rebuild." );
+                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+                $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
+                tied( $WORKER_STATUSES )->shunlock();
+            }
+        }
+        else
+        {
             tied( $WORKER_STATUSES )->shlock( LOCK_EX );
             $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
             tied( $WORKER_STATUSES )->shunlock();
