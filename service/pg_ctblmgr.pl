@@ -402,7 +402,7 @@ sub parent_loop($$$)
 
     my $XID_MAP = [];
     my $handle = &db_connect();
-
+    my $first_loop_done = 0;
     if( !check_extension_running( $handle ) )
     {
         _log( $LOG_LEVEL_FATAL, "Failed to secure advisory lock in parent process" );
@@ -463,6 +463,158 @@ sub parent_loop($$$)
 
     while( 1 )
     {
+        ## XID CHAIN MANAGEMENT
+        ##=====================
+        if( $ENABLE_FAST_DELETE )
+        {
+            tied( $XID_MAP )->shlock( LOCK_SH | LOCK_NB );
+
+            if( !defined( $XID_MAP ) || scalar( @$XID_MAP ) < $MAX_XID_LENGTH )
+            {
+                my $new_handle;
+                my $new_xid;
+                my $new_snapshot;
+
+                if( !$first_loop_done )
+                {
+                    if( !create_replication_slot( $handle ) )
+                    {
+                        _log( $LOG_LEVEL_FATAL, "Failed to create replication slot" );
+                    }
+                }
+
+                if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
+                {
+                    tied( $XID_MAP )->shunlock();
+                    _log( $LOG_LEVEL_DEBUG, "Could not generate new XID chain member" );
+                    next;
+                }
+
+                tied( $XID_MAP )->shlock( LOCK_EX );
+                $local_xid_map->{$new_xid} = $new_handle;
+                push(
+                    @$XID_MAP,
+                    {
+                        xid      => $new_xid,
+                        snapshot => $new_snapshot,
+                        in_use   => []
+                    }
+                );
+            }
+            else
+            {
+                # Replace oldest chain member
+                my $candidate_replace;
+                my $candidate_replace_ind;
+                my $replace_ind = 0;
+
+                foreach my $elem( @$XID_MAP )
+                {
+                    if(
+                           scalar( @{$elem->{in_use}} ) == 0
+                        && (
+                                !defined( $candidate_replace )
+                             || $elem->{xid} < $candidate_replace
+                           )
+                      )
+                    {
+                        $candidate_replace     = $elem->{xid};
+                        $candidate_replace_ind = $replace_ind;
+                    }
+
+                    $replace_ind++;
+                }
+
+                if( !defined( $candidate_replace ) )
+                {
+                    _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                tied( $XID_MAP )->shlock( LOCK_EX );
+                my $replace_handle = $local_xid_map->{$candidate_replace};
+
+                if( !defined( $replace_handle ) )
+                {
+                    _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                if( $replace_handle->ping() > 0 && $replace_handle->pg_ping() > 0 )
+                {
+                    $replace_handle->do( 'ROLLBACK' );
+                }
+
+                $replace_handle->disconnect();
+                undef( $replace_handle );
+
+                my $snapshot;
+                my $new_xid;
+
+                delete( $local_xid_map->{$candidate_replace} );
+
+                if( !new_xid_placeholder( \$replace_handle, \$new_xid, \$snapshot ) )
+                {
+                    _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                if( $XID_MAP->[$candidate_replace_ind]->{xid} != $candidate_replace )
+                {
+                    _log( $LOG_LEVEL_ERROR, "XID Chain replacement invalid - index $candidate_replace_ind is invalid for XID" );
+                    tied( $XID_MAP )->shunlock();
+                    next;
+                }
+
+                # note: this code is duplicated to handle updating XID_MAP in-place. Due to oddities in
+                # how IPC::Shareable handles arrayrefs, the elements must be manipulated using push/pop
+                # /shift/unshift. Futher complicating matters, this needs to share scope with the knots
+                # created with tie() and tied(). Without this - cases where LOCK_SH get upgraded to LOCK_EX
+                # will result in a deadlock on the same PID, unless scope of LOCK_SH call and LOCK_EX call
+                # are the same.
+                my $ind = 0;
+                my @backup;
+
+                while( $ind != $candidate_replace_ind )
+                {
+                    push( @backup, shift( @$XID_MAP ) );
+                    $ind++;
+                }
+
+                shift( @$XID_MAP ); # throw away from sh,
+                unshift(
+                    @$XID_MAP,
+                    {
+                        snapshot => $snapshot,
+                        xid      => $new_xid,
+                        in_use   => [],
+                    }
+                ); # replace tossed element in-place
+
+                while( scalar( @backup ) > 0 )
+                {
+                    unshift( @$XID_MAP, pop( @backup ) );
+                }
+
+                $local_xid_map->{$new_xid} = $replace_handle;
+            }
+
+            tied( $XID_MAP )->shunlock();
+        }
+
+        if( !$first_loop_done )
+        {
+            tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+            foreach my $w_pid( keys %$WORKER_STATUSES )
+            {
+                $WORKER_STATUSES->{$w_pid}->{replace} = 1;
+            }
+            tied( $WORKER_STATUSES )->shunlock();
+            # first iteration - lets command all workers to rebuild
+        }
         # Each loop we determine what LSN we can seek to, if any, and seek to that point
 
         my $seekable_lsn;
@@ -902,145 +1054,13 @@ sub parent_loop($$$)
 
         select( undef, undef, undef, $SLEEP_TIMER );
 
+        $first_loop_done = 1;
+
         ## WORKER HEALTH CHECKS
         ##=====================
 
         # TODO
 
-        ## XID CHAIN MANAGEMENT
-        ##=====================
-
-        if( $ENABLE_FAST_DELETE )
-        {
-            tied( $XID_MAP )->shlock( LOCK_SH | LOCK_NB );
-
-            if( !defined( $XID_MAP ) || scalar( @$XID_MAP ) < $MAX_XID_LENGTH )
-            {
-                my $new_handle;
-                my $new_xid;
-                my $new_snapshot;
-
-                if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
-                {
-                    tied( $XID_MAP )->shunlock();
-                    _log( $LOG_LEVEL_DEBUG, "Could not generate new XID chain member" );
-                    next;
-                }
-
-                tied( $XID_MAP )->shlock( LOCK_EX );
-                $local_xid_map->{$new_xid} = $new_handle;
-                push(
-                    @$XID_MAP,
-                    {
-                        xid      => $new_xid,
-                        snapshot => $new_snapshot,
-                        in_use   => []
-                    }
-                );
-            }
-            else
-            {
-                # Replace oldest chain member
-                my $candidate_replace;
-                my $candidate_replace_ind;
-                my $replace_ind = 0;
-
-                foreach my $elem( @$XID_MAP )
-                {
-                    if(
-                           scalar( @{$elem->{in_use}} ) == 0
-                        && (
-                                !defined( $candidate_replace )
-                             || $elem->{xid} < $candidate_replace
-                           )
-                      )
-                    {
-                        $candidate_replace     = $elem->{xid};
-                        $candidate_replace_ind = $replace_ind;
-                    }
-
-                    $replace_ind++;
-                }
-
-                if( !defined( $candidate_replace ) )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
-                    tied( $XID_MAP )->shunlock();
-                    next;
-                }
-
-                tied( $XID_MAP )->shlock( LOCK_EX );
-                my $handle = $local_xid_map->{$candidate_replace};
-
-                if( !defined( $handle ) )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
-                    tied( $XID_MAP )->shunlock();
-                    next;
-                }
-
-                if( $handle->ping() > 0 && $handle->pg_ping() > 0 )
-                {
-                    $handle->do( 'ROLLBACK' );
-                }
-
-                $handle->disconnect();
-                undef( $handle );
-
-                my $snapshot;
-                my $new_xid;
-
-                delete( $local_xid_map->{$candidate_replace} );
-
-                if( !new_xid_placeholder( \$handle, \$new_xid, \$snapshot ) )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
-                    tied( $XID_MAP )->shunlock();
-                    next;
-                }
-
-                if( $XID_MAP->[$candidate_replace_ind]->{xid} != $candidate_replace )
-                {
-                    _log( $LOG_LEVEL_ERROR, "XID Chain replacement invalid - index $candidate_replace_ind is invalid for XID" );
-                    tied( $XID_MAP )->shunlock();
-                    next;
-                }
-
-                # note: this code is duplicated to handle updating XID_MAP in-place. Due to oddities in
-                # how IPC::Shareable handles arrayrefs, the elements must be manipulated using push/pop
-                # /shift/unshift. Futher complicating matters, this needs to share scope with the knots
-                # created with tie() and tied(). Without this - cases where LOCK_SH get upgraded to LOCK_EX
-                # will result in a deadlock on the same PID, unless scope of LOCK_SH call and LOCK_EX call
-                # are the same.
-                my $ind = 0;
-                my @backup;
-
-                while( $ind != $candidate_replace_ind )
-                {
-                    push( @backup, shift( @$XID_MAP ) );
-                    $ind++;
-                }
-
-                shift( @$XID_MAP ); # throw away from sh,
-                unshift(
-                    @$XID_MAP,
-                    {
-                        snapshot => $snapshot,
-                        xid      => $new_xid,
-                        in_use   => [],
-                    }
-                ); # replace tossed element in-place
-
-                while( scalar( @backup ) > 0 )
-                {
-                    unshift( @$XID_MAP, pop( @backup ) );
-                }
-
-                $local_xid_map->{$new_xid} = $handle;
-            }
-
-            tied( $XID_MAP )->shunlock();
-        }
     }
 
     return;
@@ -1238,29 +1258,29 @@ sub worker_entrypoint($$$$)
         );
 
         # Check state of the cache table prior to entry - we may have started after a partial table build!
-        unless( $REFRESH_ON_START )
-        {
-            my $count_check_start = [ gettimeofday() ];
-            &set_program_name( $handle, "size check: $CACHE_HASH->{name}" );
-            my $desired_count = get_def_count( $handle, $CACHE_HASH->{definition} );
-            my $current_count = get_table_count( $handle, $CACHE_HASH->{schema} . '.' . $CACHE_HASH->{name} );
-            my $count_delta   = tv_interval( $count_check_start, [ gettimeofday() ] );
-            _log( $LOG_LEVEL_DEBUG, "CT count check took $count_delta seconds" );
+        #unless( $REFRESH_ON_START )
+        #{
+        #    my $count_check_start = [ gettimeofday() ];
+        #    &set_program_name( $handle, "size check: $CACHE_HASH->{name}" );
+        #    my $desired_count = get_def_count( $handle, $CACHE_HASH->{definition} );
+        #    my $current_count = get_table_count( $handle, $CACHE_HASH->{schema} . '.' . $CACHE_HASH->{name} );
+        #    my $count_delta   = tv_interval( $count_check_start, [ gettimeofday() ] );
+        #    _log( $LOG_LEVEL_DEBUG, "CT count check took $count_delta seconds" );
 
-            if( $current_count != $desired_count )
-            {
-                _log( $LOG_LEVEL_INFO, "Out of date cache table detected on worker startup, initiating rebuild." );
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
-                tied( $WORKER_STATUSES )->shunlock();
-            }
-        }
-        else
-        {
-            tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-            $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
-            tied( $WORKER_STATUSES )->shunlock();
-        }
+        #    if( $current_count != $desired_count )
+        #    {
+        #        _log( $LOG_LEVEL_INFO, "Out of date cache table detected on worker startup, initiating rebuild." );
+        #        tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+        #        $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
+        #        tied( $WORKER_STATUSES )->shunlock();
+        #    }
+        #}
+        #else
+        #{
+        #    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+        #    $WORKER_STATUSES->{$worker_pid}->{replace} = 1;
+        #    tied( $WORKER_STATUSES )->shunlock();
+        #}
 
         # MAIN LOOP
         while( 1 )
@@ -1561,7 +1581,7 @@ sub worker_entrypoint($$$$)
                     }
                     else
                     {
-                        _log( $LOG_LEVEL_DEBUG, 'Could not find candidate XID for fast delete' );
+                        _log( $LOG_LEVEL_DEBUG, "Could not find candidate XID for fast delete - looking for $youngest_xid" );
                     }
 
                     tied( $XID_MAP )->shunlock();
@@ -1923,13 +1943,6 @@ if( !check_extension_running( $handle ) )
     croak(
         'There appears to be another instance of '
       . "$EXTENSION_NAME running on this database\n"
-    );
-}
-
-if( !create_replication_slot( $handle ) )
-{
-    croak(
-        'Failed to create replication slot'
     );
 }
 
