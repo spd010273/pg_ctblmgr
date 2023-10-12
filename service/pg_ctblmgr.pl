@@ -513,7 +513,9 @@ sub parent_loop($$$)
                 foreach my $elem( @$XID_MAP )
                 {
                     if(
-                           scalar( @{$elem->{in_use}} ) == 0
+                           defined( $elem )
+                        && defined( $elem->{in_use} )
+                        && scalar( @{$elem->{in_use}} ) == 0
                         && (
                                 !defined( $candidate_replace )
                              || $elem->{xid} < $candidate_replace
@@ -646,7 +648,6 @@ sub parent_loop($$$)
         }
 
         my $diff = {};
-
         # Worker management - handle new / changed / removed definitions
         # Note that workers themselves will handle changes in definitions
         # TODO: Verify filter tables is getting set correctly.
@@ -1593,7 +1594,7 @@ sub worker_entrypoint($$$$)
                         _log( $LOG_LEVEL_DEBUG, "Could not find candidate XID for fast delete - looking for $youngest_xid. Candidates were:" );
                         foreach my $elem( @$XID_MAP )
                         {
-                            _log( $LOG_LEVEL_DEBUG, "$elem" );
+                            _log( $LOG_LEVEL_DEBUG, "$elem->{xid}" );
                         }
                         _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
                     }
