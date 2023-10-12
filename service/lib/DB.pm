@@ -876,17 +876,19 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     my $name          = $ct_hash->{name};
     my $schema        = $ct_hash->{schema};
     my $definition    = $ct_hash->{definition};
-
+    my $try_count     = 0;
     $handle->do( 'BEGIN' );
     $handle->do( "SET client_min_messages = 'ERROR'" );
 
-    unless( &create_dependent_temp_table( $handle, $ct_hash ) )
+    until( &create_dependent_temp_table( $handle, $ct_hash ) )
     {
         $handle->do( 'ROLLBACK' );
         _log(
-            $LOG_LEVEL_FATAL,
+            $LOG_LEVEL_ERROR,
             'Cache table replacement failed - could not collect dependent objects'
         );
+        $handle->do( 'BEGIN' );
+        $handle->do( "SET client_min_messages = 'ERROR'" );
     }
 
     $ct_hash->{name} .= '_temp';
@@ -901,7 +903,8 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     unless( &drop_dependencies( $handle ) )
     {
         $handle->do( 'ROLLBACK' );
-        _log( $LOG_LEVEL_FATAL, "Failed to drop dependent objects" );
+        _log( $LOG_LEVEL_ERROR, "Failed to drop dependent objects" );
+        return 0;
     }
 
     my $sth = &try_query( $handle, "DROP TABLE IF EXISTS $schema.$name CASCADE" );
@@ -910,9 +913,10 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     {
         $handle->do( 'ROLLBACK' );
         _log(
-            $LOG_LEVEL_FATAL,
+            $LOG_LEVEL_ERROR,
             'Cache table replacement failed - could not drop old definition'
         );
+        return 0;
     }
 
     $sth = &try_query(
@@ -925,21 +929,24 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         $handle->do( 'ROLLBACK' );
         $ct_hash->{name} = $name;
         _log(
-            $LOG_LEVEL_FATAL,
+            $LOG_LEVEL_ERROR,
             'Cache table replacement failed - could not rename new table'
         );
+        return 0;
     }
 
     unless( $handle->do( "ANALYZE $schema.$name" ) )
     {
         $handle->do( 'ROLLBACK' );
-        _log( $LOG_LEVEL_FATAL, "Failed to analyze replacement cache table" );
+        _log( $LOG_LEVEL_ERROR, "Failed to analyze replacement cache table" );
+        return 0;
     }
 
     unless( &recreate_dependencies( $handle ) )
     {
         $handle->do( 'ROLLBACK' );
-        _log( $LOG_LEVEL_FATAL, "Failed to recreate dependencies\n" );
+        _log( $LOG_LEVEL_ERROR, "Failed to recreate dependencies\n" );
+        return 0;
     }
 
     unless( $handle->do( "ALTER INDEX IF EXISTS ix_$temp_name RENAME TO ix_$name" ) )

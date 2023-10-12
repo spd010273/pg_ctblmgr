@@ -48,7 +48,7 @@ use QueryParser;
 # enables holding past transactions open for a trailing XID chain we can use
 # to lookup historic data
 
-Readonly my $REFRESH_ON_START   => 1;
+Readonly my $REFRESH_ON_START   => 0;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 0.5; # seconds for main loop
 Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
@@ -477,10 +477,12 @@ sub parent_loop($$$)
 
                 if( !$first_loop_done )
                 {
+                    _log( $LOG_LEVEL_INFO, "Creating replication slot: $SLOT_NAME..." );
                     if( !create_replication_slot( $handle ) )
                     {
                         _log( $LOG_LEVEL_FATAL, "Failed to create replication slot" );
                     }
+                    _log( $LOG_LEVEL_INFO ,"Slot $SLOT_NAME created!" );
                 }
 
                 if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
@@ -605,7 +607,7 @@ sub parent_loop($$$)
             tied( $XID_MAP )->shunlock();
         }
 
-        if( !$first_loop_done )
+        if( !$first_loop_done && $REFRESH_ON_START )
         {
             tied( $WORKER_STATUSES )->shlock( LOCK_EX );
             foreach my $w_pid( keys %$WORKER_STATUSES )
@@ -1336,12 +1338,19 @@ sub worker_entrypoint($$$$)
                 $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
                 tied( $WORKER_STATUSES )->shunlock();
 
-                unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
+                my $try_count = 0;
+                until( &replace_cache_table( $handle, $pk_maintenance_object ) )
                 {
                     _log(
-                        $LOG_LEVEL_FATAL,
-                        "Replacement of $CACHE_HASH->{name} failed after command to replace"
+                        $LOG_LEVEL_ERROR,
+                        "Replacement of $CACHE_HASH->{name} failed after command to replace, retrying..."
                     );
+                    $try_count++;
+
+                    if( $try_count > 3 )
+                    {
+                        _log( $LOG_LEVEL_FATAL, "Aboring worker after $try_count attempt to rebuild cache table $CACHE_HASH->{name}" );
+                    }
                 }
 
                 tied( $WORKER_STATUSES )->shlock( LOCK_EX );
@@ -1581,7 +1590,12 @@ sub worker_entrypoint($$$$)
                     }
                     else
                     {
-                        _log( $LOG_LEVEL_DEBUG, "Could not find candidate XID for fast delete - looking for $youngest_xid" );
+                        _log( $LOG_LEVEL_DEBUG, "Could not find candidate XID for fast delete - looking for $youngest_xid. Candidates were:" );
+                        foreach my $elem( @$XID_MAP )
+                        {
+                            _log( $LOG_LEVEL_DEBUG, "$elem" );
+                        }
+                        _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
                     }
 
                     tied( $XID_MAP )->shunlock();
