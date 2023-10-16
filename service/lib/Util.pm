@@ -41,6 +41,10 @@ Readonly::Scalar our $ENABLE_FAST_DELETE         :Export( :MANDATORY ) => 1;
 # Entry length for historic transaction storage. This allows fast delete to work
 Readonly::Scalar our $MAX_XID_LENGTH             :Export( :MANDATORY ) => 10;
 
+# Soread of XID map - the larger the number, the larger the spacing between XID map entries.
+# This increases the likelyhood that long running tx's result in a fast delete
+Readonly::Scalar our $XID_MAP_SPREAD             :Export( :MANDATORY ) => 15;
+
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather than one insert
 Readonly::Scalar our $BATCHED_CREATE             :Export( :MANDATORY ) => 1;
 
