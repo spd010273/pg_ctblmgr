@@ -902,16 +902,6 @@ sub parent_loop($$$)
 
         foreach my $pid( keys %$WORKER_FILTER_TABLES )
         {
-            #foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$pid}} )
-            #{
-            #    if(
-            #           defined( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} )
-            #        && ref( $WORKER_FILTER_TABLES->{$pid}->{$filter_table} ) eq 'ARRAY'
-            #      )
-            #    {
-            #        $num_outstanding_changes += scalar( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}} );
-            #    }
-            #}
             $num_outstanding_changes += $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY};
         }
 
