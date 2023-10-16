@@ -664,6 +664,7 @@ sub read_worker_filter_tables()
     {
         foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$pid}} )
         {
+            next if( $filter_table eq '__ACTIVE_CHANGES__' );
             # We could likely read the queue data but we'd need the WAL level fed in from $WORKER_STATUSES
             my $queued_change_count = scalar( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}} );
             $worker_filter_tables->{$pid}->{$filter_table} = $queued_change_count;
