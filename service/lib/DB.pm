@@ -1028,7 +1028,6 @@ sub db_connect(;$) :Export( :MANDATORY )
 	_log( $LOG_LEVEL_INFO, "Reconnected to database" ) if( $connect_count > 0 );
 	$handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
 	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-	$handle->do( "SET tcp_keepalives_count = $TCP_KEEPALIVE_COUNT" );
 	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
 #    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $DEBUG );
     return $handle;

@@ -1538,6 +1538,7 @@ sub worker_entrypoint($$$$)
                 $query_parse_time = tv_interval( $query_parse_start, [ gettimeofday() ] );
                 _log( $LOG_LEVEL_DEBUG, "Query parse took $query_parse_time seconds" );
 
+                my $xid_map_size = 0;
                 if( $ENABLE_FAST_DELETE )
                 {
                     # search XID_MAP for suitable XID
@@ -1554,6 +1555,7 @@ sub worker_entrypoint($$$$)
                             $best_candidate_ind = $ind;
                         }
 
+                        $xid_map_size++;
                         $ind++;
                     }
 
@@ -1780,7 +1782,10 @@ FD_FALLBACK:
                     _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
                 }
 
-                if( !$can_fast_delete )
+                # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
+                # use slow deletes iff the XID map isn't full
+                # For production use we're banking on steady-state operation
+                if( !$can_fast_delete && $xid_map_size == $MAX_XID_LENGTH )
                 {
                     tied( $WORKER_STATUSES )->shlock( LOCK_EX );
                     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_SLOW_DELETE;
