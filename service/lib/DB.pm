@@ -152,7 +152,15 @@ Readonly::Scalar my $GET_WORKER_LIST => <<"END_SQL";
            rs.filter,
            mg.wal_level,
            mo.maintenance_object,
-           mo.name
+           mo.name,
+           regexp_replace(
+               digest(
+                   mo.definition,
+                   'sha256'::VARCHAR
+               )::VARCHAR,
+               '\\\\x',
+               ''
+           ) AS hash
       FROM ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
 INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.maintenance_object = rs.id
@@ -1288,19 +1296,15 @@ sub get_worker_list($;$) :Export( :MANDATORY )
 
         while( my $row = $sth->fetchrow_hashref() )
         {
-            my $maintenance_channel = $row->{maintenance_channel};
-            my $filter_tables       = $row->{filter};
-            my $wal_level           = $row->{wal_level};
-            my $maintenance_object  = $row->{maintenance_object};
-            my $name                = $row->{name};
             push(
                 @$worker_data,
                 {
-                    maintenance_channel => $maintenance_channel,
-                    filter_tables       => $filter_tables,
-                    wal_level           => $wal_level,
-                    maintenance_object  => $maintenance_object,
-                    name                => $name,
+                    maintenance_channel => $row->{maintenance_channel},
+                    filter_tables       => $row->{filter},
+                    wal_level           => $row->{wal_level},
+                    maintenance_object  => $row->{maintenance_object},
+                    name                => $row->{name},
+                    hash                => $row->{hash},
                 }
             );
         }

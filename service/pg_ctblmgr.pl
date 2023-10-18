@@ -17,7 +17,6 @@ use Getopt::Std;
 use Time::HiRes qw( gettimeofday tv_interval );
 use POSIX qw( strftime setsid :sys_wait_h );
 use Cwd qw( abs_path );
-use IPC::Shareable qw( :lock );
 
 use Data::Dumper;
 
@@ -27,6 +26,7 @@ use lib "$FindBin::Bin/lib";
 use Util;
 use DB;
 use QueryParser;
+use Shm;
 
 # DEV NOTES:
 # - This can read queries but is relatively untested against all the possible
@@ -35,16 +35,6 @@ use QueryParser;
 #   prevent bad queries from executing.
 # - This requires, like matviews, that a unique expression exists on the table,
 #   though this can support multiple unique indicies.
-# - Due to IPC::Shareable limitations / the way perl handles data structures
-#   under the hood, the shared structures, while cumbersome, prevent memory
-#   leaks by, for instance, by eschewing delete() calls and overwriting data
-#   in-place.
-# - Because of the above, and some weirdness surrounding refs - we need to use
-#   cumbersome methods to manipulate arrayrefs. this involves some convoluted
-#   code around push/pop/shift/unshift
-# NOTE:
-# IPC::Shareable keys seeem to be extremely short (4 chars) and may collide!
-
 # enables holding past transactions open for a trailing XID chain we can use
 # to lookup historic data
 
@@ -52,8 +42,11 @@ Readonly my $ACTIVE_CHANGES_KEY => '__ACTIVE_CHANGES__';
 Readonly my $REFRESH_ON_START   => 0;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 0.25; # seconds for main loop
-Readonly my $DEFAULT_WFT_SIZE   => 1024 * 1024;
 
+Readonly my $WFT_KEY => 17783312;
+Readonly my $WS_KEY  => 17783313;
+Readonly my $XID_KEY => 17783314;
+Readonly my $TIMING => 0;
 our $OUTPUT_AUTOFLUSH = 1;
 our $|                = 1;
 
@@ -65,6 +58,40 @@ $DAEMONIZE   = 0;
 
 END {
     _terminate();
+}
+
+sub update_status($;$)
+{
+    my( $info_hash, $override_pid ) = validate_pos(
+        @_,
+        { type => HASHREF },
+        { type => SCALAR, optional => 1 },
+    );
+
+    my $success = 0;
+    my $target_pid = $PROCESS_ID;
+    $target_pid = $override_pid if( defined $override_pid && $PARENT_PID == $PROCESS_ID );
+    return 0 if( !defined( $info_hash ) );
+    do_lock( $WS_KEY, $WRITE_LOCK );
+    my $WORKER_STATUSES = readmem( $WS_KEY );
+    if( defined( $WORKER_STATUSES ) )
+    {
+        $WORKER_STATUSES->{$target_pid}->{status}             = $info_hash->{status}             if( $info_hash->{status} );
+        $WORKER_STATUSES->{$target_pid}->{name}               = $info_hash->{name}               if( $info_hash->{name} );
+        $WORKER_STATUSES->{$target_pid}->{maintenance_object} = $info_hash->{maintenance_object} if( $info_hash->{maintenance_object} );
+        $WORKER_STATUSES->{$target_pid}->{shutdown}           = $info_hash->{shutdown}           if( $info_hash->{shutdown} );
+        $WORKER_STATUSES->{$target_pid}->{replace}            = $info_hash->{replace}            if( $info_hash->{replace} );
+        $WORKER_STATUSES->{$target_pid}->{last_lsn}           = $info_hash->{last_lsn}           if( $info_hash->{last_lsn} );
+        writemem( $WS_KEY, $WORKER_STATUSES );
+        $success = 1;
+    }
+    else
+    {
+        $success = 0;
+    }
+
+    do_lock( $WS_KEY, $WRITE_UNLOCK );
+    return $success;
 }
 
 sub _terminate_sigint()
@@ -123,7 +150,7 @@ sub _terminate(;$$$)
             );
         }
         #this is crucial to prevent running out of shm after crashes / term
-        &shm_cleanup();
+        &do_shm_cleanup();
     }
 
     if( @_ )
@@ -138,57 +165,11 @@ $SIG{INT} = \&_terminate_sigint;
 $SIG{__DIE__} = \&_terminate;
 
 
-sub shm_cleanup()
-{
-    # Note: This cleans up shared memory and semaphore arrays. These
-    # will not be automatically be cleaned up by the kernel. This can be
-    # done manually with ipcs / ipcrm
-    return unless( $PROCESS_ID != $PARENT_PID );
-
-    my $WORKER_FILTER_TABLES;
-    my $WORKER_STATUSES;
-    my @XID_MAP;
-
-    tie(
-        $WORKER_FILTER_TABLES,
-        'IPC::Shareable',
-        { key => 'WORKER_FILTER_TABLES' }
-    );
-
-    tie(
-        $WORKER_STATUSES,
-        'IPC::Shareable',
-        { key => 'STATUSES' }
-    );
-
-    if( $ENABLE_FAST_DELETE )
-    {
-        tie(
-            @XID_MAP,
-            'IPC::Shareable',
-            { key => 'XID' }
-        );
-    }
-
-    tied( $WORKER_FILTER_TABLES )->clean_up_all();
-    tied( $WORKER_STATUSES      )->clean_up_all();
-    tied( @XID_MAP              )->clean_up_all() if( $ENABLE_FAST_DELETE );
-
-    return;
-}
-
 sub shm_pre_cleanup()
 {
-    foreach my $key( split( "\n", `ipcs -m | grep -v -E 'postgres' | grep \$(whoami) | grep '0x' | awk '{print \$1}'` ) )
-    {
-        return 0 unless( system( "ipcrm --shmem-key $key" ) == 0 );
-    }
-
-    foreach my $key( split( "\n", `ipcs -s | grep -v -E 'postgres' | grep \$(whoami) | grep '0x' | awk '{print \$1}'` ) )
-    {
-        return 0 unless( system( "ipcrm --semaphore-key $key" ) == 0 );
-    }
-
+    do_cleanup_key( $WS_KEY );
+    do_cleanup_key( $XID_KEY );
+    do_cleanup_key( $WFT_KEY );
     return 1;
 }
 
@@ -196,14 +177,10 @@ sub get_distinct_filter_tables()
 {
     my $WORKER_FILTER_TABLES;
 
-    tie(
-        $WORKER_FILTER_TABLES,
-        'IPC::Shareable',
-        { key => 'WORKER_FILTER_TABLES' }
-    );
-
+    do_lock( $WFT_KEY, $READ_LOCK );
+    $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
+    do_lock( $WFT_KEY, $READ_UNLOCK );
     my $DISTINCT_FILTER_TABLES = [];
-    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
 
     foreach my $pid( keys %$WORKER_FILTER_TABLES )
     {
@@ -216,8 +193,6 @@ sub get_distinct_filter_tables()
             }
         }
     }
-
-    tied( $WORKER_FILTER_TABLES )->shunlock();
 
     return $DISTINCT_FILTER_TABLES;
 }
@@ -238,22 +213,9 @@ sub populate_worker_data($$)
         {
             my $pk_maintenance_object = $worker_entry->{maintenance_object};
             my $filter_tables         = $worker_entry->{filter_tables};
-            my $ct_hash               = &get_ct_digest(
-                $handle,
-                $pk_maintenance_object
-            );
 
-            unless( $ct_hash )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    'Failed to get digest for cache table '
-                  . "$pk_maintenance_object"
-                );
-                next;
-            }
-
-            $WORKER_DATA->{$pk_maintenance_object} = $ct_hash;
+            $WORKER_DATA->{$pk_maintenance_object}->{hash} = $worker_entry->{hash};
+            $WORKER_DATA->{$pk_maintenance_object}->{name} = $worker_entry->{name};
         }
     }
     else
@@ -284,17 +246,17 @@ sub check_for_new_cache_tables($$$)
     {
         if( defined( $current_workers->{$pk_mo} ) )
         {
-            next if( $current_workers->{$pk_mo} eq $new_workers->{$pk_mo} );
+            next if( $current_workers->{$pk_mo}->{hash} eq $new_workers->{$pk_mo}->{hash} );
 
             #indicate a change to a CT
-            $diff->{change}->{$pk_mo}  = $new_workers->{$pk_mo};
-            $current_workers->{$pk_mo} = $new_workers->{$pk_mo};
+            $diff->{change}->{$pk_mo}  = $new_workers->{$pk_mo}->{name};
+            $current_workers->{$pk_mo} = $new_workers->{$pk_mo}->{name};
         }
         else
         {
             #indicate a new CT has been added
-            $diff->{new}->{$pk_mo}     = $new_workers->{$pk_mo};
-            $current_workers->{$pk_mo} = $new_workers->{$pk_mo};
+            $diff->{new}->{$pk_mo}     = $new_workers->{$pk_mo}->{name};
+            $current_workers->{$pk_mo} = $new_workers->{$pk_mo}->{name};
         }
     }
 
@@ -302,7 +264,7 @@ sub check_for_new_cache_tables($$$)
     {
         next if( defined( $new_workers->{$pk_mo} ) );
         #indicate a removed CT
-        $diff->{old}->{$pk_mo} = $current_workers->{$pk_mo};
+        $diff->{old}->{$pk_mo} = $current_workers->{$pk_mo}->{name};
     }
 
     foreach my $pk_mo( keys %{$diff->{old}} )
@@ -393,15 +355,15 @@ sub new_xid_placeholder($$$)
 }
 
 ## PARENT
-sub parent_loop($$$)
+sub parent_loop($)
 {
-    my( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping ) = validate_pos(
+    my( $worker_mapping ) = validate_pos(
         @_,
-        { type => HASHREF }, # shm status hash
-        { type => HASHREF }, # shm WAL hash
         { type => HASHREF }, # local mapping of pk_maint_obj -> pid
     );
 
+    my $WORKER_STATUSES;
+    my $WORKER_FILTER_TABLES;
     my $XID_MAP = [];
     my $handle = &db_connect();
     my $first_loop_done = 0;
@@ -410,22 +372,7 @@ sub parent_loop($$$)
         _log( $LOG_LEVEL_FATAL, "Failed to secure advisory lock in parent process" );
     }
 
-    if( !tied( $WORKER_FILTER_TABLES ) )
-    {
-        tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } );
-    }
-
-    if( !tied( $WORKER_STATUSES ) )
-    {
-        tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } );
-    }
-
     my $local_xid_map = {};
-
-    if( $ENABLE_FAST_DELETE && !tied( $XID_MAP ) )
-    {
-        tie( $XID_MAP, 'IPC::Shareable', { key => 'XID' } );
-    }
 
     unless( $handle )
     {
@@ -463,14 +410,26 @@ sub parent_loop($$$)
     my $wal_level              = 'M';
     my $dispatched_changes     = {};
     my $xid_map_spread_ind     = 0;
+    my $last_worker_count      = 0;
+    # Timing vars
+    my $xid_start;
+    my $worker_check_start;
+    my $youngest_lsn_proc_start;
+    my $peek_start;
+    my $dist_start;
+    my $lsn_increment_start;
+    my $idle_check_start;
+    my $worker_last_lsn_start;
 
     while( 1 )
     {
         ## XID CHAIN MANAGEMENT
         ##=====================
+        $xid_start = [ gettimeofday() ] if( $TIMING );
         if( $ENABLE_FAST_DELETE )
         {
-            tied( $XID_MAP )->shlock( LOCK_SH | LOCK_NB );
+            do_lock( $XID_KEY, $READ_LOCK );
+            $XID_MAP = readmem( $XID_KEY );
             if( $xid_map_spread_ind % $XID_MAP_SPREAD == 0 )
             {
                 $xid_map_spread_ind = 0;
@@ -478,7 +437,7 @@ sub parent_loop($$$)
 
             if( $xid_map_spread_ind == 0 )
             {
-                if( !defined( $XID_MAP ) || scalar( @$XID_MAP ) < $MAX_XID_LENGTH )
+                if( !defined( $XID_MAP ) || ref( $XID_MAP ) ne 'ARRAY' || scalar( @$XID_MAP ) < $MAX_XID_LENGTH )
                 {
                     my $new_handle;
                     my $new_xid;
@@ -496,12 +455,12 @@ sub parent_loop($$$)
 
                     if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
                     {
-                        tied( $XID_MAP )->shunlock();
+                        do_lock( $XID_KEY, $READ_UNLOCK );
                         _log( $LOG_LEVEL_DEBUG, "Could not generate new XID chain member" );
                         next;
                     }
 
-                    tied( $XID_MAP )->shlock( LOCK_EX );
+                    do_lock( $XID_KEY, $READ_TO_WRITE );
                     $local_xid_map->{$new_xid} = $new_handle;
                     push(
                         @$XID_MAP,
@@ -511,6 +470,9 @@ sub parent_loop($$$)
                             in_use   => []
                         }
                     );
+
+                    writemem( $XID_KEY, $XID_MAP );
+                    do_lock( $XID_KEY, $WRITE_TO_READ );
                 }
                 else
                 {
@@ -541,17 +503,17 @@ sub parent_loop($$$)
                     if( !defined( $candidate_replace ) )
                     {
                         _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
-                        tied( $XID_MAP )->shunlock();
+                        do_lock( $XID_KEY, $READ_UNLOCK );
                         next;
                     }
 
-                    tied( $XID_MAP )->shlock( LOCK_EX );
+                    do_lock( $XID_KEY, $READ_TO_WRITE );
                     my $replace_handle = $local_xid_map->{$candidate_replace};
 
                     if( !defined( $replace_handle ) )
                     {
                         _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
-                        tied( $XID_MAP )->shunlock();
+                        do_lock( $XID_KEY, $WRITE_UNLOCK );
                         next;
                     }
 
@@ -571,69 +533,56 @@ sub parent_loop($$$)
                     if( !new_xid_placeholder( \$replace_handle, \$new_xid, \$snapshot ) )
                     {
                         _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
-                        tied( $XID_MAP )->shunlock();
+                        do_lock( $XID_KEY, $WRITE_UNLOCK );
                         next;
                     }
 
                     if( $XID_MAP->[$candidate_replace_ind]->{xid} != $candidate_replace )
                     {
                         _log( $LOG_LEVEL_ERROR, "XID Chain replacement invalid - index $candidate_replace_ind is invalid for XID" );
-                        tied( $XID_MAP )->shunlock();
+                        do_lock( $XID_KEY, $WRITE_UNLOCK );
                         next;
                     }
 
-                    # note: this code is duplicated to handle updating XID_MAP in-place. Due to oddities in
-                    # how IPC::Shareable handles arrayrefs, the elements must be manipulated using push/pop
-                    # /shift/unshift. Futher complicating matters, this needs to share scope with the knots
-                    # created with tie() and tied(). Without this - cases where LOCK_SH get upgraded to LOCK_EX
-                    # will result in a deadlock on the same PID, unless scope of LOCK_SH call and LOCK_EX call
-                    # are the same.
-                    my $ind = 0;
-                    my @backup;
-
-                    while( $ind != $candidate_replace_ind )
-                    {
-                        push( @backup, shift( @$XID_MAP ) );
-                        $ind++;
-                    }
-
-                    shift( @$XID_MAP ); # throw away from sh,
-                    unshift(
-                        @$XID_MAP,
-                        {
-                            snapshot => $snapshot,
-                            xid      => $new_xid,
-                            in_use   => [],
-                        }
-                    ); # replace tossed element in-place
-
-                    while( scalar( @backup ) > 0 )
-                    {
-                        unshift( @$XID_MAP, pop( @backup ) );
-                    }
-
+                    $XID_MAP->[$candidate_replace_ind] = {
+                        snapshot => $snapshot,
+                        xid      => $new_xid,
+                        in_use   => [],
+                    };
+                    writemem( $XID_KEY, $XID_MAP );
                     $local_xid_map->{$new_xid} = $replace_handle;
+
+                    do_lock( $XID_KEY, $WRITE_TO_READ );
                 }
             }
-
-            tied( $XID_MAP )->shunlock();
+            do_lock( $XID_KEY, $READ_UNLOCK );
             $xid_map_spread_ind++;
+        }
+        
+        if( $TIMING )
+        {
+            my $xid_delta = tv_interval( $xid_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "XID management took $xid_delta seconds" );
         }
 
         if( !$first_loop_done && $REFRESH_ON_START )
         {
-            tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+            do_lock( $WS_KEY, $WRITE_LOCK );
+            $WORKER_STATUSES = readmem( $WS_KEY );
             foreach my $w_pid( keys %$WORKER_STATUSES )
             {
                 $WORKER_STATUSES->{$w_pid}->{replace} = 1;
             }
-            tied( $WORKER_STATUSES )->shunlock();
+
+            writemem( $WS_KEY, $WORKER_STATUSES );
+            do_lock( $WS_KEY, $WRITE_UNLOCK );
             # first iteration - lets command all workers to rebuild
         }
         # Each loop we determine what LSN we can seek to, if any, and seek to that point
 
         my $seekable_lsn;
         ## CACHE TABLE MANAGEMENT
+        $worker_check_start = [ gettimeofday() ] if( $TIMING );
         my $tmp_worker_data = {};
         $tmp_worker_data    = populate_worker_data(
             $handle,
@@ -661,9 +610,14 @@ sub parent_loop($$$)
         my $diff = {};
         # Worker management - handle new / changed / removed definitions
         # Note that workers themselves will handle changes in definitions
-        # TODO: Verify filter tables is getting set correctly.
-        if( defined( $WORKER_DATA ) && defined( $tmp_worker_data ) )
+        
+        if(
+                scalar( keys %$tmp_worker_data ) != $last_worker_count # Oneshot skips expensive diff
+             && defined( $WORKER_DATA )
+             && defined( $tmp_worker_data )
+          )
         {
+            $last_worker_count = scalar( keys %$tmp_worker_data );
             $diff = check_for_new_cache_tables(
                 $handle,
                 $WORKER_DATA,
@@ -690,10 +644,14 @@ sub parent_loop($$$)
                 foreach my $pk_maintenance_object( keys %{$diff->{old}} )
                 {
                     my $target_pid = $worker_mapping->{$pk_maintenance_object};
-                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                    _log( $LOG_LEVEL_DEBUG, "Parent terminating child $target_pid" );
-                    $WORKER_STATUSES->{$target_pid}->{shutdown} = 1;
-                    tied( $WORKER_STATUSES )->shunlock();
+                    if( update_status( { shutdown => 1 }, $target_pid ) )
+                    {
+                        _log( $LOG_LEVEL_DEBUG, "Parent terminating child $target_pid" );
+                    }
+                    else
+                    {
+
+                    }
                     # Unlock, wait for child to exit
                     my $kid;
 
@@ -707,9 +665,11 @@ sub parent_loop($$$)
                     waitpid( $target_pid, 0 );  # reap child
                     _log( $LOG_LEVEL_DEBUG, "Child $target_pid exited!" );
                     delete( $worker_mapping->{$pk_maintenance_object} );
-                    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+                    do_lock( $WFT_KEY, $WRITE_LOCK );
+                    $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
                     delete( $WORKER_FILTER_TABLES->{$target_pid} ); ## this may leak shm
-                    tied( $WORKER_FILTER_TABLES )->shunlock();
+                    writemem( $WFT_KEY, $WORKER_FILTER_TABLES );
+                    do_lock( $WFT_KEY, $WRITE_UNLOCK );
                 }
 
                 # Add new children
@@ -756,8 +716,8 @@ sub parent_loop($$$)
                     elsif( defined( $child_pid ) and $child_pid > 0 )
                     {
                         $worker_mapping->{$pk_maintenance_object} = $child_pid;
-                        tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-
+                        do_lock( $WFT_KEY, $WRITE_LOCK );
+                        $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
                         foreach my $filter_table( @$filter_tables )
                         {
                             if( !defined( $WORKER_FILTER_TABLES->{$child_pid}->{$filter_table} ) )
@@ -768,13 +728,19 @@ sub parent_loop($$$)
                             # changes relevent to said changes will be pushed into this queue
                             # by the parent and popped later by the workers
                         }
-                        tied( $WORKER_FILTER_TABLES )->shunlock();
-
-                        $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
-                        $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
-                        $WORKER_STATUSES->{$child_pid}->{last_lsn}           = undef;
-                        $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
-                        $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
+                        writemem( $WFT_KEY, $WORKER_FILTER_TABLES );
+                        do_lock( $WFT_KEY, $WRITE_UNLOCK );
+                        update_status(
+                            {
+                                status             => $WORKER_STATUS_STARTUP,
+                                shutdown           => 0,
+                                last_lsn           => undef,
+                                maintenance_object => $pk_maintenance_object,
+                                name               => $ct_name,
+                                replace            => 0,
+                            },
+                            $child_pid
+                        );
                         _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
                     }
                     else
@@ -787,14 +753,18 @@ sub parent_loop($$$)
                 $handle = &db_connect( $handle );
             }
         }
-
+        
+        if( $TIMING )
+        {
+            my $worker_check_delta = tv_interval( $worker_check_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "Worker check took $worker_check_delta seconds" );
+        }
 
         ## CHANGE MANAGEMENT
         ##==================
 
         my $num_in_flight_changes   = 0; # number of changes we're queueing
         my $num_outstanding_changes = 0; # number of changes we've queued previously
-        my $WT_LOCKED               = 0;
 
         ### LSN / Change Management
         ###========================
@@ -811,6 +781,7 @@ sub parent_loop($$$)
         # calls to get_current_lsn and replication_peek()
 
         $last_current_lsn = &get_current_lsn( $handle );
+        $peek_start = [ gettimeofday() ] if( $TIMING );
         $data = &replication_peek(
             $handle,
             $all_filter_tables,
@@ -818,23 +789,24 @@ sub parent_loop($$$)
             \$last_peeked_lsn
         );
 
+        if( $TIMING )
+        {
+            my $peek_delta = tv_interval( $peek_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "Peek took $peek_delta seconds" );
+            $dist_start = [ gettimeofday() ];
+        }
         #_log( $LOG_LEVEL_DEBUG, "Peeking done - last $last_peeked_lsn" ) if( $last_peeked_lsn );
 
         if( $data )
         {
             # iterate over each change in outer loop - one change may go to one or more workers
             _log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
+            do_lock( $WFT_KEY, $WRITE_LOCK );
+            $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
+
             foreach my $change( @$data )
             {
                 $num_in_flight_changes++;
-                if( !$WT_LOCKED )
-                {
-                    my $lock_time = [ gettimeofday() ];
-                    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-                    $WT_LOCKED = 1;
-                    my $lock_delta = tv_interval( $lock_time, [ gettimeofday() ] );
-                }
-
                 foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
                 {
                     my $filter_table = $change->{data}->{schema_name} . '.' . $change->{data}->{table_name};
@@ -873,6 +845,9 @@ sub parent_loop($$$)
                 }
             }
 
+            writemem( $WFT_KEY, $WORKER_FILTER_TABLES );
+            do_lock( $WFT_KEY, $WRITE_UNLOCK );
+
             _log( $LOG_LEVEL_DEBUG, "All changes dispatched" );
 
             # These are changes that are still considered in-flight
@@ -892,28 +867,34 @@ sub parent_loop($$$)
             }
         }
 
-        # Idle WT check
-        # Note there is a lot of contention here, possibly consider moving to a different shm segment or maintaining a counter?
-        if( !$WT_LOCKED )
+        if( $TIMING )
         {
-            tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH | LOCK_NB );
-            $WT_LOCKED = 1;
+            my $dist_delta = tv_interval( $dist_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "Change distribution took $dist_delta seconds" );
+            $idle_check_start = [ gettimeofday() ];
         }
 
+        # Idle WT check
+        # Note there is a lot of contention here, possibly consider moving to a different shm segment or maintaining a counter?
+        do_lock( $WFT_KEY, $READ_LOCK );
+        $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
         foreach my $pid( keys %$WORKER_FILTER_TABLES )
         {
             $num_outstanding_changes += $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY};
         }
-
-        if( $WT_LOCKED )
-        {
-            tied( $WORKER_FILTER_TABLES )->shunlock();
-            $WT_LOCKED = 0;
-        }
+        do_lock( $WFT_KEY, $READ_UNLOCK );
         # Get worker applied LSNs and ack up to the smallest LSN
+        if( $TIMING )
+        {
+            my $idle_check_delta = tv_interval( $idle_check_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "Idle WFT check took $idle_check_delta seconds" );
+        }
 
+        # Determine each workers last lsn and copy over to worker_lsns
+        $worker_last_lsn_start = [ gettimeofday() ] if( $TIMING );
         my $worker_lsns = {};
-        tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB );
+        do_lock( $WS_KEY, $READ_LOCK );
+        $WORKER_STATUSES = readmem( $WS_KEY );
         foreach my $pid( keys( %$WORKER_STATUSES ) )
         {
             if(
@@ -924,13 +905,18 @@ sub parent_loop($$$)
                 $worker_lsns->{$pid} = $WORKER_STATUSES->{$pid}->{last_lsn};
             }
         }
+        do_lock( $WS_KEY, $READ_UNLOCK );
 
-        tied( $WORKER_STATUSES )->shunlock();
+        if( $TIMING )
+        {
+            my $worker_last_lsn_delta = tv_interval( $worker_last_lsn_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "Worker last LSN check took $worker_last_lsn_delta seconds" );
+        }
 
+        $youngest_lsn_proc_start  = [ gettimeofday() ] if( $TIMING );
         # maintain dispatched_changes list relative to last_lsn reported by each worker.
         # Post this loop, dispatched_changes will reflect outstanding lsn changes for each worker
         # meaning that we cannot seek past the youngest lsn
-
         my $youngest_in_flight_lsn;
 
         foreach my $pid( keys %$worker_lsns )
@@ -989,6 +975,11 @@ sub parent_loop($$$)
             }
         }
 
+        if( $TIMING )
+        {
+            my $youngest_lsn_proc_delta = tv_interval( $youngest_lsn_proc_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "Youngest LSN processing took $youngest_lsn_proc_delta seconds" );
+        }
         ## LSN increment logic
         ##====================
 
@@ -997,6 +988,7 @@ sub parent_loop($$$)
         # we set it to last_peeked_lsn so that we have a consistent LSN to seek
         # to during idle times.
 
+        $lsn_increment_start = [ gettimeofday() ] if( $TIMING );
         if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
         {
             if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
@@ -1013,23 +1005,7 @@ sub parent_loop($$$)
             }
         }
 
-        #_log(
-        #    $LOG_LEVEL_DEBUG,
-        #    "In-flight: $num_in_flight_changes, "
-        #  . "Outstanding: $num_outstanding_changes"
-        #);
-
         $seekable_lsn = $max_idle_lsn;
-
-        #if( $last_seeked_lsn )
-        #{
-        #    _log( $LOG_LEVEL_DEBUG, "Last SEEK: $last_seeked_lsn" );
-        #}
-
-        #if( $max_idle_lsn )
-        #{
-        #    _log( $LOG_LEVEL_DEBUG, "Max IDLE: $max_idle_lsn" );
-        #}
 
         # Safety check - CANNOT seek past any in-flight change
         if(
@@ -1058,9 +1034,14 @@ sub parent_loop($$$)
                 $last_seeked_lsn = $seekable_lsn;
             }
         }
-
+        
+        if( $TIMING )
+        {
+            my $lsn_increment_delta = tv_interval( $lsn_increment_start, [ gettimeofday() ] );
+            _log( $LOG_LEVEL_DEBUG, "LSN increment logic took $lsn_increment_delta seconds" );
+        }
+        
         select( undef, undef, undef, $SLEEP_TIMER );
-
         $first_loop_done = 1;
 
         ## WORKER HEALTH CHECKS
@@ -1182,31 +1163,20 @@ sub worker_entrypoint($$$$)
     my $XID_MAP = [];
 
     my $worker_pid  = $PROCESS_ID;
+    my $worker_shm_err = 0;
+    $worker_shm_err = 1 unless( get_or_create_shm( $XID_KEY ) );
+    $worker_shm_err = 1 unless( get_or_create_shm( $WS_KEY ) );
+    $worker_shm_err = 1 unless( get_or_create_shm( $WFT_KEY ) );
 
-    tie(
-        $WORKER_STATUSES,
-        'IPC::Shareable',
-        { key => 'STATUSES' }
-    );
-    tie(
-        $WORKER_FILTER_TABLES,
-        'IPC::Shareable',
-        { key => 'WORKER_FILTER_TABLES' }
-    );
-
-    if( $ENABLE_FAST_DELETE )
+    if( $worker_shm_err )
     {
-        tie(
-            $XID_MAP,
-            'IPC::Shareable',
-            { key => 'XID' }
-        );
+        _log( $LOG_LEVEL_FATAL, "Worker failed to initialize SHM segments" );
     }
 
     my $count = 0;
     my $lim   = 15;
 
-    until( tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB ) )
+    until( do_lock( $WS_KEY, $READ_NOWAIT ) )
     {
         if( $count > $lim )
         {
@@ -1222,11 +1192,12 @@ sub worker_entrypoint($$$$)
         $count++;
     }
 
-    tied( $WORKER_STATUSES )->shunlock();
-
-    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+    # we dont use update status as we're competitively transitioning WSKEY from shared read to excl write
+    do_lock( $WS_KEY, $READ_TO_WRITE );
+    $WORKER_STATUSES = readmem( $WS_KEY );
     $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
-    tied( $WORKER_STATUSES )->shunlock();
+    writemem( $WS_KEY, $WORKER_STATUSES );
+    do_lock( $WS_KEY, $WRITE_UNLOCK );
 
     my $handle = &db_connect();
 
@@ -1296,8 +1267,8 @@ sub worker_entrypoint($$$$)
             my $exit    = 0;
             my $replace = 0;
 
-            tied( $WORKER_STATUSES )->shlock( LOCK_SH );
-
+            do_lock( $WS_KEY, $READ_LOCK );
+            $WORKER_STATUSES = readmem( $WS_KEY );
             if( defined( $WORKER_STATUSES ) && defined( $WORKER_STATUSES->{$worker_pid} ) )
             {
                 if( defined( $WORKER_STATUSES->{$worker_pid}->{shutdown} ) )
@@ -1311,16 +1282,12 @@ sub worker_entrypoint($$$$)
                 }
             }
 
-            tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-            $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
-            tied( $WORKER_STATUSES )->shunlock();
+            do_lock( $WS_KEY, $READ_UNLOCK );
 
             if( defined $exit && $exit == 1 )
             {
                 _log( $LOG_LEVEL_INFO, "PID $worker_pid commanded to shutdown" );
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_EXITED;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_EXITED } );
 
                 my $dct = try_query( $handle, "DROP TABLE $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
 
@@ -1338,10 +1305,7 @@ sub worker_entrypoint($$$$)
             if( defined $replace && $replace == 1 )
             {
                 _log( $LOG_LEVEL_DEBUG, "Commanded to replace $CACHE_HASH->{name}" );
-
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_REPLACE } );
 
                 my $try_count = 0;
                 until( &replace_cache_table( $handle, $pk_maintenance_object ) )
@@ -1358,10 +1322,7 @@ sub worker_entrypoint($$$$)
                     }
                 }
 
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status}  = $WORKER_STATUS_IDLE;
-                $WORKER_STATUSES->{$worker_pid}->{replace} = 0;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
             }
 
             # check to see if definition has changed
@@ -1393,19 +1354,14 @@ sub worker_entrypoint($$$$)
                         $CACHE_HASH
                     );
 
-                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_REPLACE;
-                    tied( $WORKER_STATUSES )->shunlock();
+                    update_status( { status => $WORKER_STATUS_REPLACE } );
 
                     unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
                     {
                         _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed" );
                     }
 
-                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                    $WORKER_STATUSES->{$worker_pid}->{status}  = $WORKER_STATUS_IDLE;
-                    $WORKER_STATUSES->{$worker_pid}->{replacE} = 0;
-                    tied( $WORKER_STATUSES )->shunlock();
+                    update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
                 }
             }
 
@@ -1414,17 +1370,19 @@ sub worker_entrypoint($$$$)
             my $WAL_DATA = {};
 
             # Quickly dequeue items to hold ex lock for minimum time
-            tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-            if( !defined $WORKER_FILTER_TABLES || ref( $WORKER_FILTER_TABLES ) ne 'HASH' )
+            do_lock( $WFT_KEY, $WRITE_LOCK );
+            $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
+            my $wft_lock_try = 0;
+            while( !defined( $WORKER_FILTER_TABLES ) || ref( $WORKER_FILTER_TABLES ) ne 'HASH' )
             {
-                _log( $LOG_LEVEL_ERROR, 'WFT is not defined or not a hash!' );
-                tied( $WORKER_FILTER_TABLES )->shunlock();
+                do_lock( $WFT_KEY, $WRITE_UNLOCK );
                 sleep( 5 );
-
-                tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
-                if( !defined $WORKER_FILTER_TABLES || ref( $WORKER_FILTER_TABLES ) ne 'HASH' )
+                do_lock( $WFT_KEY, $WRITE_LOCK );
+                $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
+                $wft_lock_try++;
+                if( $wft_lock_try > 5 )
                 {
-                    tied( $WORKER_FILTER_TABLES )->shunlock();
+                    do_lock( $WFT_KEY, $WRITE_UNLOCK );
                     exit( 1 );
                 }
             }
@@ -1447,7 +1405,8 @@ sub worker_entrypoint($$$$)
                 }
             }
 
-            tied( $WORKER_FILTER_TABLES )->shunlock();
+            writemem( $WFT_KEY, $WORKER_FILTER_TABLES );
+            do_lock( $WFT_KEY, $WRITE_UNLOCK );
             my $youngest_xid;
             foreach my $filter_table( keys %$WAL_DATA )
             {
@@ -1514,9 +1473,7 @@ sub worker_entrypoint($$$$)
                 my $using_xid;
                 my $using_xid_ind;
 
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_QUERY_PARSE;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
                 my $query_parse_start = [ gettimeofday() ];
 
@@ -1546,7 +1503,8 @@ sub worker_entrypoint($$$$)
                 if( $ENABLE_FAST_DELETE )
                 {
                     # search XID_MAP for suitable XID
-                    tied( $XID_MAP )->shlock( LOCK_SH | LOCK_NB );
+                    do_lock( $XID_KEY, $READ_LOCK );
+                    $XID_MAP = readmem( $XID_KEY );
                     my $best_candidate;
                     my $best_candidate_ind;
                     my $ind = 0;
@@ -1566,33 +1524,17 @@ sub worker_entrypoint($$$$)
                     # Add our PID to the list of PIDS using this XID/snapshot combo
                     if( defined( $best_candidate ) )
                     {
-                        tied( $XID_MAP )->shlock( LOCK_EX );
                         unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
                         {
-                            my $mod_hr = $XID_MAP->[$best_candidate_ind];
-                            push( @{$mod_hr->{in_use}}, $worker_pid );
-                            $ind = 0;
-                            my @backup;
-
-                            while( $ind != $best_candidate_ind )
-                            {
-                                push( @backup, shift( @$XID_MAP ) );
-                                $ind++;
-                            }
-
-                            shift( @$XID_MAP ); # throw away from sh,
-                            unshift( @$XID_MAP, $mod_hr ); # replace tossed element in-place
-
-                            while( scalar( @backup ) > 0 )
-                            {
-                                unshift( @$XID_MAP, pop( @backup ) );
-                            }
-
+                            do_lock( $XID_KEY, $READ_TO_WRITE );
+                            push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
                             $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
                             $using_xid       = $best_candidate;
                             $using_xid_ind   = $best_candidate_ind;
                             $can_fast_delete = 1;
                             _log( $LOG_LEVEL_DEBUG, 'Found candidate XID for fast delete' );
+                            writemem( $XID_KEY, $XID_MAP );
+                            do_lock( $XID_KEY, $WRITE_TO_READ );
                         }
                     }
                     else
@@ -1605,13 +1547,11 @@ sub worker_entrypoint($$$$)
                         _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
                     }
 
-                    tied( $XID_MAP )->shunlock();
+                    do_lock( $XID_KEY, $READ_UNLOCK );
                 }
 
                 # Generate temp table containing state of rows relevent to the keys that have changed
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_TEMP_TABLE;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_TEMP_TABLE } );
                 &set_program_name( $handle, "temp table $CACHE_HASH->{name}" );
                 my $temp_table_start = [ gettimeofday() ];
                 my $temp_table       = &generate_temp_table( $handle, $query, $CACHE_HASH );
@@ -1685,33 +1625,16 @@ FD_FALLBACK:
                         undef( $aged_handle );
                     }
 
-                    tied( $XID_MAP )->shlock( LOCK_EX );
-                    my $mod_hr = $XID_MAP->[$using_xid_ind];
-                    @{$mod_hr->{in_use}} = grep { $_ ne $worker_pid } @{$mod_hr->{in_use}};
-                    my $ind     = 0;
-                    my @backup;
-
-                    while( $ind != $using_xid_ind )
-                    {
-                        push( @backup, shift( @$XID_MAP ) );
-                        $ind++;
-                    }
-
-                    shift( @$XID_MAP ); # throw away from sh,
-                    unshift( @$XID_MAP, $mod_hr ); # replace tossed element in-place
-
-                    while( scalar( @backup ) > 0 )
-                    {
-                        unshift( @$XID_MAP, pop( @backup ) );
-                    }
-                    tied( $XID_MAP )->shunlock();
+                    do_lock( $XID_KEY, $WRITE_LOCK );
+                    $XID_MAP = readmem( $XID_KEY );
+                    @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
+                    writemem( $XID_KEY, $XID_MAP );
+                    do_lock( $XID_KEY, $WRITE_UNLOCK );
                 }
 
                 if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
                 {
-                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_FAST_DELETE;
-                    tied( $WORKER_STATUSES )->shunlock();
+                    update_status( { status => $WORKER_STATUS_FAST_DELETE } );
                     &set_program_name( $handle, "fast delete $CACHE_HASH->{name}" );
                     &set_program_name( $aged_handle, "fast delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
@@ -1763,26 +1686,11 @@ FD_FALLBACK:
 
                     $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
                     _log( $LOG_LEVEL_DEBUG, "Fast delete took $fast_delete_time seconds" );
-                    tied( $XID_MAP )->shlock( LOCK_EX );
-                    my $mod_hr = $XID_MAP->[$using_xid_ind];
-                    @{$mod_hr->{in_use}} = grep { $_ ne $worker_pid } @{$mod_hr->{in_use}};
-                    my $ind     = 0;
-                    my @backup;
-
-                    while( $ind != $using_xid_ind )
-                    {
-                        push( @backup, shift( @$XID_MAP ) );
-                        $ind++;
-                    }
-
-                    shift( @$XID_MAP ); # throw away from sh,
-                    unshift( @$XID_MAP, $mod_hr ); # replace tossed element in-place
-
-                    while( scalar( @backup ) > 0 )
-                    {
-                        unshift( @$XID_MAP, pop( @backup ) );
-                    }
-                    tied( $XID_MAP )->shunlock();
+                    do_lock( $XID_KEY, $WRITE_LOCK );
+                    $XID_MAP = readmem( $XID_KEY );
+                    @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
+                    writemem( $XID_KEY, $XID_MAP );
+                    do_lock( $XID_KEY, $WRITE_UNLOCK );
                     _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
                 }
 
@@ -1791,9 +1699,7 @@ FD_FALLBACK:
                 # For production use we're banking on steady-state operation
                 if( !$can_fast_delete && $xid_map_size == $MAX_XID_LENGTH )
                 {
-                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_SLOW_DELETE;
-                    tied( $WORKER_STATUSES )->shunlock();
+                    update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
 
                     &set_program_name( $handle, "slow delete $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
@@ -1816,9 +1722,7 @@ FD_FALLBACK:
                     _log( $LOG_LEVEL_DEBUG, "Slow delete took $slow_delete_time seconds" );
                 }
 
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_UPDATE;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_UPDATE } );
                 &set_program_name( $handle, "update $CACHE_HASH->{name}" );
                 my $update_start = [ gettimeofday() ];
                 my $update_result = generate_update_statement(
@@ -1843,9 +1747,7 @@ FD_FALLBACK:
                 {
                     # We perform insert/update action with one fell swoop in generage_update_statement iff
                     # the above condition is met.
-                    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_INSERT;
-                    tied( $WORKER_STATUSES )->shunlock();
+                    update_status( { status => $WORKER_STATUS_INSERT } );
                     &set_program_name( $handle, "insert $CACHE_HASH->{name}" );
                     my $insert_start = [ gettimeofday() ];
                     my $insert_result = generate_insert_statement(
@@ -1886,10 +1788,7 @@ FD_FALLBACK:
                 &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
                 _log( $LOG_LEVEL_DEBUG, "====================== Applied $max_peeked_lsn" );
                 $max_applied_lsn = $max_peeked_lsn;
-                tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-                $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_IDLE;
-                $WORKER_STATUSES->{$worker_pid}->{last_lsn} = $max_applied_lsn;
-                tied( $WORKER_STATUSES )->shunlock();
+                update_status( { status => $WORKER_STATUS_IDLE, last_lsn => $max_applied_lsn } );
             }
 
             select( undef, undef, undef, $SLEEP_TIMER );
@@ -1907,7 +1806,6 @@ FD_FALLBACK:
 }
 
 ## MAIN PROGRAM
-
 # Parse and validate arguments
 unless( shm_pre_cleanup() )
 {
@@ -1957,6 +1855,7 @@ my $handle = &db_connect();
 
 croak( 'Could not connect to the database' ) unless( $handle );
 
+shminit( $$ );
 unless( check_extension( $handle ) )
 {
     croak( "$EXTENSION_NAME doesn't seem to be installed" );
@@ -1979,45 +1878,38 @@ undef( $handle );
 my $WORKER_FILTER_TABLES = {};
 my $WORKER_STATUSES      = {};
 my $XID_MAP              = [];
-
-tie(
-    $WORKER_FILTER_TABLES,
-    'IPC::Shareable',
-    {
-        key     => 'WORKER_FILTER_TABLES',
-        create  => 1,
-        destroy => 1,
-        limit   => 0,
-        size    => $DEFAULT_WFT_SIZE,
-    }
-);
-tie(
-    $WORKER_STATUSES,
-    'IPC::Shareable',
-    {
-        key     => 'STATUSES',
-        create  => 1,
-        destroy => 1
-    }
-);
-
-if( $ENABLE_FAST_DELETE )
+my $shm_init_err         = 0;
+unless( get_or_create_shm( $WFT_KEY ) )
 {
-    tie(
-        $XID_MAP,
-        'IPC::Shareable',
-        {
-            key     => 'XID',
-            create  => 1,
-            destroy => 1,
-        }
-    );
+    do_lock( $WFT_KEY, $WRITE_LOCK );
+    unless( writemem( $WFT_KEY, $WORKER_FILTER_TABLES ) )
+    {
+        warn "Failed to initialize worker filter tables\n";
+        $shm_init_err = 1;
+    }
+    do_lock( $WFT_KEY, $WRITE_UNLOCK );
 }
 
-if( $CLEAN_UP )
+unless( get_or_create_shm( $WS_KEY ) )
 {
-    shm_cleanup();
-    exit( 0 );
+    do_lock( $WS_KEY, $WRITE_LOCK );
+    unless( write_mem( $WS_KEY, $WORKER_STATUSES ) )
+    {
+        warn "Failed to initialize worker statuses\n";
+        $shm_init_err = 1;
+    }
+    do_lock( $WS_KEY, $WRITE_UNLOCK );
+}
+
+unless( get_or_create_shm( $XID_KEY ) )
+{
+    do_lock( $XID_KEY, $WRITE_LOCK );
+    unless( writemem( $XID_KEY, $XID_MAP ) )
+    {
+        warn "Failed to write empty xid map\n";
+        $shm_init_err = 1;
+    }
+    do_lock( $XID_KEY, $WRITE_UNLOCK );
 }
 
 # Wipe and start fresh if we crashed previously
@@ -2033,7 +1925,7 @@ if( !defined( $worker_data ) || scalar( @$worker_data ) == 0 )
 }
 else
 {
-    tied( $WORKER_STATUSES )->shlock( LOCK_EX );
+    do_lock( $WS_KEY, $WRITE_LOCK );
     foreach my $worker_entry( @$worker_data )
     {
         my $filter_tables         = $worker_entry->{filter_tables};
@@ -2056,7 +1948,7 @@ else
         elsif( defined( $child_pid ) and $child_pid > 0 )
         {
             $worker_mapping->{$pk_maintenance_object} = $child_pid;
-            tied( $WORKER_FILTER_TABLES )->shlock( LOCK_EX );
+            do_lock( $WFT_KEY, $WRITE_LOCK );
 
             $WORKER_FILTER_TABLES->{$child_pid}->{$ACTIVE_CHANGES_KEY} = 0;
             foreach my $filter_table( @$filter_tables )
@@ -2069,7 +1961,9 @@ else
                 # changes relevent to said changes will be pushed into this queue
                 # by the parent and popped later by the workers
             }
-            tied( $WORKER_FILTER_TABLES )->shunlock();
+
+            writemem( $WFT_KEY, $WORKER_FILTER_TABLES );
+            do_lock( $WFT_KEY, $WRITE_UNLOCK );
 
             $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
             $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
@@ -2087,11 +1981,12 @@ else
 
     # We've started workers, lets start processing WAL
     _log( $LOG_LEVEL_INFO, "All workers started" );
-    tied( $WORKER_STATUSES )->shunlock();
+    writemem( $WS_KEY, $WORKER_STATUSES );
+    do_lock( $WS_KEY, $WRITE_UNLOCK );
 }
 
 &set_program_name( undef, "parent process" );
-parent_loop( $WORKER_STATUSES, $WORKER_FILTER_TABLES, $worker_mapping );
+parent_loop( $worker_mapping );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
-shm_cleanup();
+do_shm_cleanup();
 exit( 0 );

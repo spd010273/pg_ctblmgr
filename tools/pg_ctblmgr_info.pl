@@ -5,12 +5,11 @@ use warnings;
 use utf8;
 
 use Params::Validate qw( :all );
-use Carp;
 use Readonly;
 use English qw( -no_match_vars );
 
 use Getopt::Std;
-use IPC::Shareable qw( :lock );
+use IPC::SysV;
 use Data::Dumper;
 use Text::Table;
 use DBI;
@@ -19,12 +18,17 @@ use FindBin;
 use lib "$FindBin::Bin/../service/lib";
 
 use Util;
+use Shm;
 Readonly my $TCP_KEEPALIVE          => 60;
 Readonly my $TCP_KEEPALIVE_INTERVAL => 5;
 Readonly my $TCP_KEEPALIVE_COUNT    => 200;
 Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 Readonly::Scalar my $EXTENSION_NAME => 'pg_ctblmgr';
 Readonly::Scalar my $SCHEMA_NAME    => 'pgctblmgr';
+Readonly my $WFT_KEY => 17783312;
+Readonly my $WS_KEY  => 17783313;
+Readonly my $XID_KEY => 17783314;
+
 Readonly::Scalar my $USAGE          => <<USAGE;
 USAGE:
  $0 [-C command -v cache_table] [ -d database -h host -U user -p port ]
@@ -169,15 +173,15 @@ sub command_rebuild($)
 
     my $WORKER_STATUSES = {};
 
-    eval { tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } ); };
-
-    if( $OS_ERROR )
-    {
-        carp( "Failed to attach to shared memory - is $EXTENSION_NAME running?\n" );
+    unless( get_or_create_shm( $WS_KEY ) )
+    {   
+        warn( "Failed to attach to shared memory - is $EXTENSION_NAME running?\n" );
         return undef;
     }
 
-    tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB );
+    do_lock( $WS_KEY, $READ_LOCK );
+    $WORKER_STATUSES = readmem( $WS_KEY );
+    do_lock( $WS_KEY, $READ_UNLOCK );
     my $found = 0;
     foreach my $child_pid( keys %$WORKER_STATUSES )
     {
@@ -192,17 +196,17 @@ sub command_rebuild($)
 
     if( $found )
     {
-        tied( $WORKER_STATUSES )->shlock( LOCK_EX );
-        $WORKER_STATUSES->{$found}->{replace} = 1;
-        tied( $WORKER_STATUSES )->shunlock();
+        do_lock( $WS_KEY, $WRITE_LOCK );
+        $WORKER_STATUSES = readmem( $WS_KEY );
+        $WORKER_STATUSES->{$found}->{replace} = 1 if( defined( $WORKER_STATUSES->{$found} ) );
+        writemem( $WS_KEY, $WORKER_STATUSES );
+        do_lock( $WS_KEY, $WRITE_UNLOCK );
         return $found;
     }
     else
     {
-        carp( "There doesn't seem to be a worker handling $cache_table\n" );
+        warn( "There doesn't seem to be a worker handling $cache_table\n" );
     }
-
-    tied( $WORKER_STATUSES )->shunlock();
 
     return undef;
 }
@@ -306,7 +310,7 @@ sub command_check($$)
 
     unless( $handle )
     {
-        carp( "Failed to connect to database\n" );
+        warn( "Failed to connect to database\n" );
         return undef;
     }
 
@@ -316,13 +320,13 @@ sub command_check($$)
 
     unless( get_cache_table_definition( $handle, $cache_table, \$def, $columns, $uniques ) )
     {
-        carp( "Cache table '$cache_table' appears to no exist\n" );
+        warn( "Cache table '$cache_table' appears to no exist\n" );
         return undef;
     }
 
     if( !defined( $def ) )
     {
-        carp( "Received empty definition for cache table '$cache_table'\n" );
+        warn( "Received empty definition for cache table '$cache_table'\n" );
         return undef;
     }
 
@@ -335,14 +339,14 @@ sub command_check($$)
 
     unless( $handle->do( "CREATE TEMP TABLE tt_ct AS( SELECT * FROM $cache_table )" ) )
     {
-        carp( "Failed to store contents of cache table '$cache_table'\n" );
+        warn( "Failed to store contents of cache table '$cache_table'\n" );
         $handle->do( 'ROLLBACK' );
         return undef;
     }
 
     unless( $handle->do( "CREATE TEMP TABLE tt_current AS( $def )" ) )
     {
-        carp( "Failed to store contents of cache table definition for '$cache_table'\n" );
+        warn( "Failed to store contents of cache table definition for '$cache_table'\n" );
         $handle->do( 'ROLLBACK' );
         return undef;
     }
@@ -379,7 +383,7 @@ END_SQL
     my $col_type_sth = $handle->prepare( $col_type_q );
     unless( $col_type_sth )
     {
-        carp( "Could not prep column type query" );
+        warn( "Could not prep column type query" );
         return undef;
     }
 
@@ -392,7 +396,7 @@ END_SQL
         $col_type_sth->bind_param( 2, $column );
         unless( $col_type_sth->execute() )
         {
-            carp( "Type check of column $column failed" );
+            warn( "Type check of column $column failed" );
             return undef;
         }
    
@@ -474,14 +478,14 @@ END_SQL
     print "Checking table validity, this may take some time.\n";
     unless( $handle->do( $check_query_left ) )
     {
-        carp( "Failed to create validation table for '$cache_table'\n" );
+        warn( "Failed to create validation table for '$cache_table'\n" );
         $handle->do( 'ROLLBACK' );
         return undef;
     }
 
     unless( $handle->do( $check_query_right ) )
     {
-        carp( "Failed to create validation table for '$cache_table'\n" );
+        warn( "Failed to create validation table for '$cache_table'\n" );
         $handle->do( 'ROLLBACK' );
         return undef;
     }
@@ -490,7 +494,7 @@ END_SQL
 
     unless( $count_sth )
     {
-        carp( "Failed to prep left count query" );
+        warn( "Failed to prep left count query" );
         $handle->do( 'ROLLBACK' );
         return undef;
     }
@@ -523,7 +527,7 @@ END_SQL
     $handle->do( 'ROLLBACK' );
     if( $count_left > 0 || $count_right > 0 )
     {
-        carp( "Failed: L: $count_left, R: $count_right" );
+        warn( "Failed: L: $count_left, R: $count_right" );
         return 0;
     }
 
@@ -580,18 +584,15 @@ sub parse_command($$;$)
 sub read_xid_map()
 {
     my $XID_MAP = [];
-    my $old_warn = $SIG{__WARN__};
-    $SIG{__WARN__} = sub { };
-    eval { tie( $XID_MAP, 'IPC::Shareable', { key => 'XID' } ); };
-    $SIG{__WARN__} = $old_warn;
-
-    if( $OS_ERROR )
+    unless( get_or_create_shm( $XID_KEY ) )
     {
-        carp( "Could not tie XID_MAP - is $EXTENSION_NAME running?\n" );
+        warn( "Could not tie XID_MAP - is $EXTENSION_NAME running?\n" );
         return undef;
     }
 
-    tied( $XID_MAP )->shlock( LOCK_SH | LOCK_NB );
+    do_lock( $XID_KEY, $READ_LOCK );
+    $XID_MAP = readmem( $XID_KEY );
+    do_lock( $XID_KEY, $READ_UNLOCK );
     my $xid_map = {};
     foreach my $elem( @$XID_MAP )
     {
@@ -607,7 +608,6 @@ sub read_xid_map()
         }
     }
 
-    tied( $XID_MAP )->shunlock();
     return $xid_map;
 }
 
@@ -615,14 +615,15 @@ sub read_worker_statuses()
 {
     my $WORKER_STATUSES = {};
 
-    eval{ tie( $WORKER_STATUSES, 'IPC::Shareable', { key => 'STATUSES' } ); };
-    if( $OS_ERROR )
+    unless( get_or_create_shm( $WS_KEY ) ) 
     {
-        carp( "Could not tie WORKER_STATUSES - is $EXTENSION_NAME running?\n" );
+        warn( "Could not tie WORKER_STATUSES - is $EXTENSION_NAME running?\n" );
         return undef;
     }
 
-    tied( $WORKER_STATUSES )->shlock( LOCK_SH | LOCK_NB );
+    do_lock( $WS_KEY, $READ_LOCK );
+    $WORKER_STATUSES = readmem( $WS_KEY );
+    do_lock( $WS_KEY, $READ_UNLOCK );
     my $worker_statuses = {};
 
     foreach my $pid( keys %$WORKER_STATUSES )
@@ -643,7 +644,6 @@ sub read_worker_statuses()
         };
     }
 
-    tied( $WORKER_STATUSES )->shunlock();
     return $worker_statuses;
 }
 
@@ -651,14 +651,15 @@ sub read_worker_filter_tables()
 {
     my $WORKER_FILTER_TABLES = {};
 
-    eval { tie( $WORKER_FILTER_TABLES, 'IPC::Shareable', { key => 'WORKER_FILTER_TABLES' } ); };
-    if( $OS_ERROR )
+    unless( get_or_create_shm( $WFT_KEY ) )
     {
-        carp( "Could not tie WORKER_FILTER_TABLES - is $EXTENSION_NAME running?\n" );
+        warn( "Could not tie WORKER_FILTER_TABLES - is $EXTENSION_NAME running?\n" );
         return undef;
     }
 
-    tied( $WORKER_FILTER_TABLES )->shlock( LOCK_SH | LOCK_NB );
+    do_lock( $WFT_KEY, $READ_LOCK );
+    $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
+    do_lock( $WFT_KEY, $READ_UNLOCK );
     my $worker_filter_tables = {};
     foreach my $pid( keys %$WORKER_FILTER_TABLES )
     {
@@ -671,7 +672,6 @@ sub read_worker_filter_tables()
         }
     }
 
-    tied( $WORKER_FILTER_TABLES )->shunlock();
     return $worker_filter_tables;
 }
 
@@ -703,8 +703,8 @@ sub print_worker_table()
     my $max_snapshot = $xid_map->{$max_xid}->{snapshot};
 
     print "XID Mapping ranges:\n";
-    print "Min: $min_xid ( $min_snapshot )\n";
-    print "Max: $max_xid ( $max_snapshot )\n";
+    print "Min: $min_xid ( $min_snapshot )\n" if( $min_xid && $min_snapshot );
+    print "Max: $max_xid ( $max_snapshot )\n" if( $max_xid && $max_snapshot );
 
     foreach my $pid( sort { $a <=> $b } keys %$worker_statuses )
     {
