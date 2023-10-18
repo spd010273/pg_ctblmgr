@@ -11,8 +11,7 @@ use warnings;
 Readonly::Scalar our $WRITE_LOCK   :Export( :MANDATORY ) => 'WL'; 
 Readonly::Scalar our $WRITE_UNLOCK :Export( :MANDATORY ) => 'WUL';
 Readonly::Scalar our $READ_LOCK    :Export( :MANDATORY ) => 'RL';
-Readonly::Scalar our $READ_UNLOCK  :Export( :MANDATORY ) => 'RUL';
-Readonly::Scalar our $READ_TO_WRITE :Export( :MANDATORY ) => 'R2W'; # upgrade a read exclusive
+Readonly::Scalar our $READ_UNLOCK  :Export( :MANDATORY ) => 'RUL'; # Read to write removed - theres a deadlock scenario
 Readonly::Scalar our $WRITE_TO_READ :Export( :MANDATORY ) => 'W2R'; # downgrade a write exclusive
 Readonly::Scalar our $READ_NOWAIT :Export( :MANDATORY ) => 'RNW';
 Readonly my $SHM_CREATE_FLAGS => IPC_EXCL | IPC_CREAT;
@@ -33,12 +32,6 @@ Readonly my $SEMOP_ARGS       => {
     ],
     $READ_UNLOCK => [
         1, -1, IPC_NOWAIT # Deassert read
-    ],
-    $READ_TO_WRITE => [
-        0, 0, 0,    # Wait for writers
-        1, -1, 0,   # Deassert read
-        1, 0, 0,    # Wait for other readers
-        0, 1, SEM_UNDO # assert write
     ],
     $WRITE_TO_READ => [
         0, -1, IPC_NOWAIT,              # Deassert write

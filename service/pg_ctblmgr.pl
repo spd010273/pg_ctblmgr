@@ -460,7 +460,9 @@ sub parent_loop($)
                         next;
                     }
 
-                    do_lock( $XID_KEY, $READ_TO_WRITE );
+                    do_lock( $XID_KEY, $READ_UNLOCK );
+                    do_lock( $XID_KEY, $WRITE_LOCK );
+                    $XID_MAP = readmem( $XID_KEY );
                     $local_xid_map->{$new_xid} = $new_handle;
                     push(
                         @$XID_MAP,
@@ -507,7 +509,9 @@ sub parent_loop($)
                         next;
                     }
 
-                    do_lock( $XID_KEY, $READ_TO_WRITE );
+                    do_lock( $XID_KEY, $READ_UNLOCK );
+                    do_lock( $XID_KEY, $WRITE_LOCK );
+                    $XID_MAP = readmem( $XID_KEY );
                     my $replace_handle = $local_xid_map->{$candidate_replace};
 
                     if( !defined( $replace_handle ) )
@@ -1193,11 +1197,8 @@ sub worker_entrypoint($$$$)
     }
 
     # we dont use update status as we're competitively transitioning WSKEY from shared read to excl write
-    do_lock( $WS_KEY, $READ_TO_WRITE );
-    $WORKER_STATUSES = readmem( $WS_KEY );
-    $WORKER_STATUSES->{$worker_pid}->{status} = $WORKER_STATUS_RUNNING;
-    writemem( $WS_KEY, $WORKER_STATUSES );
-    do_lock( $WS_KEY, $WRITE_UNLOCK );
+    do_lock( $WS_KEY, $READ_UNLOCK );
+    update_status( { status => $WORKER_STATUS_RUNNING } );
 
     my $handle = &db_connect();
 
@@ -1526,7 +1527,9 @@ sub worker_entrypoint($$$$)
                     {
                         unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
                         {
-                            do_lock( $XID_KEY, $READ_TO_WRITE );
+                            do_lock( $XID_KEY, $READ_UNLOCK );
+                            do_lock( $XID_KEY, $WRITE_LOCK );
+                            $XID_MAP = readmem( $XID_KEY );
                             push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
                             $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
                             $using_xid       = $best_candidate;
