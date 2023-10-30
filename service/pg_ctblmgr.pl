@@ -60,6 +60,7 @@ END {
     _terminate();
 }
 
+
 sub update_status($;$)
 {
     my( $info_hash, $override_pid ) = validate_pos(
@@ -76,12 +77,12 @@ sub update_status($;$)
     my $WORKER_STATUSES = readmem( $WS_KEY );
     if( defined( $WORKER_STATUSES ) )
     {
-        $WORKER_STATUSES->{$target_pid}->{status}             = $info_hash->{status}             if( $info_hash->{status} );
-        $WORKER_STATUSES->{$target_pid}->{name}               = $info_hash->{name}               if( $info_hash->{name} );
-        $WORKER_STATUSES->{$target_pid}->{maintenance_object} = $info_hash->{maintenance_object} if( $info_hash->{maintenance_object} );
-        $WORKER_STATUSES->{$target_pid}->{shutdown}           = $info_hash->{shutdown}           if( $info_hash->{shutdown} );
-        $WORKER_STATUSES->{$target_pid}->{replace}            = $info_hash->{replace}            if( $info_hash->{replace} );
-        $WORKER_STATUSES->{$target_pid}->{last_lsn}           = $info_hash->{last_lsn}           if( $info_hash->{last_lsn} );
+        $WORKER_STATUSES->{$target_pid}->{status}             = $info_hash->{status}             if( defined( $info_hash->{status} ) );
+        $WORKER_STATUSES->{$target_pid}->{name}               = $info_hash->{name}               if( defined( $info_hash->{name} ) );
+        $WORKER_STATUSES->{$target_pid}->{maintenance_object} = $info_hash->{maintenance_object} if( defined( $info_hash->{maintenance_object} ) );
+        $WORKER_STATUSES->{$target_pid}->{shutdown}           = $info_hash->{shutdown}           if( defined( $info_hash->{shutdown} ) );
+        $WORKER_STATUSES->{$target_pid}->{replace}            = $info_hash->{replace}            if( defined( $info_hash->{replace} ) );
+        $WORKER_STATUSES->{$target_pid}->{last_lsn}           = $info_hash->{last_lsn}           if( defined( $info_hash->{last_lsn} ) );
         writemem( $WS_KEY, $WORKER_STATUSES );
         $success = 1;
     }
@@ -420,7 +421,7 @@ sub parent_loop($)
     my $lsn_increment_start;
     my $idle_check_start;
     my $worker_last_lsn_start;
-
+    print Dumper( $DISTINCT_FILTER_TABLES );
     while( 1 )
     {
         ## XID CHAIN MANAGEMENT
@@ -479,6 +480,7 @@ sub parent_loop($)
                 else
                 {
                     # Replace oldest chain member
+                    _log( $LOG_LEVEL_DEBUG, "XID replace" );
                     my $candidate_replace;
                     my $candidate_replace_ind;
                     my $replace_ind = 0;
@@ -790,7 +792,8 @@ sub parent_loop($)
             $handle,
             $all_filter_tables,
             $wal_level,
-            \$last_peeked_lsn
+            \$last_peeked_lsn,
+            \$max_idle_lsn
         );
 
         if( $TIMING )
@@ -993,32 +996,33 @@ sub parent_loop($)
         # to during idle times.
 
         $lsn_increment_start = [ gettimeofday() ] if( $TIMING );
-        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
-        {
-            if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
-            {
-                _log(
-                    $LOG_LEVEL_DEBUG,
-                    "System appears idle, advancing slot to current lsn $last_current_lsn"
-                );
-                $max_idle_lsn = $last_current_lsn;
-            }
-            else
-            {
-                $max_idle_lsn = $last_peeked_lsn;
-            }
-        }
+        #if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
+        #{
+        #    if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
+        #    {
+        #        #_log(
+        #        #    $LOG_LEVEL_DEBUG,
+        #        #    "System appears idle, advancing slot to current lsn $last_current_lsn"
+        #        #);
+        #        #$max_idle_lsn = $last_current_lsn;
+        #        $max_idle_lsn = $last_peeked_lsn;
+        #    }
+        #    else
+        #    {
+        #        $max_idle_lsn = $last_peeked_lsn;
+        #    }
+        #}
 
         $seekable_lsn = $max_idle_lsn;
 
         # Safety check - CANNOT seek past any in-flight change
-        if(
-               defined( $youngest_in_flight_lsn )
-            && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
-          )
-        {
-            $seekable_lsn = $youngest_in_flight_lsn;
-        }
+        #if(
+        #       defined( $youngest_in_flight_lsn )
+        #    && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
+        #  )
+        #{
+        #    #$seekable_lsn = $youngest_in_flight_lsn;
+        #}
 
         if(
              defined( $seekable_lsn )
@@ -1028,7 +1032,9 @@ sub parent_loop($)
             )
           )
         {
+            _log( $LOG_LEVEL_DEBUG, "Seeked to $seekable_lsn" );
             my $rows = replication_seek( $handle, $seekable_lsn );
+            #my $rows = 0;
             if( $rows < 0 )
             {
                 _log( $LOG_LEVEL_DEBUG, "Logical seek to $seekable_lsn failed" );
@@ -1306,8 +1312,7 @@ sub worker_entrypoint($$$$)
             if( defined $replace && $replace == 1 )
             {
                 _log( $LOG_LEVEL_DEBUG, "Commanded to replace $CACHE_HASH->{name}" );
-                update_status( { status => $WORKER_STATUS_REPLACE } );
-
+                update_status( { status => $WORKER_STATUS_REPLACE, replace => 0 } );
                 my $try_count = 0;
                 until( &replace_cache_table( $handle, $pk_maintenance_object ) )
                 {
@@ -1322,7 +1327,8 @@ sub worker_entrypoint($$$$)
                         _log( $LOG_LEVEL_FATAL, "Aboring worker after $try_count attempt to rebuild cache table $CACHE_HASH->{name}" );
                     }
                 }
-
+                
+                $replace = 0;
                 update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
             }
 

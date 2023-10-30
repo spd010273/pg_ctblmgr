@@ -1410,16 +1410,18 @@ sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
     return;
 }
 
-sub replication_peek($$$$) :Export( :MANDATORY )
+sub replication_peek($$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $filter_tables, $wal_level, $max_lsn ) = validate_pos(
+    my( $handle, $filter_tables, $wal_level, $max_lsn, $max_idle_lsn ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => SCALAR },
         { type => SCALARREF },
+        { type => SCALARREF },
     );
 
+    print "Peeking $$max_lsn\n" if( $$max_lsn );
     my $sth;
     $handle = &db_connect( $handle );
     if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
@@ -1440,7 +1442,6 @@ sub replication_peek($$$$) :Export( :MANDATORY )
     }
 
     return 0 unless( $sth );
-
     if( $sth->rows() > 0 )
     {
         my $intermediate_data = {};
@@ -1449,11 +1450,6 @@ sub replication_peek($$$$) :Export( :MANDATORY )
         while( my $row = $sth->fetchrow_hashref() )
         {
             my $lsn  = $row->{lsn};
-            if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
-            {
-                $$max_lsn = $lsn;
-            }
-
             my $xid = $row->{xid};
             my $data;
             $data = decode_json( $row->{data} ) if( $row->{data} );
@@ -1516,18 +1512,18 @@ sub replication_peek($$$$) :Export( :MANDATORY )
 
                 $intermediate_data->{$xid}->{$type} = $out->{lsn};
             }
+            
         }
 
         $sth->finish();
-
+        my $old_max_idle = $$max_idle_lsn;
         my $out_data = [];
         # Step through transactional data and only output DML if we detect both a valid
         # BEGIN and COMMIT for the DML's XID
         foreach my $xid( @$xids )
         {
             if(
-                    exists( $intermediate_data->{$xid}->{COMMIT} )
-                 && exists( $intermediate_data->{$xid}->{BEGIN} )
+                exists( $intermediate_data->{$xid}->{COMMIT} )
               )
             {
                 if(
@@ -1538,13 +1534,27 @@ sub replication_peek($$$$) :Export( :MANDATORY )
                     foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
                     {
                         $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT};
-                        $dml->{begin_lsn}  = $intermediate_data->{$xid}->{BEGIN};
-                        push( @$out_data, $dml )
+                        if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $dml->{commit_lsn} ) < 0 )
+                        {
+                            $$max_lsn = $dml->{commit_lsn};
+                        }
+                        push( @$out_data, $dml );
+                    }
+                }
+                elsif( exists( $intermediate_data->{$xid}->{BEGIN} ) )
+                {
+                    if( lsn_cmp( $intermediate_data->{$xid}->{COMMIT}, $$max_idle_lsn ) > 0 )
+                    {
+                        $$max_idle_lsn = $intermediate_data->{$xid}->{COMMIT};
                     }
                 }
             }
         }
 
+        if( scalar( @$out_data ) > 0 )
+        {
+            $$max_idle_lsn = $old_max_idle;
+        }
         return if( scalar( @$out_data ) == 0 );
         return $out_data;
     }
@@ -2441,6 +2451,7 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     )
 END_SQL
 
+    print "$DELETE_TT_Q\n";
     my $sth = &try_query( $handle, $DELETE_TT_Q, [] );
     my $ind_ind = 0;
 
@@ -2450,6 +2461,7 @@ END_SQL
     foreach my $ind( @$index_elems )
     {
         my $stmt = "CREATE INDEX ix_${delete_tt_name}_${ind_ind} ON ${delete_tt_name}( $ind ) ";
+        print "$stmt\n";
         $ind_ind++;
         unless( &try_query( $handle, $stmt, [] ) )
         {
@@ -2476,6 +2488,7 @@ END_SQL
           WHERE $join_predicate
 END_SQL
 
+    print "$DELETE_Q\n";
     $sth = &try_query( $handle, $DELETE_Q, [] );
 
     $handle->do( "DROP TABLE IF EXISTS ${delete_tt_name}" );

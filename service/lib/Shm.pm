@@ -1,12 +1,14 @@
 package Shm;
 
+use strict;
+use warnings;
+
 use JSON::XS;
 use Readonly;
 use IPC::SysV qw( :all );
 use Perl6::Export::Attrs;
 use Params::Validate qw( :all );
-use strict;
-use warnings;
+use English qw( -no_match_vars );
 
 Readonly::Scalar our $WRITE_LOCK   :Export( :MANDATORY ) => 'WL'; 
 Readonly::Scalar our $WRITE_UNLOCK :Export( :MANDATORY ) => 'WUL';
@@ -14,37 +16,62 @@ Readonly::Scalar our $READ_LOCK    :Export( :MANDATORY ) => 'RL';
 Readonly::Scalar our $READ_UNLOCK  :Export( :MANDATORY ) => 'RUL'; # Read to write removed - theres a deadlock scenario
 Readonly::Scalar our $WRITE_TO_READ :Export( :MANDATORY ) => 'W2R'; # downgrade a write exclusive
 Readonly::Scalar our $READ_NOWAIT :Export( :MANDATORY ) => 'RNW';
+Readonly::Scalar our $WRITE_CHECK_NOWAIT :Export( :MANDATORY ) => 'WCNW';
 Readonly my $SHM_CREATE_FLAGS => IPC_EXCL | IPC_CREAT;
 Readonly my $SEM_PERM_FLAGS   => ( S_IRUSR | S_IWUSR );
 Readonly my $SHM_PERM_FLAGS   => ( S_IRUSR | S_IWUSR );
+Readonly my $PACKMOD          => 's' . do { my $foobar = eval { pack( "L!", 0 ); }; $@ ? '' : '!' } . '*';
 Readonly my $SEMOP_ARGS       => {
-    $WRITE_LOCK => [
-        0, 0, 0,    # Wait for writers
-        1, 0, 0,    # Wait for readers
-        0, 1, SEM_UNDO # Assert write
-    ],
-    $WRITE_UNLOCK => [
-        0, -1, IPC_NOWAIT # deassert write
-    ],
-    $READ_LOCK => [
-        0, 0, 0,    # Wait for writers
-        1, 1, SEM_UNDO # Assert read
-    ],
-    $READ_UNLOCK => [
-        1, -1, IPC_NOWAIT # Deassert read
-    ],
-    $WRITE_TO_READ => [
-        0, -1, IPC_NOWAIT,              # Deassert write
-        1, 1, ( IPC_NOWAIT | SEM_UNDO ) # Assert read
-    ],
-    $READ_NOWAIT => [
-        0, 0, IPC_NOWAIT,
-        1, 1, SEM_UNDO
-    ],
+    $WRITE_LOCK => pack(
+        $PACKMOD,
+        @{[
+            0, 0, 0,       # Wait for writers
+            1, 0, 0,       # Wait for readers
+            0, 1, SEM_UNDO # Assert write
+        ]}
+    ),
+    $WRITE_UNLOCK => pack(
+        $PACKMOD,
+        @{[
+            0, -1, ( SEM_UNDO | IPC_NOWAIT ) # deassert write
+        ]}
+    ),
+    $READ_LOCK => pack(
+        $PACKMOD,
+        @{[
+            0, 0, 0,        # Wait for writers
+            1, 1, SEM_UNDO  # Assert read
+        ]}
+    ),
+    $READ_UNLOCK => pack(
+        $PACKMOD,
+        @{[
+            1, -1, IPC_NOWAIT # Deassert read
+        ]}
+    ),
+    $WRITE_TO_READ => pack(
+        $PACKMOD,
+        @{[
+            0, -1, ( IPC_NOWAIT | SEM_UNDO ),              # Deassert write
+            1, 1, ( IPC_NOWAIT | SEM_UNDO ) # Assert read
+        ]}
+    ),
+    $READ_NOWAIT => pack(
+        $PACKMOD,
+        @{[
+            0, 0, IPC_NOWAIT,
+            1, 1, SEM_UNDO
+        ]}
+    ),
+    $WRITE_CHECK_NOWAIT => pack(
+        $PACKMOD,
+        @{[
+            0, 0, IPC_NOWAIT,
+        ]}
+    ),
 };
 
-Readonly my $PACKMOD => do { my $foobar = eval { pack( "L!", 0 ); }; $@ ? '' : '!' };
-Readonly my $DEFAULT_ALLOCSIZE => 65536;
+Readonly my $DEFAULT_ALLOCSIZE => 256;
 ## structure is {SEM/SHM ID}->{ sem => semget key, shm => shmget key }
 my $ACTIVE_KEYS = {};
 my $_PARENT_PID;
@@ -90,6 +117,8 @@ sub do_lock($$) :Export( :MANDATORY )
         { type => SCALAR },
     );
 
+    my $old_pk_name = $PROGRAM_NAME;
+    $PROGRAM_NAME = "$mode $id ($ACTIVE_KEYS->{$id}->{sem})";
     my $area_info = { };
     if( !defined( $ACTIVE_KEYS->{$id} ) )
     {
@@ -101,8 +130,9 @@ sub do_lock($$) :Export( :MANDATORY )
         $area_info = $ACTIVE_KEYS->{$id};
     }
 
-    my $lockdata = pack( "s$PACKMOD*", @{$SEMOP_ARGS->{$mode}} );
-    return semop( $area_info->{sem}, $lockdata );
+    my $ret = semop( $area_info->{sem}, $SEMOP_ARGS->{$mode} );
+    $PROGRAM_NAME = $old_pk_name;
+    return $ret;
 }
 
 sub stat_shm($)
@@ -115,17 +145,28 @@ sub stat_shm($)
     my $shm_stat = '';
     if( defined( $ACTIVE_KEYS->{$id} ) )
     {
-        unless( shmctl( $ACTIVE_KEYS->{$id}, IPC_STAT, $shm_stat ) )
+        unless( shmctl( $ACTIVE_KEYS->{$id}->{shm}, IPC_STAT, $shm_stat ) )
         {
-            warn "shmstat failed\n";
-            return 0;
+            ## try again
+            my $shmkey = shmget( $id, 0, 0 );
+
+            if( !defined( $shmkey ) )
+            {
+                warn "stat_shm(): shmget failed on $id: $!\n";
+                return 0;
+            }
+            $ACTIVE_KEYS->{$id}->{shm} = $shmkey;
+            unless( shmctl( $ACTIVE_KEYS->{$id}->{shm}, IPC_STAT, $shm_stat ) )
+            {
+                warn "shmstat failed for $id: $!\n";
+                return 0;
+            }
         }
     }
     else
     {
         my $shmkey = shmget( $id, 0, 0 );
         return 0 if( !defined( $shmkey ) );
-
         return 0 unless( shmctl( $shmkey, IPC_STAT, $shm_stat ) );
     }
 
@@ -133,14 +174,21 @@ sub stat_shm($)
     return $data[12];
 }
 
-sub get_or_create_shm($) :Export( :MANDATORY )
+sub get_or_create_shm($;$) :Export( :MANDATORY )
 {
-    my( $id ) = validate_pos(
+    my( $id, $new_size ) = validate_pos(
         @_,
-        { type => SCALAR }
+        { type => SCALAR },
+        { type => SCALAR, optional => 1 }
     );
 
-    return $ACTIVE_KEYS->{$id} if( defined( $ACTIVE_KEYS->{$id} ) );
+    if( defined( $ACTIVE_KEYS->{$id} ) )
+    {
+        # this is heavy but we need to maintain processes bookeeping info
+        $ACTIVE_KEYS->{$id}->{shm_size} = stat_shm( $id );
+        return $ACTIVE_KEYS->{$id};
+    }
+
     my $sem_key;
     my $shm_key;
     my $size = stat_shm( $id );
@@ -152,10 +200,11 @@ sub get_or_create_shm($) :Export( :MANDATORY )
     }
     else
     {
+        $size    = $DEFAULT_ALLOCSIZE;
+        $size    = $new_size if( defined( $new_size ) && $new_size > 0 );
         return undef if( !defined( $_PARENT_PID ) || $$ != $_PARENT_PID );
         $sem_key = semget( $id, 2, $SHM_CREATE_FLAGS | $SEM_PERM_FLAGS );
-        $shm_key = shmget( $id, $DEFAULT_ALLOCSIZE, $SHM_CREATE_FLAGS | $SHM_PERM_FLAGS );
-        $size    = $DEFAULT_ALLOCSIZE;
+        $shm_key = shmget( $id, $size, $SHM_CREATE_FLAGS | $SHM_PERM_FLAGS );
     }
 
     $ACTIVE_KEYS->{$id} = { sem => $sem_key, shm => $shm_key, shm_size => $size };
@@ -179,9 +228,14 @@ sub readmem($) :Export( :MANDATORY )
             return undef;
         }
         $data =~ s/\x{0}.*$// if( $data );
-        my $json = decode_json( $data ) if( $data );
+        my $json;
+        eval { $json = decode_json( $data )
+        } if( $data );
+        if( $@ )
+        {
+            warn "Error decoding shared memory segment $id: $@\n";
+        }
         return $json;
-
     }
 
     return undef;
@@ -200,6 +254,38 @@ sub writemem($$) :Export( :MANDATORY )
 
     if( $shmdata )
     {
+        my $needed_length = length( $json_string );
+        if( $needed_length + 1 >= $ACTIVE_KEYS->{$id}->{shm_size} )
+        {
+            # Need to reallocate - we are a little safer here as when readers hit the segment they
+            # attach
+            # read
+            # detach
+            # same fore writers, so we grab an exclusive lock
+            my $new_size = $ACTIVE_KEYS->{$id}->{shm_size} + $DEFAULT_ALLOCSIZE;
+            until( $new_size > $needed_length )
+            {
+                $new_size += $DEFAULT_ALLOCSIZE;
+            }
+
+            print "$$ Resizing $id to $new_size\n";
+            if( do_lock( $id, $WRITE_CHECK_NOWAIT ) == 1 )
+            {
+                warn "MEM RESIZE OCCURING WITHOUT WRITE EXCLUSIVE LOCK ON $id: $!\n";
+            }
+            shmctl( $ACTIVE_KEYS->{$id}->{shm}, IPC_RMID, 0 );
+            my $new_shm_key = shmget( $id, $new_size, $SHM_CREATE_FLAGS | $SHM_PERM_FLAGS );
+            if( $new_shm_key > 0 )
+            {
+                $ACTIVE_KEYS->{$id}->{shm} = $new_shm_key;
+                $ACTIVE_KEYS->{$id}->{shm_size} = $new_size;
+            }
+            else
+            {
+                warn "Failed to resize shm segment '$id' to '$new_size' bytes. $!\n";
+            }
+        }
+
         if( shmwrite( $ACTIVE_KEYS->{$id}->{shm}, $json_string, 0, $ACTIVE_KEYS->{$id}->{shm_size} ) )
         {
             return 1;
