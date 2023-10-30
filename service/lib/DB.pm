@@ -1423,6 +1423,10 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
 
     my $sth;
     $handle = &db_connect( $handle );
+    # Disable spurrious logging on replication seek. logical replication using our method emits
+    # INFO level, and the typically encountered WARNING/ERROR level will pass the INFO log levels
+    # which ends up spamming the crap out of logs since we are polling the slot
+    $handle->do( "SET log_min_messages = 'FATAL'" ) if( $handle );
     if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
     {
         $sth = try_query(
@@ -2407,89 +2411,59 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
+    my $sth;
     my $definition         = $cache_hash->{definition};
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
     my $table_columns      = $cache_hash->{cache_table_columns};
     my $uniques            = $cache_hash->{cache_table_uniques};
 
+    my $delete_tt_name;
     $handle->do( "SET application_name = 'delete: $cache_table_name'" );
-
-    my $join_clauses  = [];
-    my $where_clauses = [];
-    my $index_elems   = [];
+    my $DELETE_Q;
+    my $unique_uniques = [];
+    my $join_preds     = [];
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join(
-            ' AND ',
-            map { "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ) )" } @$unique_columns
-        );
-        my $where_clause = join(
-            ' AND ',
-            map { "tt.$_ IS NULL" } @$unique_columns
-        );
-
-        my $index_elem = join( ',', @$unique_columns );
-
-        push( @$join_clauses,  $join_clause  );
-        push( @$where_clauses, $where_clause );
-        push( @$index_elems,   $index_elem   );
-    }
-
-    my $delete_tt_name = "tt_base_data_${PROCESS_ID}";
-    my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
-    my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
-    my $where_clause   = '( ( ' . join( ' ) AND ( ', @$where_clauses ) . ' ) )';
-
-    my $DELETE_TT_Q = << "END_SQL";
-    CREATE TEMP TABLE ${delete_tt_name} AS
-    (
-        $definition
-    )
-END_SQL
-
-    print "$DELETE_TT_Q\n";
-    my $sth = &try_query( $handle, $DELETE_TT_Q, [] );
-    my $ind_ind = 0;
-
-    return 0 unless( $sth );
-    $sth->finish();
-
-    foreach my $ind( @$index_elems )
-    {
-        my $stmt = "CREATE INDEX ix_${delete_tt_name}_${ind_ind} ON ${delete_tt_name}( $ind ) ";
-        print "$stmt\n";
-        $ind_ind++;
-        unless( &try_query( $handle, $stmt, [] ) )
+        foreach my $unique_column( @$unique_columns )
         {
-            _log(
-                $LOG_LEVEL_ERROR,
-                "Failed to create slow delete index"
-            );
+            push( @$unique_uniques, $unique_column ) unless( grep /^$unique_column$/, @$unique_uniques );
         }
+
+        push(
+            @$join_preds,
+            join(
+                ' AND ',
+                map {
+                    "(( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ))"
+                } @$unique_columns
+            )
+        );
     }
 
-    # Create some indexes
-
-    my $DELETE_Q = <<"END_SQL";
-    WITH tt_rows_to_delete AS
-    (
-        SELECT $columns
-          FROM $cache_table_schema.$cache_table_name vw
-     LEFT JOIN $delete_tt_name tt
-            ON $join_predicate
-         WHERE $where_clause
-    )
-    DELETE FROM $cache_table_schema.$cache_table_name tt
-          USING tt_rows_to_delete vw
+    my $tt_sel = join( ',', map { "tt.$_" } @$unique_uniques );
+    my $vw_sel = join( ',', map { "vw.$_" } @$unique_uniques );
+    my $join_predicate = join( ' ) OR ( ', @$join_preds );
+    $join_predicate = '(' . $join_predicate . ')' if( scalar( @$join_preds ) > 1 );
+    $DELETE_Q = <<"END_SQL";
+WITH tt_rows_to_delete AS
+(
+    SELECT $tt_sel
+      FROM (
+               $definition
+           ) tt
+    EXCEPT
+    SELECT $vw_sel
+      FROM $cache_table_schema.$cache_table_name vw
+)
+    DELETE FROM $cache_table_schema.$cache_table_name vw
+          USING tt_rows_to_delete tt
           WHERE $join_predicate
 END_SQL
 
-    print "$DELETE_Q\n";
+    #print "$DELETE_Q\n";
     $sth = &try_query( $handle, $DELETE_Q, [] );
-
-    $handle->do( "DROP TABLE IF EXISTS ${delete_tt_name}" );
     return 0 unless( $sth );
     $sth->finish();
     return 1;

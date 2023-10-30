@@ -664,10 +664,6 @@ sub parent_loop($)
                     {
                         _log( $LOG_LEVEL_DEBUG, "Parent terminating child $target_pid" );
                     }
-                    else
-                    {
-
-                    }
                     # Unlock, wait for child to exit
                     my $kid;
 
@@ -1707,7 +1703,7 @@ FD_FALLBACK:
                 # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
                 # use slow deletes iff the XID map isn't full
                 # For production use we're banking on steady-state operation
-                if( !$can_fast_delete && $xid_map_size == $MAX_XID_LENGTH )
+                if( !$can_fast_delete && ( $xid_map_size == $MAX_XID_LENGTH || !$ENABLE_FAST_DELETE ) )
                 {
                     update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
 

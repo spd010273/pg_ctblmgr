@@ -10,7 +10,7 @@ use Perl6::Export::Attrs;
 use Params::Validate qw( :all );
 use English qw( -no_match_vars );
 
-Readonly::Scalar our $WRITE_LOCK   :Export( :MANDATORY ) => 'WL'; 
+Readonly::Scalar our $WRITE_LOCK   :Export( :MANDATORY ) => 'WL';
 Readonly::Scalar our $WRITE_UNLOCK :Export( :MANDATORY ) => 'WUL';
 Readonly::Scalar our $READ_LOCK    :Export( :MANDATORY ) => 'RL';
 Readonly::Scalar our $READ_UNLOCK  :Export( :MANDATORY ) => 'RUL'; # Read to write removed - theres a deadlock scenario
@@ -105,7 +105,7 @@ sub do_cleanup_key($) :Export( :MANDATORY )
     my $SHM_ID = shmget( $id, 0, 0 );
     $shm = shmctl( $SHM_ID, IPC_RMID, 0 ) if( $SHM_ID );
     $sem = semctl( $SEM_ID, 0, IPC_RMID, 0 ) if( $SEM_ID );
-    
+
     return;
 }
 
