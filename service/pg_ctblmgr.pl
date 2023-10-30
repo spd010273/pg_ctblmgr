@@ -43,6 +43,7 @@ Readonly my $REFRESH_ON_START   => 0;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 0.25; # seconds for main loop
 
+Readonly my $XID_START_SIZE => 768;
 Readonly my $WFT_KEY => 17783312;
 Readonly my $WS_KEY  => 17783313;
 Readonly my $XID_KEY => 17783314;
@@ -59,7 +60,6 @@ $DAEMONIZE   = 0;
 END {
     _terminate();
 }
-
 
 sub update_status($;$)
 {
@@ -391,7 +391,6 @@ sub parent_loop($)
 
     my $last_current_lsn;
     my $last_peeked_lsn;
-    my $max_peeked_lsn;
     my $max_idle_lsn;
 
     my $last_seeked_lsn;
@@ -480,7 +479,6 @@ sub parent_loop($)
                 else
                 {
                     # Replace oldest chain member
-                    _log( $LOG_LEVEL_DEBUG, "XID replace" );
                     my $candidate_replace;
                     my $candidate_replace_ind;
                     my $replace_ind = 0;
@@ -564,7 +562,19 @@ sub parent_loop($)
             do_lock( $XID_KEY, $READ_UNLOCK );
             $xid_map_spread_ind++;
         }
-        
+        else
+        {
+            if( !$first_loop_done )
+            {
+                _log( $LOG_LEVEL_INFO, "Creating replication slot: $SLOT_NAME..." );
+                if( !create_replication_slot( $handle ) )
+                {
+                    _log( $LOG_LEVEL_FATAL, "Failed to create replication slot" );
+                }
+                _log( $LOG_LEVEL_INFO ,"Slot $SLOT_NAME created!" );
+            }
+        }
+
         if( $TIMING )
         {
             my $xid_delta = tv_interval( $xid_start, [ gettimeofday() ] );
@@ -616,7 +626,7 @@ sub parent_loop($)
         my $diff = {};
         # Worker management - handle new / changed / removed definitions
         # Note that workers themselves will handle changes in definitions
-        
+
         if(
                 scalar( keys %$tmp_worker_data ) != $last_worker_count # Oneshot skips expensive diff
              && defined( $WORKER_DATA )
@@ -759,7 +769,7 @@ sub parent_loop($)
                 $handle = &db_connect( $handle );
             }
         }
-        
+
         if( $TIMING )
         {
             my $worker_check_delta = tv_interval( $worker_check_start, [ gettimeofday() ] );
@@ -996,33 +1006,21 @@ sub parent_loop($)
         # to during idle times.
 
         $lsn_increment_start = [ gettimeofday() ] if( $TIMING );
-        #if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
-        #{
-        #    if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
-        #    {
-        #        #_log(
-        #        #    $LOG_LEVEL_DEBUG,
-        #        #    "System appears idle, advancing slot to current lsn $last_current_lsn"
-        #        #);
-        #        #$max_idle_lsn = $last_current_lsn;
-        #        $max_idle_lsn = $last_peeked_lsn;
-        #    }
-        #    else
-        #    {
-        #        $max_idle_lsn = $last_peeked_lsn;
-        #    }
-        #}
 
-        $seekable_lsn = $max_idle_lsn;
-
-        # Safety check - CANNOT seek past any in-flight change
-        #if(
-        #       defined( $youngest_in_flight_lsn )
-        #    && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
-        #  )
-        #{
-        #    #$seekable_lsn = $youngest_in_flight_lsn;
-        #}
+        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
+        {
+            $seekable_lsn = $max_idle_lsn;
+        }
+        else
+        {
+            if( defined( $last_peeked_lsn ) && defined( $youngest_in_flight_lsn ) )
+            {
+                if( lsn_cmp( $last_peeked_lsn, $youngest_in_flight_lsn ) < 0 )
+                {
+                    $seekable_lsn = $last_peeked_lsn;
+                }
+            }
+        }
 
         if(
              defined( $seekable_lsn )
@@ -1044,13 +1042,13 @@ sub parent_loop($)
                 $last_seeked_lsn = $seekable_lsn;
             }
         }
-        
+
         if( $TIMING )
         {
             my $lsn_increment_delta = tv_interval( $lsn_increment_start, [ gettimeofday() ] );
             _log( $LOG_LEVEL_DEBUG, "LSN increment logic took $lsn_increment_delta seconds" );
         }
-        
+
         select( undef, undef, undef, $SLEEP_TIMER );
         $first_loop_done = 1;
 
@@ -1174,7 +1172,10 @@ sub worker_entrypoint($$$$)
 
     my $worker_pid  = $PROCESS_ID;
     my $worker_shm_err = 0;
-    $worker_shm_err = 1 unless( get_or_create_shm( $XID_KEY ) );
+    if( $ENABLE_FAST_DELETE )
+    {
+        $worker_shm_err = 1 unless( get_or_create_shm( $XID_KEY ) );
+    }
     $worker_shm_err = 1 unless( get_or_create_shm( $WS_KEY ) );
     $worker_shm_err = 1 unless( get_or_create_shm( $WFT_KEY ) );
 
@@ -1327,7 +1328,7 @@ sub worker_entrypoint($$$$)
                         _log( $LOG_LEVEL_FATAL, "Aboring worker after $try_count attempt to rebuild cache table $CACHE_HASH->{name}" );
                     }
                 }
-                
+
                 $replace = 0;
                 update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
             }
@@ -1910,15 +1911,18 @@ unless( get_or_create_shm( $WS_KEY ) )
     do_lock( $WS_KEY, $WRITE_UNLOCK );
 }
 
-unless( get_or_create_shm( $XID_KEY ) )
+if( $ENABLE_FAST_DELETE )
 {
-    do_lock( $XID_KEY, $WRITE_LOCK );
-    unless( writemem( $XID_KEY, $XID_MAP ) )
+    unless( get_or_create_shm( $XID_KEY, $XID_START_SIZE ) )
     {
-        warn "Failed to write empty xid map\n";
-        $shm_init_err = 1;
+        do_lock( $XID_KEY, $WRITE_LOCK );
+        unless( writemem( $XID_KEY, $XID_MAP ) )
+        {
+            warn "Failed to write empty xid map\n";
+            $shm_init_err = 1;
+        }
+        do_lock( $XID_KEY, $WRITE_UNLOCK );
     }
-    do_lock( $XID_KEY, $WRITE_UNLOCK );
 }
 
 # Wipe and start fresh if we crashed previously

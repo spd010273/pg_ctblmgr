@@ -36,7 +36,7 @@ Readonly::Scalar our $SQL_STATE_ADMIN_CANC       :Export( :MANDATORY ) => '57014
 Readonly::Scalar our $MAX_QUERY_RETRIES          :Export( :MANDATORY ) => 5;
 
 # Enable fast delete functionality - 1 is enable, 0 is disable
-Readonly::Scalar our $ENABLE_FAST_DELETE         :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $ENABLE_FAST_DELETE         :Export( :MANDATORY ) => 0;
 
 # Entry length for historic transaction storage. This allows fast delete to work
 Readonly::Scalar our $MAX_XID_LENGTH             :Export( :MANDATORY ) => 10;
@@ -209,9 +209,25 @@ sub lsn_cmp($$) :Export( :MANDATORY )
 {
     my( $a_lsn, $b_lsn ) = validate_pos(
         @_,
-        { type => SCALAR },
-        { type => SCALAR },
+        { type => SCALAR | UNDEF },
+        { type => SCALAR | UNDEF },
     );
+
+    if( defined( $a_lsn ) != defined( $b_lsn ) )
+    {
+        if( defined( $a_lsn ) && !defined( $b_lsn ) )
+        {
+            return 1;
+        }
+        elsif( !defined( $a_lsn ) && defined( $b_lsn ) )
+        {
+            return -1;
+        }
+    }
+    elsif( !defined( $a_lsn ) && !defined( $b_lsn ) )
+    {
+        return 0;
+    }
 
     my $a_ms = $a_lsn;
     $a_ms =~ s/\/.*$//;

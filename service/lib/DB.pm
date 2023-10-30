@@ -1421,7 +1421,6 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
         { type => SCALARREF },
     );
 
-    print "Peeking $$max_lsn\n" if( $$max_lsn );
     my $sth;
     $handle = &db_connect( $handle );
     if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
@@ -1512,7 +1511,6 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
 
                 $intermediate_data->{$xid}->{$type} = $out->{lsn};
             }
-            
         }
 
         $sth->finish();

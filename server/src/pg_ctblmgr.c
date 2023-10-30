@@ -624,7 +624,7 @@ static void pg_ctblmgr_decode_change(
         {
             // we may need to cache the index entries - though this should be
             // cached already on most databases
-            index = index_open( index_oid, ShareLock );
+            index = index_open( index_oid, AccessShareLock );
 
             for( i = 0; i < index->rd_index->indnatts; i++ )
             {
