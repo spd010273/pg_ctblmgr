@@ -268,7 +268,7 @@ sub writemem($$) :Export( :MANDATORY )
                 $new_size += $DEFAULT_ALLOCSIZE;
             }
 
-            print "$$ Resizing $id to $new_size\n";
+            #print "$$ Resizing $id to $new_size\n";
             if( do_lock( $id, $WRITE_CHECK_NOWAIT ) == 1 )
             {
                 warn "MEM RESIZE OCCURING WITHOUT WRITE EXCLUSIVE LOCK ON $id: $!\n";

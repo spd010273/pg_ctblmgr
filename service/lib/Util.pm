@@ -8,7 +8,7 @@ use English qw( -no_match_vars );
 
 $OUTPUT_AUTOFLUSH = 1;
 
-Readonly::Scalar our $DEBUG                      :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $DEBUG                      :Export( :MANDATORY ) => 0;
 Readonly::Scalar our $CLEAN_UP                   :Export( :MANDATORY ) => 0; # Emergency shm cleanup
 Readonly::Scalar our $LOG_LEVEL_FATAL            :Export( :MANDATORY ) => 5;
 Readonly::Scalar our $LOG_LEVEL_ERROR            :Export( :MANDATORY ) => 4;
@@ -33,17 +33,17 @@ Readonly::Scalar our $SQL_STATE_ADMIN_CANC       :Export( :MANDATORY ) => '57014
 
 # User globals
 # Number of times to retry a query prior to giving up and going into an error condition
-Readonly::Scalar our $MAX_QUERY_RETRIES          :Export( :MANDATORY ) => 5;
+Readonly::Scalar our $MAX_QUERY_RETRIES          :Export( :MANDATORY ) => 3;
 
 # Enable fast delete functionality - 1 is enable, 0 is disable
-Readonly::Scalar our $ENABLE_FAST_DELETE         :Export( :MANDATORY ) => 0;
+Readonly::Scalar our $ENABLE_FAST_DELETE         :Export( :MANDATORY ) => 1;
 
 # Entry length for historic transaction storage. This allows fast delete to work
 Readonly::Scalar our $MAX_XID_LENGTH             :Export( :MANDATORY ) => 10;
 
 # Soread of XID map - the larger the number, the larger the spacing between XID map entries.
 # This increases the likelyhood that long running tx's result in a fast delete
-Readonly::Scalar our $XID_MAP_SPREAD             :Export( :MANDATORY ) => 50;
+Readonly::Scalar our $XID_MAP_SPREAD             :Export( :MANDATORY ) => 100;
 
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather than one insert
 Readonly::Scalar our $BATCHED_CREATE             :Export( :MANDATORY ) => 1;
@@ -62,6 +62,9 @@ Readonly::Scalar our $OUTER_GROUPED_RELS_ONLY    :Export( :MANDATORY ) => 1;
 # we will only filter the largest relation
 Readonly::Scalar our $OUTER_FALLBACK_TO_LARGEST  :Export( :MANDATORY ) => 1;
 
+# in cases where bulk changes would apply filters to different sections of the query, do
+# not attempt to combine those filters
+Readonly::Scalar our $CONSERVATIVE_TABLE_FILTERING :Export( :MANDATORY ) => 1;
 # Globals initialized at runtime start
 our $PARENT_PID :Export( :MANDATORY ) = 0;
 our $SLOT_NAME  :Export( :MANDATORY ) = '';

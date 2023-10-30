@@ -420,7 +420,6 @@ sub parent_loop($)
     my $lsn_increment_start;
     my $idle_check_start;
     my $worker_last_lsn_start;
-    print Dumper( $DISTINCT_FILTER_TABLES );
     while( 1 )
     {
         ## XID CHAIN MANAGEMENT
