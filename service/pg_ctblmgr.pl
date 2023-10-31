@@ -1462,332 +1462,376 @@ sub worker_entrypoint($$$$)
 
             if( scalar( keys %$changes ) > 0 )
             {
-                # Timing variables
-                my $query_parse_time;
-                my $temp_table_time;
-                my $fast_delete_time;
-                my $slow_delete_time;
-                my $update_time;
-                my $insert_time;
+                my $map = {
+                    handle        => $handle,
+                    query_data    => $CACHE_HASH->{parse_tree},
+                    table_mapping => $CACHE_HASH->{table_mapping},
+                    definition    => $CACHE_HASH->{definition},
+                    relcache      => $CACHE_HASH->{relcache},
+                    filters       => $changes,
+                };
+                
+                my $where_expressions = generate_where_expressions( $map );
 
-                # Fast delete variables / flags
-                my $can_fast_delete = 0;
-                my $tried_fast_delete = 0;
-                my $using_xid;
-                my $using_xid_ind;
-
-                update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
-                _log( $LOG_LEVEL_DEBUG, "Applying changes" );
-                my $query_parse_start = [ gettimeofday() ];
-
-                my $query = &apply_filters(
-                    $handle,
-                    $CACHE_HASH->{parse_tree},
-                    $CACHE_HASH->{table_mapping},
-                    $CACHE_HASH->{definition},
-                    $CACHE_HASH->{relcache},
-                    $changes
-                );
-
-                if( !&test_query( $handle, $query ) )
+                if( scalar( keys %$where_expressions ) == 0 )
                 {
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        'Failed to apply filters to query for cache '
-                      . "table '$CACHE_HASH->{name}'"
-                    );
-                    next;
+                    _log( $LOG_LEVEL_ERROR, "No bind positions generated for $CACHE_HASH->{name} with the following changes:" );
+                    _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
                 }
 
-                $query_parse_time = tv_interval( $query_parse_start, [ gettimeofday() ] );
-                _log( $LOG_LEVEL_DEBUG, "Query parse took $query_parse_time seconds" );
-
-                my $xid_map_size = 0;
-                if( $ENABLE_FAST_DELETE )
+                # Note that we iterate over the different bind positions so that we do not accidentally logically ANDing
+                # two disparate changes together:
+                #  Example Query:
+                #  
+                #  WITH tt_foo AS
+                #  (
+                #      SELECT bar
+                #        FROM tb_bar
+                #  )
+                #      SELECT a.baz
+                #        FROM tb_baz a
+                #  INNER JOIN tt_foo b
+                #          ON b.bar = a.bar
+                #
+                # with change { tb_baz => { baz => [ 1 ] }, tb_bar => { bar => [ 5 ] } }
+                # If we naively bound all filters, we'd end up with
+                # 
+                # WITH tt_Foo AS
+                # (
+                #     SELECT bar
+                #       FROM tb_bar
+                #      WHERE tb_bar.bar = '5'::INT
+                # )
+                #     SELECT a.baz,
+                #       FROM tb_baz a
+                # INNER JOIN tt_foo b
+                #         ON b.bar = a.bar
+                #      WHERE a.baz = '1'::INT
+                foreach my $bind_position( keys %$where_expressions )
                 {
-                    # search XID_MAP for suitable XID
-                    do_lock( $XID_KEY, $READ_LOCK );
-                    $XID_MAP = readmem( $XID_KEY );
-                    my $best_candidate;
-                    my $best_candidate_ind;
-                    my $ind = 0;
+                    $map->{where_expressions}->{$bind_position} = $where_expressions->{$bind_position};
+                
 
-                    foreach my $elem( @$XID_MAP )
-                    {
-                        if( defined( $elem->{xid} ) && $elem->{xid} <= $youngest_xid )
-                        {
-                            $best_candidate = $XID_MAP->[$ind]->{xid};
-                            $best_candidate_ind = $ind;
-                        }
+                    # Timing variables
+                    my $query_parse_time;
+                    my $temp_table_time;
+                    my $fast_delete_time;
+                    my $slow_delete_time;
+                    my $update_time;
+                    my $insert_time;
 
-                        $xid_map_size++;
-                        $ind++;
-                    }
+                    # Fast delete variables / flags
+                    my $can_fast_delete = 0;
+                    my $tried_fast_delete = 0;
+                    my $using_xid;
+                    my $using_xid_ind;
 
-                    # Add our PID to the list of PIDS using this XID/snapshot combo
-                    if( defined( $best_candidate ) )
-                    {
-                        unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
-                        {
-                            do_lock( $XID_KEY, $READ_UNLOCK );
-                            do_lock( $XID_KEY, $WRITE_LOCK );
-                            $XID_MAP = readmem( $XID_KEY );
-                            push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
-                            $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
-                            $using_xid       = $best_candidate;
-                            $using_xid_ind   = $best_candidate_ind;
-                            $can_fast_delete = 1;
-                            _log( $LOG_LEVEL_DEBUG, 'Found candidate XID for fast delete' );
-                            writemem( $XID_KEY, $XID_MAP );
-                            do_lock( $XID_KEY, $WRITE_TO_READ );
-                        }
-                    }
-                    else
-                    {
-                        _log( $LOG_LEVEL_DEBUG, "Could not find candidate XID for fast delete - looking for $youngest_xid. Candidates were:" );
-                        foreach my $elem( @$XID_MAP )
-                        {
-                            _log( $LOG_LEVEL_DEBUG, "$elem->{xid}" );
-                        }
-                        _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
-                    }
+                    update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
+                    _log( $LOG_LEVEL_DEBUG, "Applying changes" );
+                    my $query_parse_start = [ gettimeofday() ];
 
-                    do_lock( $XID_KEY, $READ_UNLOCK );
-                }
+                    my $query = &apply_filters( $map );
 
-                # Generate temp table containing state of rows relevent to the keys that have changed
-                update_status( { status => $WORKER_STATUS_TEMP_TABLE } );
-                &set_program_name( $handle, "temp table $CACHE_HASH->{name}" );
-                my $temp_table_start = [ gettimeofday() ];
-                my $temp_table       = &generate_temp_table( $handle, $query, $CACHE_HASH );
-
-                if( !defined( $temp_table ) )
-                {
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        'Failed to generate temp table for updating cache '
-                      . "table '$CACHE_HASH->{name}'"
-                    );
-                    next;
-                }
-
-                $temp_table_time = tv_interval( $temp_table_start, [ gettimeofday() ] );
-                _log( $LOG_LEVEL_DEBUG, "Temp table generation took $temp_table_time seconds" );
-
-                # Setup aged handle and lock-in snapshot for looking back in time to see
-                # the state of the output relative to the changed keys.
-                if( $can_fast_delete )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
-                    # TODO, create aged_handle and SET TRANSACTION to aged_snapshot
-                    $aged_handle = &db_connect();
-
-                    $tried_fast_delete = 1;
-                    unless( $aged_handle )
-                    {
-                        $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not connect aged handle' );
-                        goto FD_FALLBACK;
-                    }
-
-                    $aged_handle->do( "SET application_name = '$EXTENSION_NAME historic $CACHE_HASH->{name}'" );
-
-                    unless( $aged_handle->do( 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ' ) )
-                    {
-                        $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not begin repeatable read transaction' );
-                        goto FD_FALLBACK;
-                    }
-
-                    unless( $aged_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" ) )
-                    {
-                        $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
-                        goto FD_FALLBACK;
-                    }
-
-                    unless( $aged_handle->do( "SET TRANSACTION SNAPSHOT '$aged_snapshot'" ) )
-                    {
-                        $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not import aged snapshot' );
-                        goto FD_FALLBACK;
-                    }
-
-                    _log(
-                        $LOG_LEVEL_DEBUG,
-                        "Established aged handle at snapshot $aged_snapshot "
-                      . "with XID $using_xid, target $youngest_xid"
-                    );
-                }
-
-FD_FALLBACK:
-                if( !$can_fast_delete && $tried_fast_delete )
-                {
-                    if( defined $aged_handle && $aged_handle->ping() > 0 )
-                    {
-                        $aged_handle->do( 'ROLLBACK' );
-                        $aged_handle->disconnect();
-                        undef( $aged_handle );
-                    }
-
-                    do_lock( $XID_KEY, $WRITE_LOCK );
-                    $XID_MAP = readmem( $XID_KEY );
-                    @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
-                    writemem( $XID_KEY, $XID_MAP );
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                }
-
-                if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
-                {
-                    update_status( { status => $WORKER_STATUS_FAST_DELETE } );
-                    &set_program_name( $handle, "fast delete $CACHE_HASH->{name}" );
-                    &set_program_name( $aged_handle, "fast delete $CACHE_HASH->{name}" );
-                    _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
-                    # Create temp table in aged handle && perform fast delete
-                    my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
-
-                    unless( $aged_temp_table )
-                    {
-                        _log( $LOG_LEVEL_ERROR, "Fast delete failed - could not create aged temp table" );
-                        $can_fast_delete   = 0;
-                        $tried_fast_delete = 1;
-                        $aged_handle->do( 'ROLLBACK' );
-                        $aged_handle->disconnect();
-                        goto FD_FALLBACK;
-                    }
-
-                    my $fast_delete_start = [ gettimeofday() ];
-                    unless(
-                        &generate_aged_delete_statement(
-                            $aged_handle,
-                            $handle,
-                            $aged_temp_table,
-                            $temp_table,
-                            $CACHE_HASH
-                        )
-                          )
-                    {
-                        _log( $LOG_LEVEL_ERROR, "Fast delete failed, falling back to slow delete" );
-                        $can_fast_delete   = 0;
-                        $tried_fast_delete = 1;
-
-                        if( $aged_handle->ping() > 0 )
-                        {
-                            $aged_handle->do( 'ROLLBACK' );
-                            $aged_handle->disconnect();
-                        }
-
-                        undef( $aged_handle );
-                        goto FD_FALLBACK;
-                    }
-
-                    # delete finished, free resources
-                    if( $aged_handle && $aged_handle->ping > 0 )
-                    {
-                        $aged_handle->do( 'ROLLBACK' );
-                        $aged_handle->disconnect();
-                        undef( $aged_handle );
-                    }
-
-                    $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
-                    _log( $LOG_LEVEL_DEBUG, "Fast delete took $fast_delete_time seconds" );
-                    do_lock( $XID_KEY, $WRITE_LOCK );
-                    $XID_MAP = readmem( $XID_KEY );
-                    @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
-                    writemem( $XID_KEY, $XID_MAP );
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
-                }
-
-                # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
-                # use slow deletes iff the XID map isn't full
-                # For production use we're banking on steady-state operation
-                if( !$can_fast_delete && ( $xid_map_size == $MAX_XID_LENGTH || !$ENABLE_FAST_DELETE ) )
-                {
-                    update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
-
-                    &set_program_name( $handle, "slow delete $CACHE_HASH->{name}" );
-                    _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
-                    my $slow_delete_start = [ gettimeofday() ];
-                    my $delete_result = generate_delete_statement(
-                        $handle,
-                        $CACHE_HASH
-                    );
-
-                    unless( $delete_result )
+                    if( !&test_query( $handle, $query ) )
                     {
                         _log(
                             $LOG_LEVEL_ERROR,
-                            "Deleting entries from $CACHE_HASH->{schema}."
-                          . "$CACHE_HASH->{name} failed"
+                            'Failed to apply filters to query for cache '
+                          . "table '$CACHE_HASH->{name}'"
                         );
                         next;
                     }
-                    $slow_delete_time = tv_interval( $slow_delete_start, [ gettimeofday() ] );
-                    _log( $LOG_LEVEL_DEBUG, "Slow delete took $slow_delete_time seconds" );
-                }
 
-                update_status( { status => $WORKER_STATUS_UPDATE } );
-                &set_program_name( $handle, "update $CACHE_HASH->{name}" );
-                my $update_start = [ gettimeofday() ];
-                my $update_result = generate_update_statement(
-                    $handle,
-                    $temp_table,
-                    $CACHE_HASH
-                );
+                    $query_parse_time = tv_interval( $query_parse_start, [ gettimeofday() ] );
+                    _log( $LOG_LEVEL_DEBUG, "Query parse took $query_parse_time seconds" );
 
-                unless( $update_result )
-                {
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        "Updating entries in $CACHE_HASH->{schema}."
-                      . "$CACHE_HASH->{name} failed"
-                    );
-                    next;
-                }
-                $update_time = tv_interval( $update_start, [ gettimeofday() ] );
-                _log( $LOG_LEVEL_DEBUG, "Update took $update_time seconds" );
+                    my $xid_map_size = 0;
+                    if( $ENABLE_FAST_DELETE )
+                    {
+                        # search XID_MAP for suitable XID
+                        do_lock( $XID_KEY, $READ_LOCK );
+                        $XID_MAP = readmem( $XID_KEY );
+                        my $best_candidate;
+                        my $best_candidate_ind;
+                        my $ind = 0;
 
-                unless( $temp_table->{count} > $BULK_ACTION_CUTOFF )
-                {
-                    # We perform insert/update action with one fell swoop in generage_update_statement iff
-                    # the above condition is met.
-                    update_status( { status => $WORKER_STATUS_INSERT } );
-                    &set_program_name( $handle, "insert $CACHE_HASH->{name}" );
-                    my $insert_start = [ gettimeofday() ];
-                    my $insert_result = generate_insert_statement(
+                        foreach my $elem( @$XID_MAP )
+                        {
+                            if( defined( $elem->{xid} ) && $elem->{xid} <= $youngest_xid )
+                            {
+                                $best_candidate = $XID_MAP->[$ind]->{xid};
+                                $best_candidate_ind = $ind;
+                            }
+
+                            $xid_map_size++;
+                            $ind++;
+                        }
+
+                        # Add our PID to the list of PIDS using this XID/snapshot combo
+                        if( defined( $best_candidate ) )
+                        {
+                            unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
+                            {
+                                do_lock( $XID_KEY, $READ_UNLOCK );
+                                do_lock( $XID_KEY, $WRITE_LOCK );
+                                $XID_MAP = readmem( $XID_KEY );
+                                push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
+                                $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
+                                $using_xid       = $best_candidate;
+                                $using_xid_ind   = $best_candidate_ind;
+                                $can_fast_delete = 1;
+                                _log( $LOG_LEVEL_DEBUG, 'Found candidate XID for fast delete' );
+                                writemem( $XID_KEY, $XID_MAP );
+                                do_lock( $XID_KEY, $WRITE_TO_READ );
+                            }
+                        }
+                        else
+                        {
+                            _log( $LOG_LEVEL_DEBUG, "Could not find candidate XID for fast delete - looking for $youngest_xid. Candidates were:" );
+                            foreach my $elem( @$XID_MAP )
+                            {
+                                _log( $LOG_LEVEL_DEBUG, "$elem->{xid}" );
+                            }
+                            _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
+                        }
+
+                        do_lock( $XID_KEY, $READ_UNLOCK );
+                    }
+
+                    # Generate temp table containing state of rows relevent to the keys that have changed
+                    update_status( { status => $WORKER_STATUS_TEMP_TABLE } );
+                    &set_program_name( $handle, "temp table $CACHE_HASH->{name}" );
+                    my $temp_table_start = [ gettimeofday() ];
+                    my $temp_table       = &generate_temp_table( $handle, $query, $CACHE_HASH );
+
+                    if( !defined( $temp_table ) )
+                    {
+                        _log(
+                            $LOG_LEVEL_ERROR,
+                            'Failed to generate temp table for updating cache '
+                          . "table '$CACHE_HASH->{name}'"
+                        );
+                        next;
+                    }
+
+                    $temp_table_time = tv_interval( $temp_table_start, [ gettimeofday() ] );
+                    _log( $LOG_LEVEL_DEBUG, "Temp table generation took $temp_table_time seconds" );
+
+                    # Setup aged handle and lock-in snapshot for looking back in time to see
+                    # the state of the output relative to the changed keys.
+                    if( $can_fast_delete )
+                    {
+                        _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
+                        # TODO, create aged_handle and SET TRANSACTION to aged_snapshot
+                        $aged_handle = &db_connect();
+
+                        $tried_fast_delete = 1;
+                        unless( $aged_handle )
+                        {
+                            $can_fast_delete = 0;
+                            _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not connect aged handle' );
+                            goto FD_FALLBACK;
+                        }
+
+                        $aged_handle->do( "SET application_name = '$EXTENSION_NAME historic $CACHE_HASH->{name}'" );
+
+                        unless( $aged_handle->do( 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ' ) )
+                        {
+                            $can_fast_delete = 0;
+                            _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not begin repeatable read transaction' );
+                            goto FD_FALLBACK;
+                        }
+
+                        unless( $aged_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" ) )
+                        {
+                            $can_fast_delete = 0;
+                            _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
+                            goto FD_FALLBACK;
+                        }
+
+                        unless( $aged_handle->do( "SET TRANSACTION SNAPSHOT '$aged_snapshot'" ) )
+                        {
+                            $can_fast_delete = 0;
+                            _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not import aged snapshot' );
+                            goto FD_FALLBACK;
+                        }
+
+                        _log(
+                            $LOG_LEVEL_DEBUG,
+                            "Established aged handle at snapshot $aged_snapshot "
+                          . "with XID $using_xid, target $youngest_xid"
+                        );
+                    }
+
+FD_FALLBACK:
+                    if( !$can_fast_delete && $tried_fast_delete )
+                    {
+                        if( defined $aged_handle && $aged_handle->ping() > 0 )
+                        {
+                            $aged_handle->do( 'ROLLBACK' );
+                            $aged_handle->disconnect();
+                            undef( $aged_handle );
+                        }
+
+                        do_lock( $XID_KEY, $WRITE_LOCK );
+                        $XID_MAP = readmem( $XID_KEY );
+                        @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
+                        writemem( $XID_KEY, $XID_MAP );
+                        do_lock( $XID_KEY, $WRITE_UNLOCK );
+                    }
+
+                    if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
+                    {
+                        update_status( { status => $WORKER_STATUS_FAST_DELETE } );
+                        &set_program_name( $handle, "fast delete $CACHE_HASH->{name}" );
+                        &set_program_name( $aged_handle, "fast delete $CACHE_HASH->{name}" );
+                        _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
+                        # Create temp table in aged handle && perform fast delete
+                        my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
+
+                        unless( $aged_temp_table )
+                        {
+                            _log( $LOG_LEVEL_ERROR, "Fast delete failed - could not create aged temp table" );
+                            $can_fast_delete   = 0;
+                            $tried_fast_delete = 1;
+                            $aged_handle->do( 'ROLLBACK' );
+                            $aged_handle->disconnect();
+                            goto FD_FALLBACK;
+                        }
+
+                        my $fast_delete_start = [ gettimeofday() ];
+                        unless(
+                            &generate_aged_delete_statement(
+                                $aged_handle,
+                                $handle,
+                                $aged_temp_table,
+                                $temp_table,
+                                $CACHE_HASH
+                            )
+                              )
+                        {
+                            _log( $LOG_LEVEL_ERROR, "Fast delete failed, falling back to slow delete" );
+                            $can_fast_delete   = 0;
+                            $tried_fast_delete = 1;
+
+                            if( $aged_handle->ping() > 0 )
+                            {
+                                $aged_handle->do( 'ROLLBACK' );
+                                $aged_handle->disconnect();
+                            }
+
+                            undef( $aged_handle );
+                            goto FD_FALLBACK;
+                        }
+
+                        # delete finished, free resources
+                        if( $aged_handle && $aged_handle->ping > 0 )
+                        {
+                            $aged_handle->do( 'ROLLBACK' );
+                            $aged_handle->disconnect();
+                            undef( $aged_handle );
+                        }
+
+                        $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
+                        _log( $LOG_LEVEL_DEBUG, "Fast delete took $fast_delete_time seconds" );
+                        do_lock( $XID_KEY, $WRITE_LOCK );
+                        $XID_MAP = readmem( $XID_KEY );
+                        @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
+                        writemem( $XID_KEY, $XID_MAP );
+                        do_lock( $XID_KEY, $WRITE_UNLOCK );
+                        _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
+                    }
+
+                    # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
+                    # use slow deletes iff the XID map isn't full
+                    # For production use we're banking on steady-state operation
+                    if( !$can_fast_delete && ( $xid_map_size == $MAX_XID_LENGTH || !$ENABLE_FAST_DELETE ) )
+                    {
+                        update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
+
+                        &set_program_name( $handle, "slow delete $CACHE_HASH->{name}" );
+                        _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
+                        my $slow_delete_start = [ gettimeofday() ];
+                        my $delete_result = generate_delete_statement(
+                            $handle,
+                            $CACHE_HASH
+                        );
+
+                        unless( $delete_result )
+                        {
+                            _log(
+                                $LOG_LEVEL_ERROR,
+                                "Deleting entries from $CACHE_HASH->{schema}."
+                              . "$CACHE_HASH->{name} failed"
+                            );
+                            next;
+                        }
+                        $slow_delete_time = tv_interval( $slow_delete_start, [ gettimeofday() ] );
+                        _log( $LOG_LEVEL_DEBUG, "Slow delete took $slow_delete_time seconds" );
+                    }
+
+                    update_status( { status => $WORKER_STATUS_UPDATE } );
+                    &set_program_name( $handle, "update $CACHE_HASH->{name}" );
+                    my $update_start = [ gettimeofday() ];
+                    my $update_result = generate_update_statement(
                         $handle,
                         $temp_table,
                         $CACHE_HASH
                     );
 
-                    unless( $insert_result )
+                    unless( $update_result )
                     {
                         _log(
                             $LOG_LEVEL_ERROR,
-                            "Inserting entries into $CACHE_HASH->{schema}."
+                            "Updating entries in $CACHE_HASH->{schema}."
                           . "$CACHE_HASH->{name} failed"
                         );
                         next;
                     }
-                    $insert_time = tv_interval( $insert_start, [ gettimeofday() ] );
-                    _log( $LOG_LEVEL_DEBUG, "Insert took $insert_time seconds" );
-                }
-                else
-                {
-                    _log( $LOG_LEVEL_DEBUG, "Fast update skipped INSERT" );
-                }
-                # If we make it here we can signal that we've applied up to
-                # $max_peeked_lsn changes Check here to see if the table
-                # definition has changed
-                unless( &drop_temp_table( $handle, $temp_table ) )
-                {
-                    _log(
-                        $LOG_LEVEL_ERROR,
-                        'Failed to drop temporary table used to maintain cache '
-                      . "table $CACHE_HASH->{schema}.$CACHE_HASH->{name}"
-                    );
-                    next;
+                    $update_time = tv_interval( $update_start, [ gettimeofday() ] );
+                    _log( $LOG_LEVEL_DEBUG, "Update took $update_time seconds" );
+
+                    unless( $temp_table->{count} > $BULK_ACTION_CUTOFF )
+                    {
+                        # We perform insert/update action with one fell swoop in generage_update_statement iff
+                        # the above condition is met.
+                        update_status( { status => $WORKER_STATUS_INSERT } );
+                        &set_program_name( $handle, "insert $CACHE_HASH->{name}" );
+                        my $insert_start = [ gettimeofday() ];
+                        my $insert_result = generate_insert_statement(
+                            $handle,
+                            $temp_table,
+                            $CACHE_HASH
+                        );
+
+                        unless( $insert_result )
+                        {
+                            _log(
+                                $LOG_LEVEL_ERROR,
+                                "Inserting entries into $CACHE_HASH->{schema}."
+                              . "$CACHE_HASH->{name} failed"
+                            );
+                            next;
+                        }
+                        $insert_time = tv_interval( $insert_start, [ gettimeofday() ] );
+                        _log( $LOG_LEVEL_DEBUG, "Insert took $insert_time seconds" );
+                    }
+                    else
+                    {
+                        _log( $LOG_LEVEL_DEBUG, "Fast update skipped INSERT" );
+                    }
+                    # If we make it here we can signal that we've applied up to
+                    # $max_peeked_lsn changes Check here to see if the table
+                    # definition has changed
+                    unless( &drop_temp_table( $handle, $temp_table ) )
+                    {
+                        _log(
+                            $LOG_LEVEL_ERROR,
+                            'Failed to drop temporary table used to maintain cache '
+                          . "table $CACHE_HASH->{schema}.$CACHE_HASH->{name}"
+                        );
+                        next;
+                    }
                 }
 
                 &set_program_name( $handle, "idle $CACHE_HASH->{name}" );

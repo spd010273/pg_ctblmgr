@@ -279,12 +279,28 @@ unless( $handle )
     die( "failed to connect\n" );
 }
 
-my $test_change = { 'public' => { 'tb_actual_time_entry' => { 'actual_time_entry' => [ 1 ] } } };
+my $test_change = { 'public' => { 'tb_actual_time_entry' => { 'actual_time_entry' => [ 1 ] }, 'tb_reset' => { 'reset' => [ 2 ] }, 'tb_reset_issue' => { 'issue' => [ 3, 4] } } };
 my $filter_tables = [ 'public.tb_reset' ];
 my $relcache = get_relcache( $handle );
 my $table_mapping = {};
 my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
 #print Dumper( $data );
 #print Dumper( $table_mapping );
-my $substituted_query = apply_filters( $handle, $data, $table_mapping, $definition, $relcache, $test_change );
-#print "$substituted_query\n";
+
+my $map = {
+    handle => $handle,
+    query_data => $data,
+    table_mapping => $table_mapping,
+    definition => $definition,
+    relcache => $relcache,
+    filters => $test_change
+};
+
+my $where_expressions = generate_where_expressions( $map );
+
+foreach my $bind_position( keys %$where_expressions )
+{
+    $map->{where_expressions}->{$bind_position} = $where_expressions->{$bind_position};
+    my $substituted_query = apply_filters( $map );
+    print "$substituted_query\n";
+}

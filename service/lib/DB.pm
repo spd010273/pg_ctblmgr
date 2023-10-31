@@ -2229,7 +2229,9 @@ END_SQL
 
     $get_type_sth->finish();
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
+    $current_handle->do( "SET client_min_messages = 'ERROR'" );
     $current_handle->do( "DROP TABLE IF EXISTS $past_temp_table" );
+    $current_handle->do( "SET client_min_messages TO DEFAULT" );
     my $temp_table_q = "CREATE TEMP TABLE $past_temp_table ( "
                      . join( ',', @$column_data_types )
                      . ' )';

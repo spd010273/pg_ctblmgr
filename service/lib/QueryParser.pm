@@ -2620,30 +2620,14 @@ END_SQL
     return $result_queries;
 }
 
-sub apply_filters($$$$$$) :Export( :MANDATORY )
+sub generate_where_expressions($) :Export( :MANDATORY )
 {
-    my(
-        $handle,
-        $query_data,
-        $table_mapping,
-        $definition,
-        $relcache,
-        $filters,
-      ) = validate_pos(
-        @_,
-        { type => OBJECT },
-        { type => HASHREF },
-        { type => HASHREF },
-        { type => SCALAR },
-        { type => HASHREF },
-        { type => HASHREF },
-    );
+    my( $map ) = validate_pos( @_, { type => HASHREF } );
 
-    # Lets use the filters we've received and search for the tables, their
-    # aliases, and the objects they are present in within the query, then
-    # attempt to modify the query such that we habe a filtered query
-    # Phase I will result in a keyed array telling us which CTE or query will
-    # need a filter applied
+    my $filters       = $map->{filters};
+    my $table_mapping = $map->{table_mapping};
+    my $handle        = $map->{handle};
+    my $relcache      = $map->{relcache};
     my $where_expressions = {};
 
     foreach my $position( keys %{$table_mapping->{BINDS}} )
@@ -2883,6 +2867,29 @@ sub apply_filters($$$$$$) :Export( :MANDATORY )
             delete( $where_expressions->{$position} );
         }
     }
+
+    return $where_expressions;
+}
+
+sub apply_filters($) :Export( :MANDATORY )
+{
+    my( $map ) = validate_pos(
+        @_,
+        { type => HASHREF }
+    );
+
+    my $handle        = $map->{handle};
+    my $query_data    = $map->{query_data};
+    my $table_mapping = $map->{table_mapping};
+    my $definition    = $map->{definition};
+    my $relcache      = $map->{relcache};
+    my $filters       = $map->{filters};
+    my $where_expressions = $map->{where_expressions};
+    # Lets use the filters we've received and search for the tables, their
+    # aliases, and the objects they are present in within the query, then
+    # attempt to modify the query such that we habe a filtered query
+    # Phase I will result in a keyed array telling us which CTE or query will
+    # need a filter applied
 
     my @starts = sort { $b <=> $a } keys( %{$table_mapping->{BINDS}} );
     # Assmple where expressions structure keyed based on the bind position
