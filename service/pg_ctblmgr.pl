@@ -42,12 +42,12 @@ Readonly my $ACTIVE_CHANGES_KEY => '__ACTIVE_CHANGES__';
 Readonly my $REFRESH_ON_START   => 0;
 Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
 Readonly my $SLEEP_TIMER        => 0.25; # seconds for main loop
+Readonly my $XID_START_SIZE     => 768;
+Readonly my $WFT_KEY            => 17783312;
+Readonly my $WS_KEY             => 17783313;
+Readonly my $XID_KEY            => 17783314;
+Readonly my $TIMING             => 0;
 
-Readonly my $XID_START_SIZE => 768;
-Readonly my $WFT_KEY => 17783312;
-Readonly my $WS_KEY  => 17783313;
-Readonly my $XID_KEY => 17783314;
-Readonly my $TIMING => 0;
 our $OUTPUT_AUTOFLUSH = 1;
 our $|                = 1;
 
@@ -71,19 +71,30 @@ sub update_status($;$)
 
     my $success = 0;
     my $target_pid = $PROCESS_ID;
-    $target_pid = $override_pid if( defined $override_pid && $PARENT_PID == $PROCESS_ID );
+
+    if( defined $override_pid && $PARENT_PID == $PROCESS_ID )
+    {
+        $target_pid = $override_pid
+    }
+
     return 0 if( !defined( $info_hash ) );
+
     do_lock( $WS_KEY, $WRITE_LOCK );
+
     my $WORKER_STATUSES = readmem( $WS_KEY );
+
     if( defined( $WORKER_STATUSES ) )
     {
-        $WORKER_STATUSES->{$target_pid}->{status}             = $info_hash->{status}             if( defined( $info_hash->{status} ) );
-        $WORKER_STATUSES->{$target_pid}->{name}               = $info_hash->{name}               if( defined( $info_hash->{name} ) );
-        $WORKER_STATUSES->{$target_pid}->{maintenance_object} = $info_hash->{maintenance_object} if( defined( $info_hash->{maintenance_object} ) );
-        $WORKER_STATUSES->{$target_pid}->{shutdown}           = $info_hash->{shutdown}           if( defined( $info_hash->{shutdown} ) );
-        $WORKER_STATUSES->{$target_pid}->{replace}            = $info_hash->{replace}            if( defined( $info_hash->{replace} ) );
-        $WORKER_STATUSES->{$target_pid}->{last_lsn}           = $info_hash->{last_lsn}           if( defined( $info_hash->{last_lsn} ) );
+        my $targ = $WORKER_STATUSES->{$target_pid};
+
+        foreach my $key( keys( %$info_hash ) )
+        {
+            next unless( defined( $info_hash->{$key} ) );
+            $targ->{$key} = $info_hash->{$key};
+        }
+
         writemem( $WS_KEY, $WORKER_STATUSES );
+
         $success = 1;
     }
     else
@@ -156,7 +167,7 @@ sub _terminate(;$$$)
 
     if( @_ )
     {
-        CORE::die( @_ );
+        CORE::die( $package, $file, $line );
     }
 
     exit( 0 );
@@ -213,26 +224,25 @@ sub populate_worker_data($$)
         foreach my $worker_entry( @$worker_data )
         {
             my $pk_maintenance_object = $worker_entry->{maintenance_object};
-            my $filter_tables         = $worker_entry->{filter_tables};
+            my $target                = $WORKER_DATA->{$pk_maintenance_object};
 
-            $WORKER_DATA->{$pk_maintenance_object}->{hash} = $worker_entry->{hash};
-            $WORKER_DATA->{$pk_maintenance_object}->{name} = $worker_entry->{name};
+            $target->{hash} = $worker_entry->{hash};
+            $target->{name} = $worker_entry->{name};
         }
     }
     else
     {
-        #_log( $LOG_LEVEL_ERROR, 'Failed to get updated worker list or no workers exist' );
+        # no workers yet
         return undef;
     }
 
     return $WORKER_DATA;
 }
 
-sub check_for_new_cache_tables($$$)
+sub check_for_new_cache_tables($$)
 {
-    my( $handle, $current_workers, $new_workers ) = validate_pos(
+    my( $current_workers, $new_workers ) = validate_pos(
         @_,
-        { type => OBJECT },
         { type => HASHREF | UNDEF },
         { type => HASHREF },
     );
@@ -247,7 +257,13 @@ sub check_for_new_cache_tables($$$)
     {
         if( defined( $current_workers->{$pk_mo} ) )
         {
-            next if( $current_workers->{$pk_mo}->{hash} eq $new_workers->{$pk_mo}->{hash} );
+            if(
+                  $current_workers->{$pk_mo}->{hash}
+               eq $new_workers->{$pk_mo}->{hash}
+              )
+            {
+                next;
+            }
 
             #indicate a change to a CT
             $diff->{change}->{$pk_mo}  = $new_workers->{$pk_mo}->{name};
@@ -288,7 +304,6 @@ sub _rollback_and_disconnect($)
     return;
 }
 
-# XXX
 sub new_xid_placeholder($$$)
 {
     my( $new_handle, $new_xid, $new_snapshot ) = validate_pos(
@@ -370,14 +385,17 @@ sub parent_loop($)
     my $first_loop_done = 0;
     if( !check_extension_running( $handle ) )
     {
-        _log( $LOG_LEVEL_FATAL, "Failed to secure advisory lock in parent process" );
+        _log(
+            $LOG_LEVEL_FATAL,
+            'Failed to secure advisory lock in parent process'
+        );
     }
 
     my $local_xid_map = {};
 
     unless( $handle )
     {
-        _log( $LOG_LEVEL_FATAL, "Failed to connect to database" );
+        _log( $LOG_LEVEL_FATAL, 'Failed to connect to database' );
     }
 
     unless( check_extension_running( $handle ) )
@@ -392,9 +410,9 @@ sub parent_loop($)
     my $last_current_lsn;
     my $last_peeked_lsn;
     my $max_idle_lsn;
-
     my $last_seeked_lsn;
-    my $filter_table_lsns = {}; # contains the BEGIN lsn for each filter - the max() of all of these
+
+    # contains the BEGIN lsn for each filter - the max() of all of these
     # if the 'latest' we can safely seek to
 
     # There are two interlocks here:
@@ -634,7 +652,6 @@ sub parent_loop($)
         {
             $last_worker_count = scalar( keys %$tmp_worker_data );
             $diff = check_for_new_cache_tables(
-                $handle,
                 $WORKER_DATA,
                 $tmp_worker_data
             );
@@ -708,18 +725,14 @@ sub parent_loop($)
                     }
 
                     $worker_data            = $worker_data->[0];
-                    my $wal_level           = $worker_data->{wal_level};
                     my $filter_tables       = $worker_data->{filter_tables};
-                    my $maintenance_channel = $worker_data->{maintenance_channel};
                     my $ct_name             = $worker_data->{name};
                     my $child_pid           = fork();
 
                     if( defined( $child_pid ) and $child_pid == 0 )
                     {
                         &worker_entrypoint(
-                            $wal_level,
                             $filter_tables,
-                            $maintenance_channel,
                             $pk_maintenance_object
                         );
                         exit( 0 );
@@ -832,15 +845,6 @@ sub parent_loop($)
                         push( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}}, $change );
 
                         my $commit_lsn = $change->{commit_lsn};
-                        my $change_lsn = $change->{begin_lsn};
-
-                        if(
-                               !defined( $filter_table_lsns->{$filter_table} )
-                            || lsn_cmp( $filter_table_lsns->{$filter_table}, $change_lsn ) < 0
-                          )
-                        {
-                            $filter_table_lsns->{$filter_table} = $change_lsn;
-                        }
 
                         if( !defined( $dispatched_changes->{$pid} ) )
                         {
@@ -861,22 +865,6 @@ sub parent_loop($)
             do_lock( $WFT_KEY, $WRITE_UNLOCK );
 
             _log( $LOG_LEVEL_DEBUG, "All changes dispatched" );
-
-            # These are changes that are still considered in-flight
-            foreach my $filter_table( @$DISTINCT_FILTER_TABLES )
-            {
-                my $lsn = $filter_table_lsns->{$filter_table};
-
-                next unless( defined( $lsn ) );
-
-                if(
-                      !defined( $max_idle_lsn )
-                   || lsn_cmp( $lsn, $max_idle_lsn ) < 0
-                  )
-                {
-                    $max_idle_lsn = $lsn;
-                }
-            }
         }
 
         if( $TIMING )
@@ -1085,7 +1073,6 @@ sub worker_cache_refresh($$$$)
         $handle,
         $cache_hash->{relcache},
         $cache_hash->{definition},
-        $filter_tables,
         $cache_hash->{table_mapping}
     );
 
@@ -1143,25 +1130,20 @@ sub worker_cache_refresh($$$$)
 }
 
 ## WORKER
-sub worker_entrypoint($$$$)
+sub worker_entrypoint($$)
 {
     my(
-        $wal_level,
         $filter_tables,
-        $maintenance_channel,
         $pk_maintenance_object
       ) = validate_pos(
         @_,
-        { type => SCALAR },
         { type => ARRAYREF },
-        { type => SCALAR },
         { type => SCALAR },
     );
 
     &set_program_name( undef, "worker startup" );
     my $CACHE_HASH           = {};
     my $WORKER_FILTER_TABLES = {};
-    my $WAL_DATA;
     my $WORKER_STATUSES      = {};
     my $XID_MAP = [];
 
@@ -1470,7 +1452,7 @@ sub worker_entrypoint($$$$)
                     relcache      => $CACHE_HASH->{relcache},
                     filters       => $changes,
                 };
-                
+
                 my $where_expressions = generate_where_expressions( $map );
 
                 if( scalar( keys %$where_expressions ) == 0 )
@@ -1482,7 +1464,7 @@ sub worker_entrypoint($$$$)
                 # Note that we iterate over the different bind positions so that we do not accidentally logically ANDing
                 # two disparate changes together:
                 #  Example Query:
-                #  
+                #
                 #  WITH tt_foo AS
                 #  (
                 #      SELECT bar
@@ -1495,7 +1477,7 @@ sub worker_entrypoint($$$$)
                 #
                 # with change { tb_baz => { baz => [ 1 ] }, tb_bar => { bar => [ 5 ] } }
                 # If we naively bound all filters, we'd end up with
-                # 
+                #
                 # WITH tt_Foo AS
                 # (
                 #     SELECT bar
@@ -1507,10 +1489,19 @@ sub worker_entrypoint($$$$)
                 # INNER JOIN tt_foo b
                 #         ON b.bar = a.bar
                 #      WHERE a.baz = '1'::INT
+                my $filtered = 0;
                 foreach my $bind_position( keys %$where_expressions )
                 {
-                    $map->{where_expressions}->{$bind_position} = $where_expressions->{$bind_position};
-                
+                    if( $CONSERVATIVE_TABLE_FILTERING )
+                    {
+                        $map->{where_expressions}->{$bind_position} = $where_expressions->{$bind_position};
+                    }
+                    else
+                    {
+                        last if( $filtered );
+                        $map->{where_expressions} = $where_expressions;
+                        $filtered = 1;
+                    }
 
                     # Timing variables
                     my $query_parse_time;
@@ -1832,6 +1823,8 @@ FD_FALLBACK:
                         );
                         next;
                     }
+
+                    last unless( $CONSERVATIVE_TABLE_FILTERING );
                 }
 
                 &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
@@ -1981,8 +1974,6 @@ else
     foreach my $worker_entry( @$worker_data )
     {
         my $filter_tables         = $worker_entry->{filter_tables};
-        my $wal_level             = $worker_entry->{wal_level};
-        my $maintenance_channel   = $worker_entry->{maintenance_channel};
         my $pk_maintenance_object = $worker_entry->{maintenance_object};
         my $ct_name               = $worker_entry->{name};
         my $child_pid = fork();
@@ -1990,9 +1981,7 @@ else
         if( defined( $child_pid ) and $child_pid == 0 )
         {
             &worker_entrypoint(
-                $wal_level,
                 $filter_tables,
-                $maintenance_channel,
                 $pk_maintenance_object
             );
             exit( 0 );

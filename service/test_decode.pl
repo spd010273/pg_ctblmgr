@@ -283,7 +283,7 @@ my $test_change = { 'public' => { 'tb_actual_time_entry' => { 'actual_time_entry
 my $filter_tables = [ 'public.tb_reset' ];
 my $relcache = get_relcache( $handle );
 my $table_mapping = {};
-my $data = find_table_aliases( $handle, $relcache, $definition, $filter_tables, $table_mapping );
+my $data = find_table_aliases( $handle, $relcache, $definition, $table_mapping );
 #print Dumper( $data );
 #print Dumper( $table_mapping );
 

@@ -202,9 +202,9 @@ sub get_relcache($) :Export( :MANDATORY )
         $cache->{func}->{$schema}->{$name} = $oid if( $row->{type} eq 'f' );
         $cache->{oid}->{$oid} = { schema => $schema, name => $name };
 
-        if( $OUTER_FALLBACK_TO_LARGEST )
+        if( $OUTER_FALLBACK_TO_LARGEST && $row->{type} eq 'r' )
         {
-            $cache->{size}->{$schema}->{$name} = $size if( $row->{type} eq 'r' );
+            $cache->{size}->{$schema}->{$name} = $size;
         }
 
         if( $row->{type} eq 'p' )
@@ -335,7 +335,9 @@ sub resolve_fk($$$$)
             }
         }
     }
-    # For models with surrogate foreign keys, we expect keys to be 1:1, but using natural keys we can get odd multivariate results
+
+    # For models with surrogate foreign keys, we expect keys to be 1:1, but
+    # using natural keys we can get odd multivariate results
 
     return $fks;
 }
@@ -407,7 +409,8 @@ sub get_inheritance($$)
     my $schema = $obj_data->{schema};
     my $name   = $obj_data->{name};
 
-    # The passed-in item is assumed to be a parent of inheritence - so we need to locate all children
+    # The passed-in item is assumed to be a parent of inheritence - so we need
+    # to locate all children
     my $ret = [];
     if(
            defined( $relcache->{deps}->{$schema} )
@@ -587,8 +590,9 @@ sub get_dependent_column($$$;$)
     );
 
     # Parsed join expression to determine dependent keys
-    # For example, if we determine a relation is dependent on another (is outer join'd - right, left, or full outer)
-    # we need to determine a way to filter the temp table later, so we examine the predicate used in the outer join
+    # For example, if we determine a relation is dependent on another (is outer
+    # join'd - right, left, or full outer) we need to determine a way to filter
+    # the temp table later, so we examine the predicate used in the outer join
     # to determine which key(s) the outer table depends on. Concrete example:
     #
     #     SELECT f.baz
@@ -596,18 +600,24 @@ sub get_dependent_column($$$;$)
     #  LEFT JOIN tb_bar b
     #         ON b.bar = f.foo
     #
-    #  In this example, tb_bar is the outer relation and is dependent on tb_foo through the predicate
-    #  `ON b.bar = f.foo`. We have determined that tb_bar is dependent on tb_foo outside of this function (look where this is called)
-    #  but now  we need to examine the predicate.
+    #  In this example, tb_bar is the outer relation and is dependent on tb_foo
+    #  through the predicate `ON b.bar = f.foo`. We have determined that tb_bar
+    #  is dependent on tb_foo outside of this function (look where this is
+    #  called) but now  we need to examine the predicate.
     #
-    #  Much later in the filtering process, when we're processing changes, we may receive a change to tb_bar. We cannot filter tb_bar directly
-    #  as it is involved in an outer join. We can, however, use the nature of its join to reduce the set we'll be operating on.
-    #  We would like to filter the definition query, given a change to tb_bar, using a statement such as:
+    #  Much later in the filtering process, when we're processing changes, we
+    #  may receive a change to tb_bar. We cannot filter tb_bar directly as it
+    #  is involved in an outer join. We can, however, use the nature of its
+    #  join to reduce the set we'll be operating on. We would like to filter
+    #  the definition query, given a change to tb_bar, using a statement such
+    #  as:
     #
     #  SELECT bar AS foo FROM tb_bar WHERE <condition>
     #
-    #  We can then treat an update of one or more key(s) in tb_bar to be an update to tb_foo instead, which we can then successfully filter
-    #  without impacting the query's correctness (only the number of tuples output). This can safely be used on anti joins as well.
+    #  We can then treat an update of one or more key(s) in tb_bar to be an
+    #  update to tb_foo instead, which we can then successfully filter without
+    #  impacting the query's correctness (only the number of tuples output).
+    #  This can safely be used on anti joins as well.
 
     my $schema;
     my $table;
@@ -616,14 +626,14 @@ sub get_dependent_column($$$;$)
     {
         my @components = split( '.', $relation );
 
-        if( scalar( @components ) > 2 )
-        {
-            return; # screw this. someone used a period in their table/schema names. SELECT * FROM "try.renaming.youre"."stuff__pl.ease"
-        }
+        # Bail, someone used a period in their table/schema names IE:
+        #  SELECT * FROM "try.renaming.youre"."stuff__pl.ease"
+        return if( scalar( @components ) > 2 );
 
         if( scalar( @components ) == 2 )
         {
-            # we would have previously looked up the relation in the relcache so we should have the fully qual'd name
+            # we would have previously looked up the relation in the relcache
+            # so we should have the fully qual'd name
             $schema = shift( @components );
             $table  = shift( @components );
         }
@@ -634,14 +644,27 @@ sub get_dependent_column($$$;$)
     }
 
     my $exprs = [];
-    if( exists( $json_fragment->{args} ) && ref( $json_fragment->{args} ) eq 'ARRAY' )
+    if(
+            exists( $json_fragment->{args} )
+         && ref( $json_fragment->{args} ) eq 'ARRAY'
+      )
     {
         # compound boolean expression
         my $parsed_subexprs = [];
         foreach my $subfrag( @{$json_fragment->{args}} )
         {
-            my $subexprs = &get_dependent_column( $subfrag, $relcache, $alias, $relation );
-            if( defined $subexprs && ref( $subexprs ) eq 'ARRAY' && scalar( @$subexprs ) > 0 )
+            my $subexprs = &get_dependent_column(
+                $subfrag,
+                $relcache,
+                $alias,
+                $relation
+            );
+
+            if(
+                  defined $subexprs
+               && ref( $subexprs ) eq 'ARRAY'
+               && scalar( @$subexprs ) > 0
+              )
             {
                 push( @$parsed_subexprs, @$subexprs );
             }
@@ -650,18 +673,31 @@ sub get_dependent_column($$$;$)
         return $parsed_subexprs if( scalar( @$parsed_subexprs ) > 0 );
         return undef;
     }
-    elsif( exists( $json_fragment->{lexpr} ) && exists( $json_fragment->{rexpr} ) )
+    elsif(
+            exists( $json_fragment->{lexpr} )
+         && exists( $json_fragment->{rexpr} )
+         )
     {
-        if( !exists( $json_fragment->{name} ) || ref( $json_fragment->{name} ) ne 'ARRAY' || $json_fragment->{name}->[0] ne '=' )
+        if(
+                !exists( $json_fragment->{name} )
+             || ref( $json_fragment->{name} ) ne 'ARRAY'
+             || $json_fragment->{name}->[0] ne '='
+          )
         {
-            _log( $LOG_LEVEL_WARNING, "Failed to parse outer join predicate - no equality op" );
+            _log(
+                $LOG_LEVEL_WARNING,
+                'Failed to parse outer join predicate - no equality op'
+            );
             return;
         }
 
         my $subexpr = {};
         if( $json_fragment->{lexpr}->{name} eq 'COLUMNREF' )
         {
-            if( exists( $json_fragment->{lexpr}->{fields} ) && ref( $json_fragment->{lexpr}->{fields} ) eq 'ARRAY' )
+            if(
+                    exists( $json_fragment->{lexpr}->{fields} )
+                 && ref( $json_fragment->{lexpr}->{fields} ) eq 'ARRAY'
+              )
             {
                 $subexpr->{l} = $json_fragment->{lexpr}->{fields};
             }
@@ -669,7 +705,10 @@ sub get_dependent_column($$$;$)
 
         if( $json_fragment->{rexpr}->{name} eq 'COLUMNREF' )
         {
-            if( exists( $json_fragment->{rexpr}->{fields} ) && ref( $json_fragment->{rexpr}->{fields} ) eq 'ARRAY' )
+            if(
+                    exists( $json_fragment->{rexpr}->{fields} )
+                 && ref( $json_fragment->{rexpr}->{fields} ) eq 'ARRAY'
+              )
             {
                 $subexpr->{r} = $json_fragment->{rexpr}->{fields};
             }
@@ -681,7 +720,8 @@ sub get_dependent_column($$$;$)
         }
     }
 
-    # We've filtered down to equality ops, we hope for one or more possible comparisons IE:
+    # We've filtered down to equality ops, we hope for one or more possible
+    # comparisons IE:
     #  ...
     # LEFT JOIN tb_foo f
     #        ON f.foo = a.foo  <- exprs will contain this
@@ -712,11 +752,16 @@ sub get_dependent_column($$$;$)
                     if( scalar( @{$expr->{r}} ) == 2 )
                     {
                         #could be an alias or table name
-                        my $rel = resolve_relation( $relcache, $expr->{r}->[0] );
+                        my $rel = &resolve_relation(
+                            $relcache,
+                            $expr->{r}->[0]
+                        );
 
                         if( $rel )
                         {
-                            $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                            $parsed_expr->{other}->{rel} = $rel->{schema}
+                                                         . '.'
+                                                         . $rel->{name};
                         }
                         else
                         {
@@ -725,7 +770,9 @@ sub get_dependent_column($$$;$)
                     }
                     elsif( scalar( @{$expr->{r}} ) == 3 )
                     {
-                        $parsed_expr->{other}->{rel} = $expr->{r}->[0] . '.' . $expr->{r}->[1];
+                        $parsed_expr->{other}->{rel} = $expr->{r}->[0]
+                                                     . '.'
+                                                     . $expr->{r}->[1];
                     }
                 }
             }
@@ -741,11 +788,16 @@ sub get_dependent_column($$$;$)
 
                     if( scalar( @{$expr->{l}} ) == 2 )
                     {
-                        my $rel = resolve_relation( $relcache, $expr->{l}->[0] );
+                        my $rel = &resolve_relation(
+                            $relcache,
+                            $expr->{l}->[0]
+                        );
 
                         if( $rel )
                         {
-                            $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                            $parsed_expr->{other}->{rel} = $rel->{schema}
+                                                         . '.'
+                                                         . $rel->{name};
                         }
                         else
                         {
@@ -754,19 +806,26 @@ sub get_dependent_column($$$;$)
                     }
                     elsif( scalar( @{$expr->{l}} ) == 3 )
                     {
-                        $parsed_expr->{other}->{rel} = $expr->{l}->[0] . '.' . $expr->{l}->[1];
+                        $parsed_expr->{other}->{rel} = $expr->{l}->[0]
+                                                     . '.'
+                                                     . $expr->{l}->[1];
                     }
                 }
             }
         }
         else
         {
-            if( ( defined( $table ) && $expr->{l}->[0] eq $table ) || $expr->{l}->[0] eq $alias )
+            if(
+                  (
+                      defined( $table )
+                   && $expr->{l}->[0] eq $table
+                  )
+               || $expr->{l}->[0] eq $alias
+              )
             {
                 $parsed_expr->{outer}->{column} = $left_column;
                 $parsed_expr->{outer}->{alias}  = $alias;
                 $parsed_expr->{outer}->{rel}    = $relation if( $relation );
-
                 $parsed_expr->{other}->{column} = $right_column;
 
                 if( scalar( @{$expr->{r}} ) == 2 )
@@ -775,7 +834,9 @@ sub get_dependent_column($$$;$)
 
                     if( $rel )
                     {
-                        $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                        $parsed_expr->{other}->{rel} = $rel->{schema}
+                                                     . '.'
+                                                     . $rel->{name};
                     }
                     else
                     {
@@ -784,10 +845,18 @@ sub get_dependent_column($$$;$)
                 }
                 elsif( scalar( @{$expr->{r}} ) == 3 )
                 {
-                    $parsed_expr->{other}->{rel} = $expr->{r}->[0] . '.' . $expr->{r}->[1];
+                    $parsed_expr->{other}->{rel} = $expr->{r}->[0]
+                                                 . '.'
+                                                 . $expr->{r}->[1];
                 }
             }
-            elsif( ( defined( $table ) && $expr->{r}->[0] eq $table ) || $expr->{r}->[0] eq $alias )
+            elsif(
+                     (
+                          defined( $table )
+                       && $expr->{r}->[0] eq $table
+                     )
+                  || $expr->{r}->[0] eq $alias
+                 )
             {
                 $parsed_expr->{outer}->{column} = $right_column;
                 $parsed_expr->{outer}->{alias}  = $alias;
@@ -801,7 +870,9 @@ sub get_dependent_column($$$;$)
 
                     if( $rel )
                     {
-                        $parsed_expr->{other}->{rel} = $rel->{schema} . '.' . $rel->{name};
+                        $parsed_expr->{other}->{rel} = $rel->{schema}
+                                                     . '.'
+                                                     . $rel->{name};
                     }
                     else
                     {
@@ -810,12 +881,17 @@ sub get_dependent_column($$$;$)
                 }
                 elsif( scalar( @{$expr->{l}} ) == 3 )
                 {
-                    $parsed_expr->{other}->{rel} = $expr->{l}->[0] . '.' . $expr->{l}->[1];
+                    $parsed_expr->{other}->{rel} = $expr->{l}->[0]
+                                                 . '.'
+                                                 . $expr->{l}->[1];
                 }
             }
         }
 
-        next unless( exists( $parsed_expr->{outer} ) && exists( $parsed_expr->{other} ) );
+        next unless(
+            exists( $parsed_expr->{outer} )
+         && exists( $parsed_expr->{other} )
+        );
         push( @$parsed_exprs, $parsed_expr );
     }
 
@@ -892,22 +968,30 @@ sub get_joined_rels($$)
 
     if( defined $json_fragment && defined( $json_fragment->{larg} ) )
     {
-        # Note on handedness - left / right is reference to larg / rarg. A relation is considered outer if it is the non-inner joined side of the relation
+        # Note on handedness - left / right is reference to larg / rarg. A
+        # relation is considered outer if it is the non-inner joined side of
+        # the relation
         # IE:
         #     SELECT foo
         #       FROM tb_bar b
-        #  LEFT JOIN tb_foo f <- This is the outer relation, and would be rarg, right_is_outer would be set
+        #  LEFT JOIN tb_foo f <- This is the outer relation, and would be
+        #                        rarg, right_is_outer would be set
         #         ON b.baz = f.baz
         #
         #     SELECT foo
-        #       FROM tb_bar b <- This is the outer relation, and would be larg. left_is_outer would be set
+        #       FROM tb_bar b <- This is the outer relation, and would be
+        #                        larg. left_is_outer would be set
         # RIGHT JOIN tb_foo f
         #         ON f.baz = b.baz
-        if( defined( $json_fragment->{name} ) && $json_fragment->{name} eq 'JOINEXPR' )
+        if(
+                defined( $json_fragment->{name} )
+             && $json_fragment->{name} eq 'JOINEXPR'
+          )
         {
             if(
                   defined( $json_fragment->{jointype} )
-               && $json_fragment->{jointype} ne 'INNER' # X join Y, X natural join Y, X inner join Y
+                  # X join Y, X natural join Y, X inner join Y
+               && $json_fragment->{jointype} ne 'INNER'
               )
             {
                 # We've located an outer join'd relation(s)
@@ -932,7 +1016,11 @@ sub get_joined_rels($$)
                 }
                 else
                 {
-                    _log( $LOG_LEVEL_WARNING, "Unimplemented join type detected: $json_fragment->{jointype}" );
+                    _log(
+                        $LOG_LEVEL_WARNING,
+                        'Unimplemented join type detected: '
+                      . $json_fragment->{jointype}
+                     );
                 }
 
                 # XXX We need to figure out the join predicate
@@ -992,7 +1080,10 @@ sub get_joined_rels($$)
                     $function_alias = $json_fragment->{rarg}->{alias}->{aliasname};
                 }
 
-                if( defined( $function_call->{rarg}->{location} ) && $location < $function_call->{rarg}->{location} )
+                if(
+                        defined( $function_call->{rarg}->{location} )
+                     && $location < $function_call->{rarg}->{location}
+                  )
                 {
                     $location = $function_call->{rarg}->{location};
                 }
@@ -1009,9 +1100,13 @@ sub get_joined_rels($$)
 
                 if( $is_outer || $right_is_outer )
                 {
-                    $frag->{$function_alias}->{is_outer} = 1;
+                    $frag->{$function_alias}->{is_outer}  = 1;
                     $frag->{$function_alias}->{outer_dep} = $outer_dep;
-                    $frag->{$function_alias}->{expr} = get_dependent_column( $join_expr, $relcache, $function_alias ) if( $join_expr );
+                    $frag->{$function_alias}->{expr} = get_dependent_column(
+                        $join_expr,
+                        $relcache,
+                        $function_alias
+                    ) if( $join_expr );
                 }
 
                 push(
@@ -1083,9 +1178,14 @@ sub get_joined_rels($$)
 
                 if( $is_outer || $right_is_outer )
                 {
-                    $frag->{$alias}->{is_outer} = 1;
+                    $frag->{$alias}->{is_outer}  = 1;
                     $frag->{$alias}->{outer_dep} = $outer_dep;
-                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias, $right_relation ) if( $join_expr );
+                    $frag->{$alias}->{expr}      = get_dependent_column(
+                        $join_expr,
+                        $relcache,
+                        $alias,
+                        $right_relation
+                    ) if( $join_expr );
                 }
 
                 push(
@@ -1134,9 +1234,13 @@ sub get_joined_rels($$)
 
                 if( $is_outer || $right_is_outer )
                 {
-                    $frag->{$alias}->{is_outer} = 1;
+                    $frag->{$alias}->{is_outer}  = 1;
                     $frag->{$alias}->{outer_dep} = $outer_dep;
-                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias ) if( $join_expr );
+                    $frag->{$alias}->{expr}      = get_dependent_column(
+                        $join_expr,
+                        $relcache,
+                        $alias
+                    ) if( $join_expr );
                 }
 
                 push( @$from_list, $frag );
@@ -1215,8 +1319,8 @@ sub get_joined_rels($$)
             $$number++;
             my $frag = {
                 $function_alias => {
-                    obj => $function_name,
-                    type => 'FUNCTION',
+                    obj      => $function_name,
+                    type     => 'FUNCTION',
                     location => $json_fragment->{location},
                     number   => $$number,
                 }
@@ -1224,13 +1328,26 @@ sub get_joined_rels($$)
 
             if( $is_outer || $left_is_outer )
             {
-                $outer_dep = 'r' unless( $outer_dep && length( $outer_dep ) > 0 );
-                $frag->{$function_alias}->{is_outer} = 1;
+                unless( $outer_dep && length( $outer_dep ) > 0 )
+                {
+                    $outer_dep = 'r';
+                }
+
+                $frag->{$function_alias}->{is_outer}  = 1;
                 $frag->{$function_alias}->{outer_dep} = $outer_dep;
+
                 if( $join_expr || $map->{join_expr} )
                 {
-                    $frag->{$function_alias}->{expr} = get_dependent_column( $map->{join_expr}, $relcache, $function_alias ) if( $is_outer );
-                    $frag->{$function_alias}->{expr} = get_dependent_column( $join_expr, $relcache, $function_alias ) if( $left_is_outer );
+                    $frag->{$function_alias}->{expr} = get_dependent_column(
+                        $map->{join_expr},
+                        $relcache,
+                        $function_alias
+                    ) if( $is_outer );
+                    $frag->{$function_alias}->{expr} = get_dependent_column(
+                        $join_expr,
+                        $relcache,
+                        $function_alias
+                    ) if( $left_is_outer );
                 }
             }
 
@@ -1243,7 +1360,10 @@ sub get_joined_rels($$)
             my $find_inh      = 0;
 
             # TODO, add support for partitions / inheritance here
-            $find_inh = 1 if( defined( $json_fragment->{inh} ) && $json_fragment->{inh} );
+            if( defined( $json_fragment->{inh} ) && $json_fragment->{inh} )
+            {
+                $find_inh = 1;
+            }
 
             if( defined( $json_fragment->{schemaname} ) )
             {
@@ -1283,8 +1403,10 @@ sub get_joined_rels($$)
 
             if( $find_inh )
             {
-                $frag->{$alias}->{inh} = get_inheritance( $relcache, $left_relation );
-                # XXX another spot to inject deps
+                $frag->{$alias}->{inh} = get_inheritance(
+                    $relcache,
+                    $left_relation
+                );
             }
 
             if( $is_outer || $left_is_outer )
@@ -1294,8 +1416,18 @@ sub get_joined_rels($$)
                 $frag->{$alias}->{outer_dep} = $outer_dep;
                 if( $join_expr || $map->{join_expr} )
                 {
-                    $frag->{$alias}->{expr} = get_dependent_column( $map->{join_expr}, $relcache, $alias, $left_relation ) if( $is_outer );
-                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias, $left_relation ) if( $left_is_outer );
+                    $frag->{$alias}->{expr} = get_dependent_column(
+                        $map->{join_expr},
+                        $relcache,
+                        $alias,
+                        $left_relation
+                    ) if( $is_outer );
+                    $frag->{$alias}->{expr} = get_dependent_column(
+                        $join_expr,
+                        $relcache,
+                        $alias,
+                        $left_relation
+                    ) if( $left_is_outer );
                 }
             }
 
@@ -1322,13 +1454,26 @@ sub get_joined_rels($$)
 
             if( $is_outer || $left_is_outer )
             {
-                $outer_dep = 'r' unless( $outer_dep && length( $outer_dep ) > 0 );
-                $frag->{$alias}->{is_outer} = 1;
+                unless( $outer_dep && length( $outer_dep ) > 0 )
+                {
+                    $outer_dep = 'r';
+                }
+
+                $frag->{$alias}->{is_outer}  = 1;
                 $frag->{$alias}->{outer_dep} = $outer_dep;
+
                 if( $join_expr || $map->{join_expr} )
                 {
-                    $frag->{$alias}->{expr} = get_dependent_column( $map->{join_expr}, $relcache, $alias ) if( $is_outer );
-                    $frag->{$alias}->{expr} = get_dependent_column( $join_expr, $relcache, $alias ) if( $left_is_outer );
+                    $frag->{$alias}->{expr} = get_dependent_column(
+                        $map->{join_expr},
+                        $relcache,
+                        $alias
+                    ) if( $is_outer );
+                    $frag->{$alias}->{expr} = get_dependent_column(
+                        $join_expr,
+                        $relcache,
+                        $alias
+                    ) if( $left_is_outer );
                 }
             }
 
@@ -1665,13 +1810,16 @@ sub parse_select($$$$;$)
             }
             elsif(
                      defined( $json_fragment->{whereClause}->{lexpr} )
-                  && defined( $json_fragment->{whereClause}->{lexpr}->{location} )
+                  && defined(
+                         $json_fragment->{whereClause}->{lexpr}->{location}
+                     )
                  )
             {
                 if(
                       (
                           defined( $where_start )
-                       && $json_fragment->{whereClause}->{lexpr}->{location} < $where_start
+                       && $json_fragment->{whereClause}->{lexpr}->{location}
+                        < $where_start
                       )
                    || ( !defined $where_start )
                   )
@@ -1687,13 +1835,16 @@ sub parse_select($$$$;$)
                 {
                     my $old_warn = $SIG{__WARN__};
                     $SIG{__WARN__} = sub { };
+
                     my @locs = datasearch(
                         data   => $json_fragment->{whereClause},
                         search => 'keys',
                         find   => qr/location/
                     );
+
                     $SIG{__WARN__} = $old_warn;
                     my $new_where_start;
+
                     foreach my $loc( @locs )
                     {
                         next if( $loc == -1 );
@@ -1784,7 +1935,8 @@ sub parse_select($$$$;$)
             if(
                    (
                         defined( $where_end )
-                     && $json_fragment->{groupClause}->[0]->{location} < $where_end
+                     && $json_fragment->{groupClause}->[0]->{location}
+                      < $where_end
                    )
                 || !defined( $where_end )
               )
@@ -1793,15 +1945,16 @@ sub parse_select($$$$;$)
             }
         }
 
-        # used to handle outer filtering in cases where multiple tables are involved.
-        # This gets copied over to the table_mapping struct
+        # used to handle outer filtering in cases where multiple tables are
+        # involved. This gets copied over to the table_mapping struct
         if( ref( $json_fragment->{groupClause} ) eq 'ARRAY' )
         {
             my $arr = [];
             foreach my $group_elem( @{$json_fragment->{groupClause}} )
             {
-                my $column = $group_elem->{fields}->[scalar(@{$group_elem->{fields}}) - 1];
-                my $alias  = $group_elem->{fields}->[0] if( scalar( @{$group_elem->{fields}} ) > 1 );
+                my $num_ge = scalar( @{$group_elem->{fields}} );
+                my $column = $group_elem->{fields}->[$num_ge - 1];
+                my $alias  = $group_elem->{fields}->[0] if( $num_ge > 1 );
 
                 my $elem = { col => $column };
                 $elem->{alias} = $alias if( $alias );
@@ -1983,7 +2136,6 @@ sub check_cte_has_relation($$$$)
         return 0;
     }
 
-    my $is_correct = 0;
     foreach my $bindpoint( keys %{$table_mapping->{BINDS}} )
     {
         my $bindinfo = $table_mapping->{BINDS}->{$bindpoint};
@@ -1995,10 +2147,18 @@ sub check_cte_has_relation($$$$)
         {
             foreach my $alias( keys %{$bindinfo->{rels}->{$relinfo->{schema}}} )
             {
-                if( defined( $bindinfo->{rels}->{$relinfo->{schema}}->{$alias}->{$relinfo->{name}} ) )
+                if(
+                    defined(
+                        $bindinfo->{rels}->{$relinfo->{schema}}->{$alias}->{$relinfo->{name}}
+                    )
+                  )
                 {
                     my $frag = { alias => $alias };
-                    if( $table_mapping->{BINDS}->{$bindpoint}->{parent} && $table_mapping->{BINDS}->{$bindpoint}->{parent} eq $dep_rel )
+
+                    if(
+                            $table_mapping->{BINDS}->{$bindpoint}->{parent}
+                         && $table_mapping->{BINDS}->{$bindpoint}->{parent} eq $dep_rel
+                      )
                     {
                         $frag->{correct} = 1;
                     }
@@ -2052,17 +2212,24 @@ sub recursive_from_finder($$$)
                 {
                     ## New change - marker values are now multi-purpose:
                     # 1 = free to bind to this relation
-                    # ARRAYREF = additional information to handle outer joins - bind with caution
-                    # 0 = outer join with no additional information - DO NOT BIND
+                    # ARRAYREF = additional information to handle outer joins -
+                    # bind with caution. 0 = outer join with no additional
+                    # information - DO NOT BIND
                     my $marker = 1;
 
                     $qual = resolve_relation( $relcache, $obj_name );
 
-                    if( defined( $rel->{$alias}->{is_outer} ) && $rel->{$alias}->{is_outer} eq 1 )
+                    if(
+                           defined( $rel->{$alias}->{is_outer} )
+                        && $rel->{$alias}->{is_outer} eq 1
+                      )
                     {
-                        $marker     = 0; # Outer join - set to DO NOT BIND unless we can satisfy requirements
+                        # Outer join - set to DO NOT BIND unless we can
+                        # satisfy requirements
+                        $marker     = 0;
                         my $number  = $rel->{$alias}->{number};
-                        my $next    = $rel->{$alias}->{outer_dep}; # l = number - 1, r = number + 1, b = number - 1
+                        # l = number - 1, r = number + 1, b = number - 1
+                        my $next    = $rel->{$alias}->{outer_dep};
                         my $desired;
 
                         if( $next eq 'r' )
@@ -2075,7 +2242,11 @@ sub recursive_from_finder($$$)
                         }
 
 
-                        if( defined( $rel->{$alias}->{expr} ) && scalar( @{$rel->{$alias}->{expr}} ) > 0 && $desired )
+                        if(
+                                defined( $rel->{$alias}->{expr} )
+                             && scalar( @{$rel->{$alias}->{expr}} ) > 0
+                             && $desired
+                          )
                         {
                             my $cannot_bind = 0;
                             foreach my $expr( @{$rel->{$alias}->{expr}} )
@@ -2097,11 +2268,16 @@ sub recursive_from_finder($$$)
                                         #locate by number
                                         foreach my $next_alias( keys %$next_rel )
                                         {
-                                            if( $next_rel->{$next_alias}->{number} && $next_rel->{$next_alias}->{number} == $desired )
+                                            if(
+                                                    $next_rel->{$next_alias}->{number}
+                                                 && $next_rel->{$next_alias}->{number} == $desired
+                                              )
                                             {
                                                 if( $next_alias ne $other_alias )
                                                 {
-                                                    # this can happen for subselects / weirdly nested expressions - solve on a case-by-case
+                                                    # this can happen for subselects
+                                                    # / weirdly nested expressions
+                                                    # - solve on a case-by-case
                                                     _log(
                                                         $LOG_LEVEL_WARNING,
                                                         "Skipping risky outer handling for relation $expr->{outer}->{rel} "
@@ -2121,10 +2297,13 @@ sub recursive_from_finder($$$)
 
                                 if( defined( $dep_obj ) )
                                 {
-                                    # setup $marker to have a mapping for this expression
+                                    # setup $marker to have a mapping for this
+                                    # expression
                                     if( ref( $dep_obj ) eq 'HASH' )
                                     {
-                                        # XXX This may need special handling - we may not be able to map inverse from multiple relations
+                                        # XXX This may need special handling -
+                                        # we may not be able to map inverse
+                                        # from multiple relations
                                         my $fake_table_mapping = {};
                                         &recursive_from_finder(
                                             $relcache,
@@ -2132,11 +2311,18 @@ sub recursive_from_finder($$$)
                                             $dep_obj
                                         );
 
-                                        if( scalar( keys %{$fake_table_mapping->{BINDS}} ) > 1 )
+                                        if(
+                                            scalar(
+                                                keys %{$fake_table_mapping->{BINDS}}
+                                            ) > 1
+                                          )
                                         {
                                             _log(
                                                 $LOG_LEVEL_WARNING,
-                                                "Unfilterable outer join from $expr->{outer}->{rel}, alias $expr->{outer}->{alias}"
+                                                'Unfilterable outer join from '
+                                              . $expr->{outer}->{rel}
+                                              . ', alias '
+                                              . $expr->{outer}->{alias}
                                             );
                                             next;
                                         }
@@ -2146,12 +2332,26 @@ sub recursive_from_finder($$$)
                                         $dep_obj     = $fake_table_mapping->{BINDS}->{$only_key}->{rels};
                                     }
 
-                                    my $dep_info   = resolve_relation( $relcache, $dep_obj );
-                                    my $outer_info = resolve_relation( $relcache, $expr->{outer}->{rel} );
+                                    my $dep_info   = resolve_relation(
+                                        $relcache,
+                                        $dep_obj
+                                    );
+                                    my $outer_info = resolve_relation(
+                                        $relcache,
+                                        $expr->{outer}->{rel}
+                                    );
 
-                                    if( !defined( $outer_info ) || !defined( $outer_info->{schema} ) || !defined( $outer_info->{name} ) )
+                                    if(
+                                            !defined( $outer_info )
+                                         || !defined( $outer_info->{schema} )
+                                         || !defined( $outer_info->{name} )
+                                      )
                                     {
-                                        _log( $LOG_LEVEL_DEBUG, "Could not resolve outer joined relation $expr->{outer}->{rel}" );
+                                        _log(
+                                            $LOG_LEVEL_DEBUG,
+                                            'Could not resolve outer joined '
+                                          . "relation $expr->{outer}->{rel}"
+                                        );
                                         next;
                                     }
 
@@ -2159,12 +2359,17 @@ sub recursive_from_finder($$$)
                                     my $target_schema   = $dep_info->{schema};
                                     my $target_relation = $dep_info->{name};
                                     my $target_column   = $other_column;
-                                    my $target_cte;
                                     my $dep_in_cte;
 
-                                    if( !defined( $dep_info ) || !defined( $dep_info->{schema} ) || !defined( $dep_info->{name} ) )
+                                    if(
+                                            !defined( $dep_info )
+                                         || !defined( $dep_info->{schema} )
+                                         || !defined( $dep_info->{name} )
+                                      )
                                     {
-                                        # We have an outer join that is dependent on a CTE - do extra checks to see if this can be resolved
+                                        # We have an outer join that is dependent
+                                        # on a CTE - do extra checks to see if
+                                        # this can be resolved
                                         my $info = &resolve_fk(
                                             $relcache,
                                             $outer_info->{schema},
@@ -2174,9 +2379,14 @@ sub recursive_from_finder($$$)
 
                                         $cannot_bind = 1;
 
-                                        if( defined( $info ) && defined( $table_mapping->{CTES}->{$dep_obj} ) )
+                                        if(
+                                              defined( $info )
+                                           && defined( $table_mapping->{CTES}->{$dep_obj} )
+                                          )
                                         {
-                                            # sanity check the target CTE expression to verify that the resolved FK info actually exists there
+                                            # sanity check the target CTE expression
+                                            # to verify that the resolved FK info
+                                            # actually exists there
                                             foreach my $rel( keys %$info )
                                             {
                                                 my $alternate_rels;
@@ -2186,8 +2396,14 @@ sub recursive_from_finder($$$)
                                                     $dep_obj,
                                                     $rel
                                                 );
-                                                my $relinfo     = resolve_relation( $relcache, $rel );
-                                                $alternate_rels = get_inheritance( $relcache, $rel ) if( !$result );
+                                                my $relinfo     = resolve_relation(
+                                                    $relcache,
+                                                    $rel
+                                                );
+                                                $alternate_rels = get_inheritance(
+                                                    $relcache,
+                                                    $rel
+                                                ) if( !$result );
 
                                                 if(
                                                        !$result
@@ -2195,7 +2411,8 @@ sub recursive_from_finder($$$)
                                                     && scalar( @$alternate_rels ) > 0
                                                   )
                                                 {
-                                                    # Check the case where inherited relations are present, this can happen with self joins
+                                                    # Check the case where inherited relations
+                                                    # are present, this can happen with self joins
                                                     foreach my $alternate_rel( @$alternate_rels )
                                                     {
                                                         $result = &check_cte_has_relation(
@@ -2218,8 +2435,8 @@ sub recursive_from_finder($$$)
                                                 {
                                                     if( $result->{actual} )
                                                     {
-                                                        # Check_cte_has_relation suggested the correct CTE for applying this filter later
-                                                        #
+                                                        # Check_cte_has_relation suggested the
+                                                        # correct CTE for applying this filter later
                                                         $dep_in_cte = $result->{actual};
                                                     }
                                                     else
@@ -2239,21 +2456,25 @@ sub recursive_from_finder($$$)
                                         {
                                             _log(
                                                 $LOG_LEVEL_WARNING,
-                                                "Could not resolve outer target relation $dep_obj from $expr->{outer}->{rel}."
-                                              . " Filters will not be able to be applied for this relation and updates will be slow."
-                                              . " Consider using a resolvable relation between $expr->{outer}->{rel} and $dep_obj rather"
-                                              . " than joining directly to $dep_obj"
+                                                'Could not resolve outer target relation '
+                                              . "$dep_obj from $expr->{outer}->{rel}"
+                                              . '. Filters will not be able to be applied '
+                                              . 'for this relation and updates will be slow. '
+                                              . ' Consider using a resolvable relation '
+                                              . "between $expr->{outer}->{rel} and $dep_obj "
+                                              . "rather than joining directly to $dep_obj"
                                             );
                                             next;
                                         }
-
-                                        # XXX We need to add information that allows the bind data to be displaced to the correct CTE
                                     }
 
                                     # We have sufficient info, convert to arrayref of bind info
                                     $marker = [] if( ref( $marker ) eq '' );
                                     my $is_inh = 0;
-                                    if( $rel->{$alias}->{inh} && scalar( @{$rel->{$alias}->{inh}} ) > 0 )
+                                    if(
+                                            $rel->{$alias}->{inh}
+                                         && scalar( @{$rel->{$alias}->{inh}} ) > 0
+                                      )
                                     {
                                         $is_inh = 1;
                                     }
@@ -2275,15 +2496,16 @@ sub recursive_from_finder($$$)
                                 }
                                 else
                                 {
-                                    _log( $LOG_LEVEL_WARNING, "Failed to find outer predicate expression dependency" );
+                                    _log(
+                                        $LOG_LEVEL_WARNING,
+                                        'Failed to find outer predicate '
+                                      . 'expression dependency'
+                                    );
                                     print Dumper( $expr );
                                 }
                             }
 
-                            if( $cannot_bind )
-                            {
-                                $marker = 0;
-                            }
+                            $marker = 0 if( $cannot_bind );
                         }
                     }
 
@@ -2292,7 +2514,8 @@ sub recursive_from_finder($$$)
                             && defined( $qual->{name} )
                           )
                     {
-                        # We're here because the object is likely either a CTE or temp relation
+                        # We're here because the object is likely either a CTE
+                        # or temp relation
                         _log(
                             $LOG_LEVEL_DEBUG,
                             "Removing unresolvable relation $obj_name"
@@ -2307,7 +2530,10 @@ sub recursive_from_finder($$$)
                     {
                         foreach my $qual( @{$rel->{$alias}->{inh}} )
                         {
-                            my $obj_data   = resolve_relation( $relcache, $qual );
+                            my $obj_data   = resolve_relation(
+                                $relcache,
+                                $qual
+                            );
                             my $dep_schema = $obj_data->{schema};
                             my $dep_name   = $obj_data->{name};
 
@@ -2322,20 +2548,18 @@ sub recursive_from_finder($$$)
     return;
 }
 
-sub find_table_aliases($$$$$) :Export( :MANDATORY )
+sub find_table_aliases($$$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $relcache,
         $definition,
-        $filter_tables,
         $table_mapping
       ) = validate_pos(
         @_,
         { type => OBJECT   },
         { type => HASHREF  },
         { type => SCALAR   },
-        { type => ARRAYREF },
         { type => HASHREF },
     );
 
@@ -2513,7 +2737,6 @@ sub recursive_bind_helper($$)
         my $outer_schema    = $bind_info->{outer_schema};
         my $outer_relation  = $bind_info->{outer_relation};
         my $outer_column    = $bind_info->{outer_column};
-        my $outer_alias     = $bind_info->{outer_alias};
         my $target_schema   = $bind_info->{target_schema};
         my $target_relation = $bind_info->{target_relation};
         my $target_column   = $bind_info->{target_column};
@@ -2524,7 +2747,10 @@ sub recursive_bind_helper($$)
 
         $ONLY = '' if( defined( $is_inh ) && $is_inh == 1 );
         my $q = <<"END_SQL";
-$target_column IN( SELECT $outer_column FROM $ONLY $outer_schema.$outer_relation WHERE
+$target_column IN(
+    SELECT $outer_column
+      FROM $ONLY $outer_schema.$outer_relation
+     WHERE
 END_SQL
         my $new_rels = $RELS;
 
@@ -2543,15 +2769,18 @@ END_SQL
         }
 
         my $cte;
-        if( $bind_info->{dep_in_cte} )
+        if( $dep_in_cte )
         {
             foreach my $pos( keys %$BINDS )
             {
-                if( $BINDS->{$pos}->{parent} && $BINDS->{$pos}->{parent} eq $bind_info->{dep_in_cte} )
+                if(
+                        $BINDS->{$pos}->{parent}
+                     && $BINDS->{$pos}->{parent} eq $dep_in_cte
+                  )
                 {
                     ## XXX context switching here
                     $new_rels = $BINDS->{$pos}->{rels};
-                    $cte = $bind_info->{dep_in_cte};
+                    $cte = $dep_in_cte;
                     last;
                 }
             }
@@ -2564,7 +2793,7 @@ END_SQL
 
         my $ret_qs = &recursive_bind_helper(
             {
-                filters     => undef, # apply filters to only the outer-most call
+                filters     => undef, # apply filters to only outer-most call
                 handle      => $handle,
                 next_bind   => $next_next_binds,
                 RELS        => $new_rels,
@@ -2599,7 +2828,8 @@ END_SQL
         }
 
         # Tail recursive, iterative nightmare
-        # We need to track query permutations that can happen so that we can appropriately nest them
+        # We need to track query permutations that can happen so that we can
+        # appropriately nest them
         #
         # Consider the following structure
         #           /--D--F---
@@ -2608,8 +2838,8 @@ END_SQL
         # -A-<
         #     \--C------------
         #
-        # Each branch in the chain means we have another query nesting that we need to handle. In this
-        # case our chains will be
+        # Each branch in the chain means we have another query nesting that we
+        # need to handle. In this case our chains will be
         # [
         #  [ A, B, D, F ]
         #  [ A, B, E ]
@@ -2650,12 +2880,17 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                     my $bind_infos = $RELS->{$schema}->{$alias}->{$table_name};
                     if( ref( $bind_infos ) eq '' && $bind_infos == 0 )
                     {
-                        _log( $LOG_LEVEL_DEBUG, "Skipping unbindable relation $table_name - involved in outer join" );
+                        _log(
+                            $LOG_LEVEL_DEBUG,
+                            "Skipping unbindable relation $table_name - "
+                          . 'involved in outer join'
+                        );
                         next;
                     }
                     elsif( ref( $bind_infos ) eq 'ARRAY' )
                     {
-                        # DEVNOTE: This is where we handle outer-joined ( LEFT / RIGHT / FULL OUTER ) relations.
+                        # DEVNOTE: This is where we handle outer-joined
+                        # ( LEFT / RIGHT / FULL OUTER ) relations.
                         my $has_binds = 0;
                         my $inh_match = 0;
 
@@ -2668,7 +2903,7 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                         next unless( $has_binds && $inh_match );
 
                         my $chain = {};
-                        my $ret = &recursive_bind_helper(
+                        &recursive_bind_helper(
                             {
                              handle     => $handle,
                              next_bind  => $bind_infos,
@@ -2714,10 +2949,18 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                                 }
 
                                 my $name;
-                                $name = $result->{alias} . '.' if( $result->{alias} );
+                                $name  = $result->{alias}
+                                       . '.' if( $result->{alias} );
                                 $name .= $result->{col};
-                                _log( $LOG_LEVEL_DEBUG, "Skipping filtering of $name due to OUTER_GROUPED_RELS_ONLY setting" ) if( $skip );
-                                next if( $skip );
+                                if( $skip )
+                                {
+                                    _log(
+                                        $LOG_LEVEL_DEBUG,
+                                        "Skipping filtering of $name due to "
+                                      . 'OUTER_GROUPED_RELS_ONLY setting'
+                                    );
+                                    next;
+                                }
                             }
                             elsif(
                                       $OUTER_FALLBACK_TO_LARGEST
@@ -2730,9 +2973,13 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                                     my $largest_size = 0;
                                     my $largest_rel;
                                     my $largest_schema;
+
                                     foreach my $check_result( @$results )
                                     {
-                                        if( defined( $check_result->{rel} ) && defined( $check_result->{schema} ) )
+                                        if(
+                                                defined( $check_result->{rel} )
+                                             && defined( $check_result->{schema} )
+                                          )
                                         {
                                             my $size = $relcache->{size}->{$check_result->{schema}}->{$check_result->{rel}};
 
@@ -2756,13 +3003,15 @@ sub generate_where_expressions($) :Export( :MANDATORY )
 
                                 if( defined( $largest_result ) )
                                 {
-                                    # Skip if we arent the largest result, this is a sketchy cardinality assumption
+                                    # Skip if we arent the largest result, this
+                                    # is a sketchy cardinality assumption
                                     # and assumes A LOT about the underlying model
                                     if( $largest_result->{rel} ne $result->{rel} )
                                     {
                                         _log(
                                             $LOG_LEVEL_DEBUG,
-                                            "Skipping small relation ( $result->{rel} ) used in multi-rel outer join"
+                                            "Skipping small relation ( $result->{rel} )"
+                                          . ' used in multi-rel outer join'
                                         );
                                         next;
                                     }
@@ -2772,16 +3021,22 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                             if( defined( $result->{move_to} ) )
                             {
                                 # Relocate this query to another CTE / Expression
-                                # to do this, we locate the position of the CTE found in {move_to} and inject our @$results there
+                                # to do this, we locate the position of the CTE
+                                # found in {move_to} and inject our @$results there
                                 my $cte_found = 0;
+
                                 foreach my $target_position( keys %{$table_mapping->{BINDS}} )
                                 {
                                     if(
-                                        defined( $table_mapping->{BINDS}->{$target_position}->{parent} )
-                                        && $table_mapping->{BINDS}->{$target_position}->{parent} eq $result->{move_to}
+                                           defined(
+                                               $table_mapping->{BINDS}->{$target_position}->{parent}
+                                           )
+                                        && $table_mapping->{BINDS}->{$target_position}->{parent}
+                                        eq $result->{move_to}
                                       )
                                     {
                                         $cte_found = 1;
+
                                         if( !defined( $where_expressions->{$target_position} ) )
                                         {
                                             $where_expressions->{$target_position} = [];
@@ -2795,8 +3050,17 @@ sub generate_where_expressions($) :Export( :MANDATORY )
 
                                 if( !$cte_found )
                                 {
-                                    # there may be a case where we'll need to search the CTE parent->child LUT in table_mapping
-                                    _log( $LOG_LEVEL_ERROR, "Assemble outer join can be injected to $result->{move_to} but $result->{move_to} could not be found" );
+                                    # there may be a case where we'll need to
+                                    # search the CTE parent->child LUT in
+                                    # table_mapping
+                                    _log(
+                                        $LOG_LEVEL_ERROR,
+                                        'Assemble outer join can be injected to '
+                                      . $result->{move_to}
+                                      . ' but '
+                                      . $result->{move_to}
+                                      . 'could not be found'
+                                    );
                                 }
                             }
                             else
@@ -2878,12 +3142,8 @@ sub apply_filters($) :Export( :MANDATORY )
         { type => HASHREF }
     );
 
-    my $handle        = $map->{handle};
-    my $query_data    = $map->{query_data};
-    my $table_mapping = $map->{table_mapping};
-    my $definition    = $map->{definition};
-    my $relcache      = $map->{relcache};
-    my $filters       = $map->{filters};
+    my $table_mapping     = $map->{table_mapping};
+    my $definition        = $map->{definition};
     my $where_expressions = $map->{where_expressions};
     # Lets use the filters we've received and search for the tables, their
     # aliases, and the objects they are present in within the query, then
@@ -2921,7 +3181,9 @@ sub apply_filters($) :Export( :MANDATORY )
         if( $index - 1 >= 0 )
         {
             # Here we look for the next CTE in the statement, if present.
-            # This includes a recursive search in the case we run into something like:
+            # This includes a recursive search in the case we run into
+            # something like:
+            #
             # WITH ...
             # (
             #    <- This is the statement we're currently concerned with
@@ -2980,7 +3242,8 @@ sub apply_filters($) :Export( :MANDATORY )
         # in select parsing :( also, we need to corelate against the
         # $table_mapping->binds itself
 
-        # Find the end of the last expression (if has_where) or the last join predicate (if !has_where)
+        # Find the end of the last expression (if has_where) or the last join
+        # predicate (if !has_where)
         my $where_expression = $where_expressions->{$bind_start};
         my $is_in_cte        = defined(
             $table_mapping->{BINDS}->{$bind_start}->{parent}
@@ -3008,8 +3271,8 @@ sub apply_filters($) :Export( :MANDATORY )
         }
         elsif( defined( $BS_HASH->{is_union} ) )
         { # handle case where we union at the end of a CTE def
-            # NOTE This may need to be expanded - there are many cases where unions can be used / abused and
-            # a union can appear in the form of:
+            # NOTE This may need to be expanded - there are many cases where
+            # unions can be used / abused and a union can appear in odd forms
             $where_proceeding_clause_mark = '\)';
         }
         elsif( $BS_HASH->{has_sort} )
@@ -3024,8 +3287,8 @@ sub apply_filters($) :Export( :MANDATORY )
         {
             $where_proceeding_clause_mark = 'offset';
         }
-        # TODO add FETCH
-        # TODO add FOR <lock statement>
+        # TODO add FETCH ( low priority )
+        # TODO add FOR <lock statement> ( low priority )
         elsif( $is_in_cte && defined( $next_cte_name ) )
         {
             $where_proceeding_clause_mark = '\)\s*,\s*' . $next_cte_name;

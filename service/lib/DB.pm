@@ -21,7 +21,6 @@ our $CONNECTION_MAP :Export( :MANDATORY );
 
 Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
-Readonly::Scalar my $TCP_KEEPALIVE_COUNT    => 200; #720;
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
 Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
@@ -416,12 +415,18 @@ INNER JOIN tt_viewdefs tt
 ),
 tt_def_prep AS
 (
-    SELECT COALESCE( ns.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object_name,
+    SELECT COALESCE( ns.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR AS object_name,
            CASE WHEN c.relkind = 'm'
                 THEN 'MATERIALIZED'
                 ELSE ''
                  END AS view_type,
-           regexp_replace( pg_get_viewdef( c.oid, TRUE ), ';\\s*\$', '' ) AS definition,
+           regexp_replace(
+               pg_get_viewdef( c.oid, TRUE ),
+               ';\\s*\$',
+               ''
+           ) AS definition,
            tt.rank
       FROM tt_viewdefs tt
 INNER JOIN pg_class c
@@ -437,8 +442,17 @@ INSERT INTO tt_dependent_objects
                 is_base_obj,
                 rank
             )
-     SELECT 'DROP ' || view_type || ' VIEW ' || object_name AS drop_statement,
-            'CREATE ' || view_type || ' VIEW ' || object_name || ' AS ( ' || definition || ')' AS create_statement,
+     SELECT 'DROP '
+         || view_type
+         || ' VIEW '
+         || object_name AS drop_statement,
+            'CREATE '
+         || view_type
+         || ' VIEW '
+         || object_name
+         || ' AS ( '
+         || definition
+         || ')' AS create_statement,
             object_name,
             TRUE,
             rank
@@ -449,7 +463,9 @@ Readonly::Scalar my $GET_FK_DEPENDENCIES => <<"END_SQL";
 WITH tt_fk_constraints AS
 (
     SELECT co.conname::VARCHAR AS constraint_name,
-           COALESCE( nr.nspname::VARCHAR, 'public' ) || '.' || cr.relname::VARCHAR AS object,
+           COALESCE( nr.nspname::VARCHAR, 'public' )
+        || '.'
+        || cr.relname::VARCHAR AS object,
            pg_get_constraintdef( co.oid, TRUE ) AS definition,
            2 AS rank
       FROM pg_constraint co
@@ -466,7 +482,9 @@ INNER JOIN pg_namespace nr
        AND c.relname::VARCHAR = ?
      UNION
     SELECT co.conname::VARCHAR AS constraint_name,
-           COALESCE( nr.nspname::VARCHAR, 'public' ) || '.' || cr.relname::VARCHAR AS object,
+           COALESCE( nr.nspname::VARCHAR, 'public' )
+        || '.'
+        || cr.relname::VARCHAR AS object,
            pg_get_constraintdef( co.oid, TRUE ) AS definition,
            tt.rank + 1 AS rank
       FROM pg_constraint co
@@ -479,7 +497,9 @@ INNER JOIN pg_class cr
 INNER JOIN pg_namespace nr
         ON nr.oid = cr.relnamespace
 INNER JOIN tt_dependent_objects tt
-        ON tt.object_name = COALESCE( nr.nspname::VARCHAR, 'public' ) || '.' || cr.relname::VARCHAR
+        ON tt.object_name = COALESCE( nr.nspname::VARCHAR, 'public' )
+        || '.'
+        || cr.relname::VARCHAR
        AND tt.is_base_obj IS TRUE
      WHERE co.contype = 'f'
 )
@@ -491,8 +511,16 @@ INSERT INTO tt_dependent_objects
                 is_base_obj,
                 rank
             )
-     SELECT 'ALTER TABLE ' || object || ' DROP CONSTRAINT ' || constraint_name AS drop_statement,
-            'ALTER TABLE ' || object || ' ADD CONSTRAINT ' || constraint_name || ' ' || definition AS create_statement,
+     SELECT 'ALTER TABLE '
+         || object
+         || ' DROP CONSTRAINT '
+         || constraint_name AS drop_statement,
+            'ALTER TABLE '
+         || object
+         || ' ADD CONSTRAINT '
+         || constraint_name
+         || ' '
+         || definition AS create_statement,
             constraint_name,
             FALSE,
             rank
@@ -503,7 +531,9 @@ Readonly::Scalar my $GET_DEPENDENT_CHECK_CONSTRAINTS => <<"END_SQL";
 WITH tt_check_constraints AS
 (
     SELECT co.conname::VARCHAR AS constraint_name,
-           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           COALESCE( n.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR AS object,
            pg_get_constraintdef( co.oid, TRUE ) AS definition,
            2 AS rank
       FROM pg_constraint co
@@ -517,7 +547,9 @@ INNER JOIN pg_namespace n
        AND c.relname::VARCHAR = ?
      UNION
     SELECT co.conname::VARCHAR AS constraint_name,
-           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           COALESCE( n.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR AS object,
            pg_get_constraintdef( co.oid, TRUE ) AS definition,
            tt.rank + 1 AS rank
       FROM pg_constraint co
@@ -526,7 +558,9 @@ INNER JOIN pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
 INNER JOIN tt_dependent_objects tt
-        ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR
+        ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR
        AND tt.is_base_obj IS TRUE
      WHERE co.contype != 'f'
        AND co.contype != 'p'
@@ -539,8 +573,16 @@ INSERT INTO tt_dependent_objects
                 is_base_obj,
                 rank
             )
-     SELECT 'ALTER TABLE ' || object || ' DROP CONSTRAINT ' || constraint_name AS drop_statement,
-            'ALTER TABLE ' || object || ' ADD CONSTRAINT ' || constraint_name || ' ' || definition AS create_statement,
+     SELECT 'ALTER TABLE '
+         || object
+         || ' DROP CONSTRAINT '
+         || constraint_name AS drop_statement,
+            'ALTER TABLE '
+         || object
+         || ' ADD CONSTRAINT '
+         || constraint_name
+         || ' '
+         || definition AS create_statement,
             constraint_name,
             FALSE,
             rank
@@ -551,7 +593,9 @@ Readonly::Scalar my $GET_DEPENDENT_TRIGGERS => <<"END_SQL";
 WITH tt_triggers AS
 (
     SELECT t.tgname AS trigger_name,
-           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           COALESCE( n.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR AS object,
            pg_get_triggerdef( t.oid, TRUE ) AS definition,
            2 AS rank
       FROM pg_trigger t
@@ -563,7 +607,9 @@ INNER JOIN pg_namespace n
        AND c.relname::VARCHAR = ?
      UNION
     SELECT t.tgname AS trigger_name,
-           COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR AS object,
+           COALESCE( n.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR AS object,
            pg_get_triggerdef( t.oid, TRUE ) AS definition,
            2 AS rank
       FROM pg_trigger t
@@ -572,7 +618,9 @@ INNER JOIN pg_class c
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
 INNER JOIN tt_dependent_objects tt
-        ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR
+        ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' )
+        || '.'
+        || c.relname::VARCHAR
        AND tt.is_base_obj IS TRUE
 )
 INSERT INTO tt_dependent_objects
@@ -583,7 +631,10 @@ INSERT INTO tt_dependent_objects
                 is_base_obj,
                 rank
             )
-     SELECT 'DROP TRIGGER ' || trigger_name || ' ON ' || object AS drop_statement,
+     SELECT 'DROP TRIGGER '
+         || trigger_name
+         || ' ON '
+         || object AS drop_statement,
             definition AS create_statement,
             trigger_name,
             FALSE,
@@ -606,7 +657,9 @@ Readonly::Scalar my $GET_DEPENDENT_INDEXES => <<"END_SQL";
     INNER JOIN pg_namespace n
             ON n.oid = c.relnamespace
     INNER JOIN tt_dependent_objects tt
-            ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' ) || '.' || c.relname::VARCHAR
+            ON tt.object_name = COALESCE( n.nspname::VARCHAR, 'public' )
+            || '.'
+            || c.relname::VARCHAR
            AND tt.is_base_obj IS TRUE
     )
     INSERT INTO tt_dependent_objects
@@ -728,44 +781,72 @@ sub create_dependent_temp_table($$)
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to create dependency temp table" );
+        _log( $LOG_LEVEL_ERROR, 'Failed to create dependency temp table' );
         return 0;
     }
 
     $sth->finish();
 
-    $sth = &try_query( $handle, $GET_DEPENDENT_VIEWS, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+    $sth = &try_query(
+        $handle,
+        $GET_DEPENDENT_VIEWS,
+        [ $ct_hash->{schema}, $ct_hash->{name} ]
+    );
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to get view dependencies for $ct_hash->{name}" );
+        _log(
+            $LOG_LEVEL_ERROR,
+            "Failed to get view dependencies for $ct_hash->{name}"
+        );
         return 0;
     }
 
     $sth->finish();
-    $sth = &try_query( $handle, $GET_FK_DEPENDENCIES, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+    $sth = &try_query(
+        $handle,
+        $GET_FK_DEPENDENCIES,
+        [ $ct_hash->{schema}, $ct_hash->{name} ]
+    );
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to get fk-dependent objects for $ct_hash->{name}" );
+        _log(
+            $LOG_LEVEL_ERROR,
+            "Failed to get fk-dependent objects for $ct_hash->{name}"
+        );
         return 0;
     }
 
     $sth->finish();
-    $sth = &try_query( $handle, $GET_DEPENDENT_CHECK_CONSTRAINTS, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+    $sth = &try_query(
+        $handle,
+        $GET_DEPENDENT_CHECK_CONSTRAINTS,
+        [ $ct_hash->{schema}, $ct_hash->{name} ]
+    );
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to get dependent check constraints on $ct_hash->{name}" );
+        _log(
+            $LOG_LEVEL_ERROR,
+            "Failed to get dependent check constraints on $ct_hash->{name}"
+        );
         return 0;
     }
 
     $sth->finish();
-    $sth = &try_query( $handle, $GET_DEPENDENT_TRIGGERS, [ $ct_hash->{schema}, $ct_hash->{name} ] );
+    $sth = &try_query(
+        $handle,
+        $GET_DEPENDENT_TRIGGERS,
+        [ $ct_hash->{schema}, $ct_hash->{name} ]
+    );
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to get dependent triggers for $ct_hash->{name}" );
+        _log(
+            $LOG_LEVEL_ERROR,
+            "Failed to get dependent triggers for $ct_hash->{name}"
+        );
         return 0;
     }
 
@@ -774,7 +855,10 @@ sub create_dependent_temp_table($$)
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to get dependent triggers for $ct_hash->{name}" );
+        _log(
+            $LOG_LEVEL_ERROR,
+            "Failed to get dependent triggers for $ct_hash->{name}"
+        );
         return 0;
     }
 
@@ -809,7 +893,10 @@ END_SQL
     {
         unless( $handle->do( $row->{drop_statement} ) )
         {
-            _log( $LOG_LEVEL_ERROR, "Failed to drop dependent object $row->{object_name}" );
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to drop dependent object $row->{object_name}"
+            );
             return 0;
         }
     }
@@ -835,7 +922,10 @@ END_SQL
 
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to get create results from dependency table' );
+        _log(
+            $LOG_LEVEL_ERROR,
+            'Failed to get create results from dependency table'
+        );
         return 0;
     }
 
@@ -843,7 +933,10 @@ END_SQL
     {
         unless( $handle->do( $row->{create_statement} ) )
         {
-            _log( $LOG_LEVEL_ERROR, "Failed to recreate dependent object $row->{object_name}" );
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to recreate dependent object $row->{object_name}"
+            );
             return 0;
         }
     }
@@ -883,8 +976,6 @@ sub replace_cache_table($$) :Export( :MANDATORY )
 
     my $name          = $ct_hash->{name};
     my $schema        = $ct_hash->{schema};
-    my $definition    = $ct_hash->{definition};
-    my $try_count     = 0;
     $handle->do( 'BEGIN' );
     $handle->do( "SET client_min_messages = 'ERROR'" );
 
@@ -893,7 +984,8 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         $handle->do( 'ROLLBACK' );
         _log(
             $LOG_LEVEL_ERROR,
-            'Cache table replacement failed - could not collect dependent objects'
+            'Cache table replacement failed - '
+          . 'could not collect dependent objects'
         );
         $handle->do( 'BEGIN' );
         $handle->do( "SET client_min_messages = 'ERROR'" );
@@ -902,8 +994,8 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     $ct_hash->{name} .= '_temp';
     my $temp_name     = $ct_hash->{name};
 
-    # note: This statement is intentionally not set to cascade - it's a safety mechanism in case we did not
-    # drop dependent objects.
+    # note: This statement is intentionally not set to cascade - it's a safety
+    # mechanism in case we did not drop dependent objects.
     $handle->do( "DROP TABLE IF EXISTS $temp_name" );
 
     &create_cache_table( $handle, $ct_hash );
@@ -915,7 +1007,10 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         return 0;
     }
 
-    my $sth = &try_query( $handle, "DROP TABLE IF EXISTS $schema.$name CASCADE" );
+    my $sth = &try_query(
+        $handle,
+        "DROP TABLE IF EXISTS $schema.$name CASCADE"
+    );
 
     unless( $sth )
     {
@@ -957,7 +1052,11 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         return 0;
     }
 
-    unless( $handle->do( "ALTER INDEX IF EXISTS ix_$temp_name RENAME TO ix_$name" ) )
+    unless(
+            $handle->do(
+                "ALTER INDEX IF EXISTS ix_$temp_name RENAME TO ix_$name"
+            )
+          )
     {
         _log( $LOG_LEVEL_ERROR, "Failed to rename index for $name" );
     }
@@ -968,7 +1067,10 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     $handle->do( 'SET client_min_messages TO DEFAULT' );
     $handle->do( 'COMMIT' );
 
-    _log( $LOG_LEVEL_DEBUG, "Cache table $name has been successfully replaced" );
+    _log(
+        $LOG_LEVEL_DEBUG,
+        "Cache table $name has been successfully replaced"
+    );
     return 1;
 }
 
@@ -1010,7 +1112,7 @@ sub db_connect(;$) :Export( :MANDATORY )
     {
         if( $DEBUG )
         {
-            _log( $LOG_LEVEL_INFO, "Not connected to DB, reconnecting..." );
+            _log( $LOG_LEVEL_INFO, 'Not connected to DB, reconnecting...' );
         }
 
         $handle->disconnect() if( defined( $handle ) );
@@ -1033,7 +1135,7 @@ sub db_connect(;$) :Export( :MANDATORY )
         }
     }
 
-	_log( $LOG_LEVEL_INFO, "Reconnected to database" ) if( $connect_count > 0 );
+	_log( $LOG_LEVEL_INFO, 'Reconnected to database' ) if( $connect_count > 0 );
 	$handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
 	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
 	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
@@ -1071,7 +1173,8 @@ sub try_query($$;$) :Export( :MANDATORY )
         {
             _log(
                 $LOG_LEVEL_FATAL,
-                'Failed to acquire lock after reconnecting to database or extension not installed'
+                'Failed to acquire lock after reconnecting to database or '
+              . 'extension not installed'
             );
         }
     }
@@ -1326,7 +1429,9 @@ sub get_current_lsn($) :Export( :MANDATORY )
 
     $handle = &db_connect( $handle );
 
-    my $sth = $handle->prepare( 'SELECT pg_catalog.pg_current_wal_lsn() AS lsn' );
+    my $sth = $handle->prepare(
+        'SELECT pg_catalog.pg_current_wal_lsn() AS lsn'
+    );
 
     unless( $sth && $sth->execute() )
     {
@@ -1412,7 +1517,13 @@ sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
 
 sub replication_peek($$$$$) :Export( :MANDATORY )
 {
-    my( $handle, $filter_tables, $wal_level, $max_lsn, $max_idle_lsn ) = validate_pos(
+    my(
+        $handle,
+        $filter_tables,
+        $wal_level,
+        $max_lsn,
+        $max_idle_lsn
+      ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => SCALAR },
@@ -1423,10 +1534,13 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
 
     my $sth;
     $handle = &db_connect( $handle );
-    # Disable spurrious logging on replication seek. logical replication using our method emits
-    # INFO level, and the typically encountered WARNING/ERROR level will pass the INFO log levels
-    # which ends up spamming the crap out of logs since we are polling the slot
+
+    # Disable spurrious logging on replication seek. logical replication using
+    # our method emits  INFO level, and the typically encountered WARNING/ERROR
+    # level will pass the INFO log levels which ends up spamming the crap out
+    # of logs since we are polling the slot.
     $handle->do( "SET log_min_messages = 'FATAL'" ) if( $handle );
+
     if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
     {
         $sth = try_query(
@@ -1467,9 +1581,9 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
                 if( defined( $data->{d} ) )
                 {
                     #inflate data
-                    $out->{data}->{table_name} = $data->{t};
+                    $out->{data}->{table_name}  = $data->{t};
                     $out->{data}->{schema_name} = $data->{s};
-                    $out->{data}->{key} = $data->{key};
+                    $out->{data}->{key}  = $data->{key};
                     $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
                     $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
                     $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
@@ -1520,35 +1634,40 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
         $sth->finish();
         my $old_max_idle = $$max_idle_lsn;
         my $out_data = [];
-        # Step through transactional data and only output DML if we detect both a valid
-        # BEGIN and COMMIT for the DML's XID
+        # Step through transactional data and only output DML if we detect both
+        # a valid BEGIN and COMMIT for the DML's XID
         foreach my $xid( @$xids )
         {
+            next unless( exists( $intermediate_data->{$xid}->{COMMIT} ) );
             if(
-                exists( $intermediate_data->{$xid}->{COMMIT} )
+                  exists( $intermediate_data->{$xid}->{DML} )
+               && scalar( @{$intermediate_data->{$xid}->{DML}} )
               )
             {
+                foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
+                {
+                    $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT};
+
+                    if(
+                        !defined( $$max_lsn )
+                     || lsn_cmp( $$max_lsn, $dml->{commit_lsn} ) < 0
+                      )
+                    {
+                        $$max_lsn = $dml->{commit_lsn};
+                    }
+                    push( @$out_data, $dml );
+                }
+            }
+            elsif( exists( $intermediate_data->{$xid}->{BEGIN} ) )
+            {
                 if(
-                      exists( $intermediate_data->{$xid}->{DML} )
-                   && scalar( @{$intermediate_data->{$xid}->{DML}} )
+                    lsn_cmp(
+                        $intermediate_data->{$xid}->{COMMIT},
+                        $$max_idle_lsn
+                    ) > 0
                   )
                 {
-                    foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
-                    {
-                        $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT};
-                        if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $dml->{commit_lsn} ) < 0 )
-                        {
-                            $$max_lsn = $dml->{commit_lsn};
-                        }
-                        push( @$out_data, $dml );
-                    }
-                }
-                elsif( exists( $intermediate_data->{$xid}->{BEGIN} ) )
-                {
-                    if( lsn_cmp( $intermediate_data->{$xid}->{COMMIT}, $$max_idle_lsn ) > 0 )
-                    {
-                        $$max_idle_lsn = $intermediate_data->{$xid}->{COMMIT};
-                    }
+                    $$max_idle_lsn = $intermediate_data->{$xid}->{COMMIT};
                 }
             }
         }
@@ -1583,13 +1702,19 @@ sub check_ct_exists($) :Export( :MANDATORY )
     # If there are anny issues, we'll fail through to replacement sub
     unless( $sth )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to verify that $ct_hash->{schema}.$ct_hash->{name} exists" );
+        _log(
+            $LOG_LEVEL_ERROR,
+            "Failed to verify that $ct_hash->{schema}.$ct_hash->{name} exists"
+        );
     }
 
     if( $sth && $sth->rows() > 0 )
     {
         $sth->finish();
-        _log( $LOG_LEVEL_DEBUG, "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists" );
+        _log(
+            $LOG_LEVEL_DEBUG,
+            "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists"
+        );
 
         my $create_tt = $CREATE_COLUMN_CHECK_TABLE;
         $create_tt =~ s/__DEFINITION__/$ct_hash->{definition}/;
@@ -1600,7 +1725,11 @@ sub check_ct_exists($) :Export( :MANDATORY )
 
         unless( $sth )
         {
-            _log( $LOG_LEVEL_FATAL, "Failed to create test table using definition to validate columns" );
+            _log(
+                $LOG_LEVEL_FATAL,
+                'Failed to create test table using definition to validate '
+              . 'columns'
+            );
         }
 
         $sth->finish();
@@ -1613,7 +1742,10 @@ sub check_ct_exists($) :Export( :MANDATORY )
 
         unless( $sth )
         {
-            _log( $LOG_LEVEL_FATAL, "Failed to check cache table columns against definition" );
+            _log(
+                $LOG_LEVEL_FATAL,
+                'Failed to check cache table columns against definition'
+            );
         }
 
         $handle->do( 'DROP TABLE IF EXISTS tt_column_verify' );
@@ -1622,7 +1754,8 @@ sub check_ct_exists($) :Export( :MANDATORY )
 
         _log(
             $LOG_LEVEL_ERROR,
-            "There is a discrepency between the existing cache table and its definition. The cache table will be rebuilt"
+            'There is a discrepency between the existing cache table and its '
+          . 'definition. The cache table will be rebuilt'
         );
     }
 
@@ -1690,7 +1823,7 @@ sub create_cache_table($$)
 
     unless( &create_cache_table_unique( $handle, $ct_hash ) )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to create cache table unique index" );
+        _log( $LOG_LEVEL_ERROR, 'Failed to create cache table unique index' );
     }
 
     $sth->finish();
@@ -1702,13 +1835,15 @@ sub create_cache_table($$)
         $index_name =~ s/[^[:alnum:]]/_/g;
         my $full_index_name = "ix_$ct_hash->{name}_$index_name";
 
-        my $def = "CREATE INDEX $full_index_name ON $ct_hash->{schema}.$ct_hash->{name}( $columns )";
+        my $def = "CREATE INDEX $full_index_name "
+                . "ON $ct_hash->{schema}.$ct_hash->{name}( $columns )";
 
         unless( $handle->do( $def ) )
         {
             _log(
                 $LOG_LEVEL_ERROR,
-                "Failure when creating index for columns ($columns) on $ct_hash->{schema}.$ct_hash->{name}"
+                "Failure when creating index for columns ($columns) on "
+              . "$ct_hash->{schema}.$ct_hash->{name}"
             );
         }
     }
@@ -1734,13 +1869,15 @@ sub rename_cache_table_indexes($$)
         my $temp_index_name = "ix_$ct_hash->{name}_temp_$index_name";
         my $new_index_name  = "ix_$ct_hash->{name}_$index_name";
 
-        my $def = "ALTER INDEX IF EXISTS $temp_index_name RENAME TO $new_index_name";
+        my $def = "ALTER INDEX IF EXISTS $temp_index_name "
+                . "RENAME TO $new_index_name";
 
         unless( $handle->do( $def ) )
         {
             _log(
                 $LOG_LEVEL_ERROR,
-                "Failed to rename index - this may cause issues the next time a table is redefined"
+                'Failed to rename index - this may cause issues the next time '
+              . 'a table is redefined'
             );
         }
     }
@@ -1758,7 +1895,11 @@ sub create_cache_table_unique($$) :Export( :MANDATORY )
 
     $handle = &db_connect( $handle );
     my $index_columns = join( ',', @{$ct_hash->{unique_index}} );
-    my $sth = try_query( $handle, "CREATE UNIQUE INDEX IF NOT EXISTS ix_$ct_hash->{name} ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )" );
+    my $sth           = try_query(
+        $handle,
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_$ct_hash->{name} "
+      . "ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )"
+    );
 
     return 0 unless( $sth );
 
@@ -1855,7 +1996,6 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
     );
 
     $handle = &db_connect( $handle );
-    # TODO This can take some time
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
     my $sth             = try_query( $handle, $tt_query );
@@ -1867,10 +2007,18 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         my $tt_count = get_table_count( $handle, $temp_table_name );
         return undef if( $tt_count < 0 );
 
-        my $return_data = { count => $tt_count, name => $temp_table_name, index => "ix_$temp_table_name" };
-        my $uniques     = join( ',', @{$ct_hash->{unique_index}} );
+        my $return_data = {
+            count => $tt_count,
+            name  => $temp_table_name,
+            index => "ix_$temp_table_name"
+        };
+        my $uniques = join( ',', @{$ct_hash->{unique_index}} );
 
-        $sth = try_query( $handle, "CREATE UNIQUE INDEX ix_$temp_table_name ON $temp_table_name( $uniques )" );
+        $sth = try_query(
+            $handle,
+            "CREATE UNIQUE INDEX ix_$temp_table_name "
+          . "ON $temp_table_name( $uniques )"
+        );
 
         if( $sth )
         {
@@ -1880,8 +2028,8 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         {
             _log(
                 $LOG_LEVEL_WARNING,
-                "Failed to create unique index on comparrison table. "
-              . "Please verify the cardinality of this index provided!"
+                'Failed to create unique index on comparrison table. '
+              . 'Please verify the cardinality of this index provided!'
             );
         }
 
@@ -1997,12 +2145,18 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
     {
         my $join_clause  = join(
             ' AND ',
-            map { "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ) )" } @$unique_columns
+            map {
+                "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
+              . "OR ( tt.$_ = vw.$_ ) )"
+           } @$unique_columns
         );
 
         my $where_clause = join(
             ' AND ',
-            map { "( ( ct.$_ IS NULL AND tt.$_ IS NULL ) OR ( ct.$_ = tt.$_ ) )" } @$unique_columns
+            map {
+                "( ( ct.$_ IS NULL AND tt.$_ IS NULL ) "
+              . "OR ( ct.$_ = tt.$_ ) )"
+            } @$unique_columns
         );
 
         push( @$join_clauses,  $join_clause  );
@@ -2028,19 +2182,26 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
         my $columns = join( ',', @$table_columns );
         _log(
             $LOG_LEVEL_DEBUG,
-            "Performing large update optimization ($temp_table->{count} possible rows)"
+            "Performing large update optimization ($temp_table->{count} "
+          . ' possible rows)'
         );
         $handle->do( 'BEGIN' );
         $handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
-        my $delete_where = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
+        my $delete_where = '( ( '
+                         . join( ' ) OR ( ', @$where_clauses )
+                         . ' ) )';
         my $DELETE_Q = <<END_SQL;
         DELETE FROM $cache_table_schema.$cache_table_name ct
               USING $temp_table->{name} tt
               WHERE $delete_where
 END_SQL
+
         unless( &try_query( $handle, $DELETE_Q, [] ) )
         {
-            _log( $LOG_LEVEL_ERROR, 'Failed to bulk delete rows for fast update' );
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Failed to bulk delete rows for fast update'
+            );
             $handle->do( 'ROLLBACK' );
             return 0;
         }
@@ -2057,7 +2218,10 @@ END_SQL
         unless( &try_query( $handle, $INSERT_Q ) )
         {
             $handle->do( 'ROLLBACK' );
-            _log( $LOG_LEVEL_ERROR, 'failed to bulk insert rows for fast update' );
+            _log(
+                $LOG_LEVEL_ERROR,
+                'failed to bulk insert rows for fast update'
+            );
             return 0
         }
 
@@ -2072,10 +2236,22 @@ END_SQL
     }
     else
     {
-        my $update_fragment = join( ', ', map { "$_ = tt.$_" } @$non_unique_columns );
-        my $where_clause    = '( ( ' . join( ' ) OR ( ', @$where_clauses ) . ' ) )';
-        my $diff_distinct   = '( ' . join( ' OR ', map { "ct.$_ IS DISTINCT FROM tt.$_" } @$non_unique_columns ) . ' )';
-        my $UPDATE_Q = <<END_SQL;
+        my $update_fragment = join(
+            ', ',
+            map { "$_ = tt.$_" } @$non_unique_columns
+        );
+        my $where_clause    = '( ( '
+                            . join( ' ) OR ( ', @$where_clauses )
+                            . ' ) )';
+        my $diff_distinct   = '( '
+                            . join(
+                                ' OR ',
+                                map {
+                                    "ct.$_ IS DISTINCT FROM tt.$_"
+                                } @$non_unique_columns
+                             )
+                            . ' )';
+        my $UPDATE_Q        = <<END_SQL;
         UPDATE $cache_table_schema.$cache_table_name ct
            SET $update_fragment
           FROM $temp_table->{name} tt
@@ -2120,7 +2296,10 @@ sub generate_insert_statement($$$) :Export( :MANDATORY )
     {
         my $join_clause  = join(
             ' AND ',
-            map { "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ) )" } @$unique_columns
+            map {
+                "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
+              . "OR ( tt.$_ = vw.$_ ) )"
+            } @$unique_columns
         );
         my $where_clause = join(
             ' AND ',
@@ -2176,11 +2355,14 @@ sub generate_aged_delete_statement($$$$$) :Export( :MANDATORY )
     my $definition         = $cache_hash->{definition};
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
-    my $table_columns      = $cache_hash->{cache_table_columns};
     my $uniques            = $cache_hash->{cache_table_uniques};
 
-    $current_handle->do( "SET application_name = 'Fast delete: $cache_table_name'" );
-    $aged_handle->do( "SET application_name = 'Lookback: $cache_table_name'" );
+    $current_handle->do(
+        "SET application_name = 'Fast delete: $cache_table_name'"
+    );
+    $aged_handle->do(
+        "SET application_name = 'Lookback: $cache_table_name'"
+    );
 
     my $column_data_type_hash = {};
     my $column_data_types = [];
@@ -2199,7 +2381,10 @@ END_SQL
 
     unless( $get_type_sth )
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to prepare type lookup query for aged handle' );
+        _log(
+            $LOG_LEVEL_ERROR,
+            'Failed to prepare type lookup query for aged handle'
+        );
         return 0;
     }
 
@@ -2212,17 +2397,28 @@ END_SQL
             $get_type_sth->bind_param( 2, $unique_column );
             unless( $get_type_sth->execute() )
             {
-                _log( $LOG_LEVEL_ERROR, "Failed to lookup datatype for unique column $unique_column on aged handle" );
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    'Failed to lookup datatype for unique column '
+                  . "$unique_column on aged handle"
+                );
                 return 0;
             }
 
             unless( $get_type_sth->rows() > 0 )
             {
-                _log( $LOG_LEVEL_ERROR, "No column found on aged handle for $unique_column" );
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "No column found on aged handle for $unique_column"
+                );
                 return 0;
             }
+
             my $row = $get_type_sth->fetchrow_hashref();
-            push( @$column_data_types, $unique_column . ' ' . $row->{datatype} );
+            push(
+                @$column_data_types,
+                $unique_column . ' ' . $row->{datatype}
+            );
             $column_data_type_hash->{$unique_column} = $row->{datatype};
         }
     }
@@ -2254,25 +2450,40 @@ END_SQL
 
     unless( $aged_sth )
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to prepare aged data query for fast delete' );
+        _log(
+            $LOG_LEVEL_ERROR,
+            'Failed to prepare aged data query for fast delete'
+        );
         return 0;
     }
 
     unless( $aged_sth->execute() )
     {
-        _log( $LOG_LEVEL_DEBUG, 'Failed to execute aged data query for fast delete' );
+        _log(
+            $LOG_LEVEL_DEBUG,
+            'Failed to execute aged data query for fast delete'
+        );
         return 0;
     }
 
-    my $bind_points = '?' . ( ',?' x ( scalar( keys %$column_data_type_hash ) - 1 ) );
+    my $bind_points = '?'
+                    . (
+                        ',?' x ( scalar( keys %$column_data_type_hash ) - 1 )
+                      );
     my $insert_q    = "INSERT INTO $past_temp_table( "
-                    . join( ',', sort { $a cmp $b } keys %$column_data_type_hash )
+                    . join(
+                          ',',
+                          sort { $a cmp $b } keys %$column_data_type_hash
+                      )
                     . " ) VALUES ( $bind_points )";
 
     my $insert_sth = $current_handle->prepare( $insert_q );
     unless( $insert_sth )
     {
-        _log( $LOG_LEVEL_ERROR, 'Failed to prepared insert statement for past data transfer' );
+        _log(
+            $LOG_LEVEL_ERROR,
+            'Failed to prepared insert statement for past data transfer'
+        );
         $aged_sth->finish();
         $aged_handle->do( 'ROLLBACK' );
         $aged_handle->disconnect();
@@ -2321,20 +2532,37 @@ END_SQL
                 my $value;
                 if( $row->{$unique} )
                 {
-                    $value = "'" . $row->{$unique} . "'::" . $column_data_type_hash->{$unique};
+                    $value = "'"
+                           . $row->{$unique}
+                           . "'::"
+                           . $column_data_type_hash->{$unique};
                 }
                 else
                 {
                     $value = 'NULL::' . $column_data_type_hash->{$unique};
                 }
 
-                push( @$where_elems, "( vw.$unique IS NULL AND  $value IS NULL ) OR ( vw.$unique = $value )" );
+                push(
+                    @$where_elems,
+                    "( vw.$unique IS NULL AND  $value IS NULL ) "
+                  . "OR ( vw.$unique = $value )"
+                );
             }
 
-            push( @$where_filter_elems, ' ( ( ' . join( ' ) AND ( ', @$where_elems ) . ' ) ) ' );
+            push(
+                @$where_filter_elems,
+                ' ( ( '
+              . join( ' ) AND ( ', @$where_elems )
+              . ' ) ) '
+            );
         }
 
-        push( @$where_filters, ' ( ( ' . join( ' ) OR ( ', @$where_filter_elems ) . ' ) ) ' );
+        push(
+            @$where_filters,
+            ' ( ( '
+          . join( ' ) OR ( ', @$where_filter_elems )
+          . ' ) ) '
+        );
 
         foreach my $unique( sort { $a cmp $b } keys %$column_data_type_hash )
         {
@@ -2344,7 +2572,10 @@ END_SQL
 
         unless( $insert_sth->execute() )
         {
-            _log( $LOG_LEVEL_ERROR, 'Failed to insert aged data into current timeline' );
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Failed to insert aged data into current timeline'
+            );
             return 0;
         }
     }
@@ -2354,16 +2585,24 @@ END_SQL
     $aged_handle->do( 'ROLLBACK' );
     $aged_handle->disconnect();
 
-    # at this point, past_temp_table contains data from a historic timeline but is in the present timeline
-    my $unique_column_select = join( ',', map { "vw.$_" } keys %$column_data_type_hash );
+    # at this point, past_temp_table contains data from a historic timeline but
+    # is in the present timeline
+    my $unique_column_select = join(
+        ',',
+        map { "vw.$_" } keys %$column_data_type_hash
+    );
 
     my $left_join_clauses = [];
     my $left_join_wheres  = [];
+
     foreach my $unique_columns( @$uniques )
     {
         my $join_clause = join(
             ' AND ',
-            map { "( vw.$_ IS NULL AND tt.$_ IS NULL ) OR ( vw.$_ = tt.$_ )" } @$unique_columns
+            map {
+                "( vw.$_ IS NULL AND tt.$_ IS NULL ) "
+              . "OR ( vw.$_ = tt.$_ )"
+            } @$unique_columns
         );
 
         my $where_clause = join(
@@ -2375,9 +2614,16 @@ END_SQL
         push( @$left_join_clauses, $join_clause );
     }
 
-    my $left_join_predicate  = ' ( ( ' . join( ' ) OR ( ', @$left_join_clauses ) . ' ) ) ';
-    my $left_join_where      = ' ( ( ' . join( ' ) OR ( ', @$left_join_wheres ) . ' ) ) ';
-    my $main_filter          = '( ' . join( ') OR (', @$where_filters ) . ' )';
+    my $left_join_predicate  = ' ( ( '
+                             . join( ' ) OR ( ', @$left_join_clauses )
+                             . ' ) ) ';
+    my $left_join_where      = ' ( ( '
+                             . join( ' ) OR ( ', @$left_join_wheres )
+                             . ' ) ) ';
+    my $main_filter          = '( '
+                             . join( ') OR (', @$where_filters )
+                             . ' )';
+
     my $delete_query = <<END_SQL;
     WITH tt_rows_to_delete AS
     (
@@ -2417,10 +2663,8 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     my $definition         = $cache_hash->{definition};
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
-    my $table_columns      = $cache_hash->{cache_table_columns};
     my $uniques            = $cache_hash->{cache_table_uniques};
 
-    my $delete_tt_name;
     $handle->do( "SET application_name = 'delete: $cache_table_name'" );
     my $DELETE_Q;
     my $unique_uniques = [];
@@ -2430,7 +2674,10 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     {
         foreach my $unique_column( @$unique_columns )
         {
-            push( @$unique_uniques, $unique_column ) unless( grep /^$unique_column$/, @$unique_uniques );
+            push(
+                @$unique_uniques,
+                $unique_column
+            ) unless( grep /^$unique_column$/, @$unique_uniques );
         }
 
         push(
@@ -2438,16 +2685,22 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
             join(
                 ' AND ',
                 map {
-                    "(( tt.$_ IS NULL AND vw.$_ IS NULL ) OR ( tt.$_ = vw.$_ ))"
+                    "(( tt.$_ IS NULL AND vw.$_ IS NULL ) "
+                  . "OR ( tt.$_ = vw.$_ ))"
                 } @$unique_columns
             )
         );
     }
 
-    my $tt_sel = join( ',', map { "tt.$_" } @$unique_uniques );
-    my $vw_sel = join( ',', map { "vw.$_" } @$unique_uniques );
+    my $tt_sel         = join( ',', map { "tt.$_" } @$unique_uniques );
+    my $vw_sel         = join( ',', map { "vw.$_" } @$unique_uniques );
     my $join_predicate = join( ' ) OR ( ', @$join_preds );
-    $join_predicate = '(' . $join_predicate . ')' if( scalar( @$join_preds ) > 1 );
+
+    if( scalar( @$join_preds ) > 1 )
+    {
+        $join_predicate = '(' . $join_predicate . ')';
+    }
+
     $DELETE_Q = <<"END_SQL";
 WITH tt_rows_to_delete AS
 (
