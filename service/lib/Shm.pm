@@ -10,12 +10,12 @@ use Perl6::Export::Attrs;
 use Params::Validate qw( :all );
 use English qw( -no_match_vars );
 
-Readonly::Scalar our $WRITE_LOCK   :Export( :MANDATORY ) => 'WL';
-Readonly::Scalar our $WRITE_UNLOCK :Export( :MANDATORY ) => 'WUL';
-Readonly::Scalar our $READ_LOCK    :Export( :MANDATORY ) => 'RL';
-Readonly::Scalar our $READ_UNLOCK  :Export( :MANDATORY ) => 'RUL'; # Read to write removed - theres a deadlock scenario
-Readonly::Scalar our $WRITE_TO_READ :Export( :MANDATORY ) => 'W2R'; # downgrade a write exclusive
-Readonly::Scalar our $READ_NOWAIT :Export( :MANDATORY ) => 'RNW';
+Readonly::Scalar our $WRITE_LOCK         :Export( :MANDATORY ) => 'WL';
+Readonly::Scalar our $WRITE_UNLOCK       :Export( :MANDATORY ) => 'WUL';
+Readonly::Scalar our $READ_LOCK          :Export( :MANDATORY ) => 'RL';
+Readonly::Scalar our $READ_UNLOCK        :Export( :MANDATORY ) => 'RUL'; # Read to write removed - theres a deadlock scenario
+Readonly::Scalar our $WRITE_TO_READ      :Export( :MANDATORY ) => 'W2R'; # downgrade a write exclusive
+Readonly::Scalar our $READ_NOWAIT        :Export( :MANDATORY ) => 'RNW';
 Readonly::Scalar our $WRITE_CHECK_NOWAIT :Export( :MANDATORY ) => 'WCNW';
 Readonly my $SHM_CREATE_FLAGS => IPC_EXCL | IPC_CREAT;
 Readonly my $SEM_PERM_FLAGS   => ( S_IRUSR | S_IWUSR );
@@ -152,13 +152,19 @@ sub stat_shm($)
 
             if( !defined( $shmkey ) )
             {
-                warn "stat_shm(): shmget failed on $id: $!\n";
+                if( $$ == $_PARENT_PID )
+                {
+                    print "stat_shm(): shmget failed on $id: $!\n";
+                }
+                # Child pids can hit here if the parent has not yet create the segment
                 return 0;
             }
+
             $ACTIVE_KEYS->{$id}->{shm} = $shmkey;
+
             unless( shmctl( $ACTIVE_KEYS->{$id}->{shm}, IPC_STAT, $shm_stat ) )
             {
-                warn "shmstat failed for $id: $!\n";
+                print "shmstat failed for $id: $!\n";
                 return 0;
             }
         }
