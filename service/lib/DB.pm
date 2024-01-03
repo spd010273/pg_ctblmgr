@@ -1539,7 +1539,8 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
     # our method emits  INFO level, and the typically encountered WARNING/ERROR
     # level will pass the INFO log levels which ends up spamming the crap out
     # of logs since we are polling the slot.
-    $handle->do( "SET log_min_messages = 'FATAL'" ) if( $handle );
+    
+    $handle->do( "SET log_min_messages = 'FATAL'" ) if( $handle && $DEBUG );
 
     if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
     {
