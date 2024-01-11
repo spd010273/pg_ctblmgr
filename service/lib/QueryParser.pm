@@ -33,6 +33,7 @@ Readonly::Scalar my $OID_CACHE => <<END_SQL;
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
        AND n.nspname::VARCHAR != 'pg_toast'
+       AND n.nspname::VARCHAR != 'pgctblmgr'
      UNION ALL
     SELECT n.nspname::VARCHAR AS schema_name,
            p.proname::VARCHAR AS obj_name,
@@ -44,6 +45,7 @@ INNER JOIN pg_namespace n
 INNER JOIN pg_namespace n
         ON n.oid = p.pronamespace
        AND n.nspname::VARCHAR != 'pg_toast'
+       AND n.nspname != 'pgctblmgr'
      UNION ALL
     SELECT n.nspname::VARCHAR AS schema_name,
            c.relname::VARCHAR AS obj_name,
@@ -3075,9 +3077,9 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                         {
                             my $binds = &bind_filters(
                                 {
-                                    handle => $handle,
-                                    filters => $filters,
-                                    schema => $schema,
+                                    handle   => $handle,
+                                    filters  => $filters,
+                                    schema   => $schema,
                                     relation => $table_name,
                                     alias    => $alias,
                                 }
@@ -3092,7 +3094,7 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                 }
             }
         }
-
+        
         if( $where_expressions->{$position} )
         {
             push( @{$where_expressions->{$position}}, @$where_entries );
@@ -3102,7 +3104,6 @@ sub generate_where_expressions($) :Export( :MANDATORY )
             $where_expressions->{$position} = $where_entries;
         }
     }
-
 
     foreach my $position( keys %$where_expressions )
     {
