@@ -1515,20 +1515,18 @@ sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
     return;
 }
 
-sub replication_peek($$$$$) :Export( :MANDATORY )
+sub replication_peek($$$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $filter_tables,
         $wal_level,
-        $max_lsn,
-        $max_idle_lsn
+        $max_lsn
       ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => SCALAR },
         { type => SCALAR },
-        { type => SCALARREF },
         { type => SCALARREF },
     );
 
@@ -1568,6 +1566,11 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
         while( my $row = $sth->fetchrow_hashref() )
         {
             my $lsn  = $row->{lsn};
+            if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
+            {
+                $$max_lsn = $lsn;
+            }
+
             my $xid = $row->{xid};
             my $data;
             $data = decode_json( $row->{data} ) if( $row->{data} );
@@ -1633,13 +1636,11 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
         }
 
         $sth->finish();
-        my $old_max_idle = $$max_idle_lsn;
         my $out_data = [];
         # Step through transactional data and only output DML if we detect both
         # a valid BEGIN and COMMIT for the DML's XID
         foreach my $xid( @$xids )
         {
-            next unless( exists( $intermediate_data->{$xid}->{COMMIT} ) );
             if(
                   exists( $intermediate_data->{$xid}->{DML} )
                && scalar( @{$intermediate_data->{$xid}->{DML}} )
@@ -1647,36 +1648,18 @@ sub replication_peek($$$$$) :Export( :MANDATORY )
             {
                 foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
                 {
-                    $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT};
-
-                    if(
-                        !defined( $$max_lsn )
-                     || lsn_cmp( $$max_lsn, $dml->{commit_lsn} ) < 0
-                      )
+                    $dml->{commit_lsn} = $intermediate_data->{$xid}->{BEGIN};
+                    $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
+                    if( $DEBUG )
                     {
-                        $$max_lsn = $dml->{commit_lsn};
+                        $dml->{begin_lsn} = $intermediate_data->{$xid}->{BEGIN};
+                        $dml->{real_commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
                     }
                     push( @$out_data, $dml );
                 }
             }
-            elsif( exists( $intermediate_data->{$xid}->{BEGIN} ) )
-            {
-                if(
-                    lsn_cmp(
-                        $intermediate_data->{$xid}->{COMMIT},
-                        $$max_idle_lsn
-                    ) > 0
-                  )
-                {
-                    $$max_idle_lsn = $intermediate_data->{$xid}->{COMMIT};
-                }
-            }
         }
 
-        if( scalar( @$out_data ) > 0 )
-        {
-            $$max_idle_lsn = $old_max_idle;
-        }
         return if( scalar( @$out_data ) == 0 );
         return $out_data;
     }

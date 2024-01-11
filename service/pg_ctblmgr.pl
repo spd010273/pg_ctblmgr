@@ -806,12 +806,12 @@ sub parent_loop($)
 
         $last_current_lsn = &get_current_lsn( $handle );
         $peek_start = [ gettimeofday() ] if( $TIMING );
+        _log( $LOG_LEVEL_DEBUG, "Peeking to $last_peeked_lsn" ) if( $last_peeked_lsn );
         $data = &replication_peek(
             $handle,
             $all_filter_tables,
             $wal_level,
-            \$last_peeked_lsn,
-            \$max_idle_lsn
+            \$last_peeked_lsn
         );
 
         if( $TIMING )
@@ -825,6 +825,7 @@ sub parent_loop($)
         if( $data )
         {
             # iterate over each change in outer loop - one change may go to one or more workers
+            _log( $LOG_LEVEL_INFO, 'Distributing ' . scalar( @$data ) . ' changes' );
             _log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
             do_lock( $WFT_KEY, $WRITE_LOCK );
             $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
@@ -832,6 +833,7 @@ sub parent_loop($)
             foreach my $change( @$data )
             {
                 $num_in_flight_changes++;
+
                 foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
                 {
                     my $filter_table = $change->{data}->{schema_name} . '.' . $change->{data}->{table_name};
@@ -980,6 +982,7 @@ sub parent_loop($)
             my $youngest_lsn_proc_delta = tv_interval( $youngest_lsn_proc_start, [ gettimeofday() ] );
             _log( $LOG_LEVEL_DEBUG, "Youngest LSN processing took $youngest_lsn_proc_delta seconds" );
         }
+
         ## LSN increment logic
         ##====================
 
@@ -989,20 +992,31 @@ sub parent_loop($)
         # to during idle times.
 
         $lsn_increment_start = [ gettimeofday() ] if( $TIMING );
-
         if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
         {
-            $seekable_lsn = $max_idle_lsn;
-        }
-        else
-        {
-            if( defined( $last_peeked_lsn ) && defined( $youngest_in_flight_lsn ) )
+            if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
             {
-                if( lsn_cmp( $last_peeked_lsn, $youngest_in_flight_lsn ) < 0 )
-                {
-                    $seekable_lsn = $last_peeked_lsn;
-                }
+                _log(
+                    $LOG_LEVEL_DEBUG,
+                    "System appears idle, advancing slot to current lsn $last_current_lsn"
+                );
+                $max_idle_lsn = $last_current_lsn;
             }
+            else
+            {
+                $max_idle_lsn = $last_peeked_lsn;
+            }
+        }
+
+        $seekable_lsn = $max_idle_lsn;
+
+        # Safety check - CANNOT seek past any in-flight change
+        if(
+               defined( $youngest_in_flight_lsn )
+            && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
+          )
+        {
+            $seekable_lsn = $youngest_in_flight_lsn;
         }
 
         if(
@@ -1013,15 +1027,14 @@ sub parent_loop($)
             )
           )
         {
-            _log( $LOG_LEVEL_DEBUG, "Seeked to $seekable_lsn" );
             my $rows = replication_seek( $handle, $seekable_lsn );
-            #my $rows = 0;
             if( $rows < 0 )
             {
                 _log( $LOG_LEVEL_DEBUG, "Logical seek to $seekable_lsn failed" );
             }
             else
             {
+                _log( $LOG_LEVEL_DEBUG, "Seeked to $seekable_lsn" );
                 $last_seeked_lsn = $seekable_lsn;
             }
         }
