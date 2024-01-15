@@ -1912,6 +1912,11 @@ $CONNECTION_MAP->{connection_string} = $conn_string;
 $CONNECTION_MAP->{user_name}         = $user;
 $CONNECTION_MAP->{dbname}            = $dbname;
 
+if( !defined( $DAEMONIZE ) || !$DAEMONIZE )
+{
+    daemonize();
+}
+
 # Pre-flight checks
 my $handle = &db_connect();
 

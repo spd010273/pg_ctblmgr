@@ -3,6 +3,7 @@ package Util;
 use strict;
 use warnings;
 
+use POSIX qw( setsid );
 use Perl6::Export::Attrs;
 use Readonly;
 use IO::Interactive qw( is_interactive );
@@ -187,6 +188,38 @@ sub _log($$) :Export( :MANDATORY )
         {
             exit 1;
         }
+    }
+
+    return;
+}
+
+sub daemonize() :Export( :MANDATORY )
+{
+    unless( open STDIN, '/dev/null' )
+    {
+        die( "Can't read /dev/null: $!" );
+    }
+
+    unless( open STDOUT, '>/dev/null' )
+    {
+        die( "Can't write to /dev/null: $!" );
+    }
+
+    my $pid = fork();
+
+    unless( defined( $pid ) )
+    {
+        die( "Can't fork: $!" );
+    }
+
+    if( $pid )
+    {
+        exit 0;
+    }
+
+    unless( setsid() )
+    {
+        die( "Can't start a new session: $!" );
     }
 
     return;
