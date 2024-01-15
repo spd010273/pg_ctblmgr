@@ -1914,7 +1914,7 @@ $CONNECTION_MAP->{dbname}            = $dbname;
 
 if( !defined( $DAEMONIZE ) || !$DAEMONIZE )
 {
-    daemonize();
+    #daemonize();
 }
 
 # Pre-flight checks
