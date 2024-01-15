@@ -106,6 +106,12 @@ sub update_status($;$)
     return $success;
 }
 
+sub _handle_sighup()
+{
+    # dummy for now
+    return;
+}
+
 sub _terminate_sigint()
 {
     # Wrapper to mask errors
@@ -173,6 +179,7 @@ sub _terminate(;$$$)
     exit( 0 );
 }
 
+$SIG{HUP} = \&_handle_sighup; 
 $SIG{INT} = \&_terminate_sigint;
 $SIG{__DIE__} = \&_terminate;
 

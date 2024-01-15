@@ -23,7 +23,7 @@ Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
-Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
+Readonly::Scalar my $DEFAULT_SEEK_COUNT => 1000;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
       FROM pg_catalog.pg_create_logical_replication_slot(
@@ -180,7 +180,7 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY_NO_FT => <<END_SQL;
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR
            )
-     WHERE ?::PG_LSN IS NULL OR lsn > ?::PG_LSN
+     WHERE ?::PG_LSN IS NULL OR lsn >= ?::PG_LSN
   ORDER BY lsn ASC
 END_SQL
 
@@ -199,7 +199,7 @@ Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
                'include-transaction'::VARCHAR,
                'TRUE'::VARCHAR
            )
-     WHERE ?::PG_LSN IS NULL OR lsn > ?::PG_LSN
+     WHERE ?::PG_LSN IS NULL OR lsn >= ?::PG_LSN
   ORDER BY lsn ASC
 END_SQL
 
