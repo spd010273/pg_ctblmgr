@@ -44,8 +44,8 @@ Readonly my $GIT_INIT_COMMAND    => 'git submodule update --init --recursive';
 Readonly my $START_SH => <<BASH;
 #!/bin/bash
 #    This script will start the pg_ctblmgr daemons
-
-__INSTALL_DIR__/pg_ctblmgr -U __USERNAME__ -d __DBNAME__ -h __HOSTNAME__ -p __PORT__
+trap "" SIGHUP
+__INSTALL_DIR__/pg_ctblmgr -U __USERNAME__ -d __DBNAME__ -h __HOSTNAME__ -p __PORT__ -D
 BASH
 
 Readonly my $STOP_SH => <<BASH;
