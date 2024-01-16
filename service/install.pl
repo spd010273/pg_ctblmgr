@@ -45,7 +45,7 @@ Readonly my $START_SH => <<BASH;
 #!/bin/bash
 #    This script will start the pg_ctblmgr daemons
 trap "" SIGHUP
-__INSTALL_DIR__/pg_ctblmgr -U __USERNAME__ -d __DBNAME__ -h __HOSTNAME__ -p __PORT__
+__INSTALL_DIR__/pg_ctblmgr -U __USERNAME__ -d __DBNAME__ -h __HOSTNAME__ -p __PORT__ -D
 BASH
 
 Readonly my $STOP_SH => <<BASH;
@@ -58,7 +58,8 @@ BASH
 Readonly my $RELOAD_SH => <<BASH;
 #!/bin/bash
 #   This script will issue a SIGHUP to pg_ctblmgr
-pkill -1 pg_ctblmgr
+pkill -1 'pg_ctblmgr '
+exit 0
 BASH
 
 my $hostname;

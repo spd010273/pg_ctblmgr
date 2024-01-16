@@ -162,7 +162,7 @@ sub _log($$) :Export( :MANDATORY )
 
     my $log_message = "$time_stamp [$pid] $log_level_name: $message\n";
 
-    if( is_interactive() || !$DAEMONIZE )
+    if( is_interactive() || !$DAEMONIZE || !defined( $LOG_FH ) )
     {
         if( $log_level >= $LOG_LEVEL_ERROR )
         {

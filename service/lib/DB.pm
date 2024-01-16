@@ -23,7 +23,7 @@ Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
-Readonly::Scalar my $DEFAULT_SEEK_COUNT => 1000;
+Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
       FROM pg_catalog.pg_create_logical_replication_slot(
@@ -1558,111 +1558,114 @@ sub replication_peek($$$$) :Export( :MANDATORY )
     }
 
     return 0 unless( $sth );
-    if( $sth->rows() > 0 )
+    if( $sth->rows() <= 0 )
     {
-        my $intermediate_data = {};
-        my $xids              = [];
+        $sth->finish();
+        return 0;
+    }
 
-        while( my $row = $sth->fetchrow_hashref() )
+    my $intermediate_data = {};
+    my $xids              = [];
+
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        my $lsn  = $row->{lsn};
+        if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
         {
-            my $lsn  = $row->{lsn};
-            if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
+            $$max_lsn = $lsn;
+        }
+
+        my $xid = $row->{xid};
+        my $data;
+        $data = decode_json( $row->{data} ) if( $row->{data} );
+        my $out  = { lsn => $lsn, xid => $xid };
+
+        if( $wal_level eq 'F' )
+        {
+            $out->{data} = $data;
+        }
+        elsif( $wal_level eq 'M' )
+        {
+            if( defined( $data->{d} ) )
             {
-                $$max_lsn = $lsn;
+                #inflate data
+                $out->{data}->{table_name}  = $data->{t};
+                $out->{data}->{schema_name} = $data->{s};
+                $out->{data}->{key}  = $data->{key};
+                $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
+                $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
+                $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
             }
+            $out->{data}->{xid} = $data->{x};
+        }
 
-            my $xid = $row->{xid};
-            my $data;
-            $data = decode_json( $row->{data} ) if( $row->{data} );
-            my $out  = { lsn => $lsn, xid => $xid };
+        unless( grep /^$xid$/, @$xids )
+        {
+            push( @$xids, $xid );
+        }
 
+        if(
+              (
+                $wal_level eq 'F'
+             && defined( $data->{type} )
+             && $data->{type} ne 'COMMIT'
+             && $data->{type} ne 'BEGIN'
+             && $data->{type} ne 'ROLLBACK'
+              )
+           || (
+                $wal_level eq 'M'
+             && !defined( $data->{b} )
+              )
+          )
+        {
+            push( @{$intermediate_data->{$xid}->{DML}}, $out );
+        }
+        else
+        {
+            # Assume transaction demarcation
+            my $type;
             if( $wal_level eq 'F' )
             {
-                $out->{data} = $data;
+                $type = $data->{type};
             }
             elsif( $wal_level eq 'M' )
             {
-                if( defined( $data->{d} ) )
-                {
-                    #inflate data
-                    $out->{data}->{table_name}  = $data->{t};
-                    $out->{data}->{schema_name} = $data->{s};
-                    $out->{data}->{key}  = $data->{key};
-                    $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
-                    $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
-                    $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
-                }
-                $out->{data}->{xid} = $data->{x};
+                $type = 'BEGIN' if( $data->{b} eq 'B' );
+                $type = 'COMMIT' if( $data->{b} eq 'C' );
+                $type = 'ROLLBACK' if( $data->{b} eq 'R' );
             }
 
-            unless( grep /^$xid$/, @$xids )
-            {
-                push( @$xids, $xid );
-            }
-
-            if(
-                  (
-                    $wal_level eq 'F'
-                 && defined( $data->{type} )
-                 && $data->{type} ne 'COMMIT'
-                 && $data->{type} ne 'BEGIN'
-                 && $data->{type} ne 'ROLLBACK'
-                  )
-               || (
-                    $wal_level eq 'M'
-                 && !defined( $data->{b} )
-                  )
-              )
-            {
-                push( @{$intermediate_data->{$xid}->{DML}}, $out );
-            }
-            else
-            {
-                # Assume transaction demarcation
-                my $type;
-                if( $wal_level eq 'F' )
-                {
-                    $type = $data->{type};
-                }
-                elsif( $wal_level eq 'M' )
-                {
-                    $type = 'BEGIN' if( $data->{b} eq 'B' );
-                    $type = 'COMMIT' if( $data->{b} eq 'C' );
-                    $type = 'ROLLBACK' if( $data->{b} eq 'R' );
-                }
-
-                $intermediate_data->{$xid}->{$type} = $out->{lsn};
-            }
+            $intermediate_data->{$xid}->{$type} = $out->{lsn};
         }
-
-        $sth->finish();
-        my $out_data = [];
-        # Step through transactional data and only output DML if we detect both
-        # a valid BEGIN and COMMIT for the DML's XID
-        foreach my $xid( @$xids )
-        {
-            if(
-                  exists( $intermediate_data->{$xid}->{DML} )
-               && scalar( @{$intermediate_data->{$xid}->{DML}} )
-              )
-            {
-                foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
-                {
-                    $dml->{commit_lsn} = $intermediate_data->{$xid}->{BEGIN};
-                    $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
-                    if( $DEBUG )
-                    {
-                        $dml->{begin_lsn} = $intermediate_data->{$xid}->{BEGIN};
-                        $dml->{real_commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
-                    }
-                    push( @$out_data, $dml );
-                }
-            }
-        }
-
-        return if( scalar( @$out_data ) == 0 );
-        return $out_data;
     }
+
+    $sth->finish();
+    my $out_data = [];
+    # Step through transactional data and only output DML if we detect both
+    # a valid BEGIN and COMMIT for the DML's XID
+    foreach my $xid( @$xids )
+    {
+        if(
+              exists( $intermediate_data->{$xid}->{DML} )
+           && scalar( @{$intermediate_data->{$xid}->{DML}} )
+          )
+        {
+            foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
+            {
+                $dml->{commit_lsn} = $intermediate_data->{$xid}->{BEGIN};
+                $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
+                if( $DEBUG )
+                {
+                    $dml->{begin_lsn} = $intermediate_data->{$xid}->{BEGIN};
+                    $dml->{real_commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
+                }
+                push( @$out_data, $dml );
+            }
+        }
+    }
+
+    return if( scalar( @$out_data ) == 0 );
+    return $out_data;
 
     $sth->finish();
     return 0;

@@ -833,14 +833,15 @@ sub parent_loop($)
         {
             # iterate over each change in outer loop - one change may go to one or more workers
             _log( $LOG_LEVEL_INFO, 'Distributing ' . scalar( @$data ) . ' changes' );
-            _log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
+            #_log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
             do_lock( $WFT_KEY, $WRITE_LOCK );
             $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
 
             foreach my $change( @$data )
             {
                 $num_in_flight_changes++;
-
+                _log( $LOG_LEVEL_INFO, $change->{data}->{table_name} );
+                print Dumper( $change );
                 foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
                 {
                     my $filter_table = $change->{data}->{schema_name} . '.' . $change->{data}->{table_name};
@@ -1041,6 +1042,7 @@ sub parent_loop($)
             }
             else
             {
+                #_log( $LOG_LEVEL_INFO, "Seeked to $seekable_lsn" );
                 _log( $LOG_LEVEL_DEBUG, "Seeked to $seekable_lsn" );
                 $last_seeked_lsn = $seekable_lsn;
             }
@@ -1912,10 +1914,7 @@ $CONNECTION_MAP->{connection_string} = $conn_string;
 $CONNECTION_MAP->{user_name}         = $user;
 $CONNECTION_MAP->{dbname}            = $dbname;
 
-if( !defined( $DAEMONIZE ) || !$DAEMONIZE )
-{
-    #daemonize();
-}
+daemonize() unless( defined( $DAEMONIZE ) && $DAEMONIZE );
 
 # Pre-flight checks
 my $handle = &db_connect();
@@ -1946,6 +1945,7 @@ my $WORKER_FILTER_TABLES = {};
 my $WORKER_STATUSES      = {};
 my $XID_MAP              = [];
 my $shm_init_err         = 0;
+
 unless( get_or_create_shm( $WFT_KEY ) )
 {
     do_lock( $WFT_KEY, $WRITE_LOCK );
