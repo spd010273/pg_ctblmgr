@@ -839,16 +839,15 @@ sub parent_loop($)
         if( $data )
         {
             # iterate over each change in outer loop - one change may go to one or more workers
-            _log( $LOG_LEVEL_INFO, 'Distributing ' . scalar( @$data ) . ' changes' );
-            #_log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
+            #_log( $LOG_LEVEL_INFO, 'Distributing ' . scalar( @$data ) . ' changes' );
+            _log( $LOG_LEVEL_DEBUG, 'Distributing ' . scalar( @$data ) . ' changes' );
             do_lock( $WFT_KEY, $WRITE_LOCK );
             $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
 
             foreach my $change( @$data )
             {
                 $num_in_flight_changes++;
-                _log( $LOG_LEVEL_INFO, $change->{data}->{table_name} );
-                print Dumper( $change );
+                #_log( $LOG_LEVEL_INFO, $change->{data}->{table_name} );
                 foreach my $pid( keys %{$WORKER_FILTER_TABLES} )
                 {
                     my $filter_table = $change->{data}->{schema_name} . '.' . $change->{data}->{table_name};
