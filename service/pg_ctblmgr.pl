@@ -173,7 +173,14 @@ sub _terminate(;$$$)
 
     if( @_ )
     {
-        CORE::die( $package, $file, $line );
+        if( $file && $line )
+        {
+            CORE::die( $package, $file, $line );
+        }
+        else
+        {
+            CORE::die( @_ );
+        }
     }
 
     exit( 0 );
@@ -856,17 +863,17 @@ sub parent_loop($)
 
                         my $commit_lsn = $change->{commit_lsn};
 
-                        if( !defined( $dispatched_changes->{$pid} ) )
-                        {
-                            $dispatched_changes->{$pid} = [];
-                        }
+                        #if( !defined( $dispatched_changes->{$pid} ) )
+                        #{
+                        #    $dispatched_changes->{$pid} = [];
+                        #}
 
-                        unless( grep( /^$commit_lsn$/, @{$dispatched_changes->{$pid}} ) )
-                        {
-                            push( @{$dispatched_changes->{$pid}}, $commit_lsn );
-                        }
+                        #unless( grep( /^$commit_lsn$/, @{$dispatched_changes->{$pid}} ) )
+                        #{
+                        #    push( @{$dispatched_changes->{$pid}}, $commit_lsn );
+                        #}
 
-                        $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY} = $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY} + 1;
+                        #$WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY} = $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY} + 1;
                     }
                 }
             }
@@ -886,13 +893,13 @@ sub parent_loop($)
 
         # Idle WT check
         # Note there is a lot of contention here, possibly consider moving to a different shm segment or maintaining a counter?
-        do_lock( $WFT_KEY, $READ_LOCK );
-        $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
-        foreach my $pid( keys %$WORKER_FILTER_TABLES )
-        {
-            $num_outstanding_changes += $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY};
-        }
-        do_lock( $WFT_KEY, $READ_UNLOCK );
+        #do_lock( $WFT_KEY, $READ_LOCK );
+        #$WORKER_FILTER_TABLES = readmem( $WFT_KEY );
+        #foreach my $pid( keys %$WORKER_FILTER_TABLES )
+        #{
+        #    $num_outstanding_changes += $WORKER_FILTER_TABLES->{$pid}->{$ACTIVE_CHANGES_KEY};
+        #}
+        #do_lock( $WFT_KEY, $READ_UNLOCK );
         # Get worker applied LSNs and ack up to the smallest LSN
         if( $TIMING )
         {
@@ -999,60 +1006,60 @@ sub parent_loop($)
         # we set it to last_peeked_lsn so that we have a consistent LSN to seek
         # to during idle times.
 
-        $lsn_increment_start = [ gettimeofday() ] if( $TIMING );
-        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
-        {
-            if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
-            {
-                _log(
-                    $LOG_LEVEL_DEBUG,
-                    "System appears idle, advancing slot to current lsn $last_current_lsn"
-                );
-                $max_idle_lsn = $last_current_lsn;
-            }
-            else
-            {
-                $max_idle_lsn = $last_peeked_lsn;
-            }
-        }
-
-        $seekable_lsn = $max_idle_lsn;
-
-        # Safety check - CANNOT seek past any in-flight change
-        if(
-               defined( $youngest_in_flight_lsn )
-            && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
-          )
-        {
-            $seekable_lsn = $youngest_in_flight_lsn;
-        }
-
-        if(
-             defined( $seekable_lsn )
-         && (
-                ( defined( $last_seeked_lsn ) && lsn_cmp( $seekable_lsn, $last_seeked_lsn ) > 0 )
-             || !defined( $last_seeked_lsn )
-            )
-          )
-        {
-            my $rows = replication_seek( $handle, $seekable_lsn );
-            if( $rows < 0 )
-            {
-                _log( $LOG_LEVEL_DEBUG, "Logical seek to $seekable_lsn failed" );
-            }
-            else
-            {
-                #_log( $LOG_LEVEL_INFO, "Seeked to $seekable_lsn" );
-                _log( $LOG_LEVEL_DEBUG, "Seeked to $seekable_lsn" );
-                $last_seeked_lsn = $seekable_lsn;
-            }
-        }
-
-        if( $TIMING )
-        {
-            my $lsn_increment_delta = tv_interval( $lsn_increment_start, [ gettimeofday() ] );
-            _log( $LOG_LEVEL_DEBUG, "LSN increment logic took $lsn_increment_delta seconds" );
-        }
+#        $lsn_increment_start = [ gettimeofday() ] if( $TIMING );
+#        if( $num_in_flight_changes == 0 && $num_outstanding_changes == 0 )
+#        {
+#            if( defined $max_idle_lsn && $max_idle_lsn eq $last_peeked_lsn )
+#            {
+#                _log(
+#                    $LOG_LEVEL_DEBUG,
+#                    "System appears idle, advancing slot to current lsn $last_current_lsn"
+#                );
+#                $max_idle_lsn = $last_current_lsn;
+#            }
+#            else
+#            {
+#                $max_idle_lsn = $last_peeked_lsn;
+#            }
+#        }
+#
+#        $seekable_lsn = $max_idle_lsn;
+#
+#        # Safety check - CANNOT seek past any in-flight change
+#        if(
+#               defined( $youngest_in_flight_lsn )
+#            && lsn_cmp( $youngest_in_flight_lsn, $max_idle_lsn ) < 0
+#          )
+#        {
+#            $seekable_lsn = $youngest_in_flight_lsn;
+#        }
+#
+#        if(
+#             defined( $seekable_lsn )
+#         && (
+#                ( defined( $last_seeked_lsn ) && lsn_cmp( $seekable_lsn, $last_seeked_lsn ) > 0 )
+#             || !defined( $last_seeked_lsn )
+#            )
+#          )
+#        {
+#            my $rows = replication_seek( $handle, $seekable_lsn );
+#            if( $rows < 0 )
+#            {
+#                _log( $LOG_LEVEL_DEBUG, "Logical seek to $seekable_lsn failed" );
+#            }
+#            else
+#            {
+#                #_log( $LOG_LEVEL_INFO, "Seeked to $seekable_lsn" );
+#                _log( $LOG_LEVEL_DEBUG, "Seeked to $seekable_lsn" );
+#                $last_seeked_lsn = $seekable_lsn;
+#            }
+#        }
+#
+#        if( $TIMING )
+#        {
+#            my $lsn_increment_delta = tv_interval( $lsn_increment_start, [ gettimeofday() ] );
+#            _log( $LOG_LEVEL_DEBUG, "LSN increment logic took $lsn_increment_delta seconds" );
+#        }
 
         select( undef, undef, undef, $SLEEP_TIMER );
         $first_loop_done = 1;
@@ -1850,7 +1857,7 @@ FD_FALLBACK:
                 }
 
                 &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
-                _log( $LOG_LEVEL_DEBUG, "====================== Applied $max_peeked_lsn" );
+                _log( $LOG_LEVEL_DEBUG, "====================== Applied $max_peeked_lsn" ) if( $max_peeked_lsn );
                 $max_applied_lsn = $max_peeked_lsn;
                 update_status( { status => $WORKER_STATUS_IDLE, last_lsn => $max_applied_lsn } );
             }

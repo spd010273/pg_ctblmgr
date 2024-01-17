@@ -23,7 +23,7 @@ Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
-Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
+Readonly::Scalar my $DEFAULT_SEEK_COUNT => 'NULL'; #100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
       FROM pg_catalog.pg_create_logical_replication_slot(
@@ -167,87 +167,20 @@ INNER JOIN ${SCHEMA_NAME}.tb_maintenance_group mg
         ON mg.maintenance_group = mo.maintenance_group
 END_SQL
 
-Readonly::Scalar my $REPLICATION_PEEK_QUERY_NO_FT => <<END_SQL;
-    SELECT lsn,
-           xid,
-           data::JSONB AS data
-      FROM pg_catalog.pg_logical_slot_peek_changes(
-               ?::NAME,
-               NULL::PG_LSN,
-               ${DEFAULT_SEEK_COUNT}::INTEGER,
-               'wal-level'::VARCHAR,
-               ?::VARCHAR,
-               'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR
-           )
-     WHERE ?::PG_LSN IS NULL OR lsn >= ?::PG_LSN
-  ORDER BY lsn ASC
-END_SQL
-
-Readonly::Scalar my $REPLICATION_PEEK_QUERY => <<END_SQL;
-    SELECT lsn,
-           xid,
-           data::JSONB AS data
-      FROM pg_catalog.pg_logical_slot_peek_changes(
-               ?::NAME,
-               NULL::PG_LSN,
-               ${DEFAULT_SEEK_COUNT}::INTEGER,
-               'wal-level'::VARCHAR,
-               ?::VARCHAR,
-               'filter-tables'::VARCHAR,
-               ?::VARCHAR,
-               'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR
-           )
-     WHERE ?::PG_LSN IS NULL OR lsn >= ?::PG_LSN
-  ORDER BY lsn ASC
-END_SQL
-
-Readonly::Scalar my $REPLICATION_SEEK_QUERY_NO_FT => <<END_SQL;
-    SELECT lsn,
-           xid,
-           data::JSONB AS data
-      FROM pg_catalog.pg_logical_slot_get_changes(
-               ?::NAME,
-               ?::PG_LSN,
-               NULL::INTEGER,
-               'wal-level'::VARCHAR,
-               ?::VARCHAR,
-               'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR
-           )
-  ORDER BY lsn ASC
-END_SQL
-
-Readonly::Scalar my $REPLICATION_PEEK_FOR_CATCHUP => <<END_SQL;
-    SELECT lsn
-      FROM pg_catalog.pg_logical_slot_peek_changes(
-               ?::NAME,
-               NULL::PG_LSN,
-               NULL::INTEGER,
-               'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR,
-               'filter-tables'::VARCHAR,
-               ?::VARCHAR
-           )
-  ORDER BY lsn DESC
-     LIMIT 1
-END_SQL
-
 Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
     SELECT lsn,
            xid,
            data::JSONB AS data
       FROM pg_catalog.pg_logical_slot_get_changes(
                ?::NAME,
-               ?::PG_LSN,
-               NULL::INTEGER,
+               NULL::PG_LSN,
+               ${DEFAULT_SEEK_COUNT}::INTEGER,
                'wal-level'::VARCHAR,
                ?::VARCHAR,
-               'include-transaction'::VARCHAR,
-               'TRUE'::VARCHAR,
                'filter-tables'::VARCHAR,
-               ?
+               ?::VARCHAR,
+               'include-transaction'::VARCHAR,
+               'FALSE'::VARCHAR
            )
   ORDER BY lsn ASC
 END_SQL
@@ -1448,73 +1381,6 @@ sub get_current_lsn($) :Export( :MANDATORY )
     return $lsn;
 }
 
-sub replication_seek($$;$) :Export( :MANDATORY )
-{
-    my( $handle, $lsn, $all_filter_tables ) = validate_pos(
-        @_,
-        { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR, optional => 1 },
-    );
-
-    $handle = &db_connect( $handle );
-    my $seek_query;
-    my $params = [];
-    if( defined( $all_filter_tables ) )
-    {
-        $seek_query = $REPLICATION_SEEK_QUERY;
-        $params = [ $SLOT_NAME, $lsn, 'M', $all_filter_tables ];
-    }
-    else
-    {
-        $seek_query = $REPLICATION_SEEK_QUERY_NO_FT;
-        $params = [ $SLOT_NAME, $lsn, 'M' ];
-    }
-
-    my $sth = try_query(
-        $handle,
-        $seek_query,
-        $params
-    );
-
-    my $rows = 0;
-    unless( $sth )
-    {
-        return -1;
-    }
-
-    $rows = $sth->rows();
-    $sth->finish();
-    return $rows;
-}
-
-sub replication_slot_peek_unneeded_changes($$$) :Export( :MANDATORY )
-{
-    my( $handle, $lsn, $all_filter_tables ) = validate_pos(
-        @_,
-        { type => OBJECT | UNDEF },
-        { type => SCALARREF },
-        { type => SCALAR },
-    );
-
-    my $sth = try_query(
-        $handle,
-        $REPLICATION_PEEK_FOR_CATCHUP,
-        [ $SLOT_NAME, $all_filter_tables ]
-    );
-
-    if( $sth->rows() == 0 )
-    {
-        $sth->finish();
-        return;
-    }
-
-    my $row = $sth->fetchrow_hashref();
-    $sth->finish();
-    $$lsn = $row->{lsn};
-    return;
-}
-
 sub replication_peek($$$$) :Export( :MANDATORY )
 {
     my(
@@ -1544,16 +1410,8 @@ sub replication_peek($$$$) :Export( :MANDATORY )
     {
         $sth = try_query(
             $handle,
-            $REPLICATION_PEEK_QUERY,
-            [ $SLOT_NAME, $wal_level, $filter_tables, $$max_lsn, $$max_lsn ]
-        );
-    }
-    else
-    {
-        $sth = try_query(
-            $handle,
-            $REPLICATION_PEEK_QUERY_NO_FT,
-            [ $SLOT_NAME, $wal_level, $$max_lsn, $$max_lsn ]
+            $REPLICATION_SEEK_QUERY,
+            [ $SLOT_NAME, $wal_level, $filter_tables ] #, $$max_lsn, $$max_lsn ]
         );
     }
 
@@ -1652,7 +1510,8 @@ sub replication_peek($$$$) :Export( :MANDATORY )
         {
             foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
             {
-                $dml->{commit_lsn} = $intermediate_data->{$xid}->{BEGIN};
+                $dml->{commit_lsn} = $intermediate_data->{$xid}->{data}->{lsn};
+                $dml->{commit_lsn} = $intermediate_data->{$xid}->{BEGIN} if( defined( $intermediate_data->{$xid}->{BEGIN} ) );
                 $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
                 if( $DEBUG )
                 {
