@@ -23,7 +23,7 @@ Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 
-Readonly::Scalar my $DEFAULT_SEEK_COUNT => 'NULL'; #100;
+Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
 Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
     SELECT *
       FROM pg_catalog.pg_create_logical_replication_slot(
