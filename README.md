@@ -1,11 +1,11 @@
 pg_ctblmgr
 ----------
 
-Logical Replication Based, Asynchronous Incremental  Materialized Views
+Trigger-Based, Asynchronous Incremental  Materialized Views
 
 # Summary
 
-pg_ctblmgr is a PostgreSQL extension that impelments logical replications based asynchronous materialized views. This extension consists of a server-side Logical Decoder Plugin and a service. The service uses the decoded WAL to update tuples impacted by changes to the base tables (tables from which they draw data). The service also:
+pg_ctblmgr is a PostgreSQL extension that impelments trigger-based asynchronous materialized views. This extension consists of a server-side SQL notifiers and a service. The service uses notifications to update tuples impacted by changes to the base tables (tables from which they draw data). The service also:
 
 * Performs commanded full refreshes (similar to REFRESH MATERIALIZED VIEW)
 * Maintains statistics on each 'cache table' it maintains.
@@ -15,12 +15,12 @@ Each 'cache table' is implemented as a real-life table, rather than patching in 
 
 An asynchronous approach was taken because this allows the extension to be decoupled from the database primar(y|ies), moving processing overhead out-of-band. It also allows for the extension to function on vanilla, out-of-the-box PostgreSQL installations without the need to recompilation or patching. The caveat is that while the originating transaction is not delayed by maintenance overhead of the 'cache tables', there will be some measurable lag until the 'cache table' reflects the changes made to the base tables in said transaction. This is a function of the number of tuples modified in a given transaction and the complexity of the 'cache table's' definition.
 
-pg_ctblmgr uses logical replication, along with replication identiies to determine which keys were modified following an arbitrary DML statement. pg_ctblmgr then uses query parsing hooks to determine how to apply the key to the cache table definition as a WHERE clause element. This filtered subset of data tells the extension how to apply the changes to the cache table representation of the data.
+pg_ctblmgr uses triggers to determine which keys were modified following an arbitrary DML statement. pg_ctblmgr then uses query parsing hooks to determine how to apply the key to the cache table definition as a WHERE clause element. This filtered subset of data tells the extension how to apply the changes to the cache table representation of the data.
 
 
 ## Details
 
-pg_ctblmgr will decode WAL segments and determine how those changes impact cache tables under its control. The parent process is in charge of segment distribution, and one worker is assigned to each cache table. Each worker acknowledges WAL segments by their LSN as they are applies, and a given WAL segment is acknowledged with the primary server once all workers using that segment have acknowledged that it was applied.
+pg_ctblmgr will generate notification events indicating when rows related to a cache table have changed, and determine how those changes impact cache tables under its control. The parent process is in charge of segment distribution, and one worker is assigned to each cache table. Each worker acknowledges WAL segments by their LSN as they are applies, and a given WAL segment is acknowledged with the primary server once all workers using that segment have acknowledged that it was applied.
 
 pg_ctblmgr also monitors cache table definitions for modification, and will replace the cache table if a change to its definition is detected.
 
@@ -52,8 +52,6 @@ Once these steps are complete, the extension installation can be finalized by lo
 CREATE EXTENSION pg_ctblmgr;
 ```
 
-Note that you will need a wal_level of logical, and at least one available wal sender / replication slot for pg_ctblmgr to function correctly.
-
 ## Running
 
 pg_ctblmgr relies on an asynchronous service to maintain cache table state. This service is located in service/pg_ctblmgr.pl
@@ -62,7 +60,7 @@ This daemon requires the connection parameters to the database cluster hosting t
 
 # Versions
 
-This is a replacement extension for the Perl and asynchronous LISTEN/NOTIFY based tblmgr.
+This is a replacement extension for the single-threaded tblmgr.
 
 For more information, see CHANGELOG.md
 
