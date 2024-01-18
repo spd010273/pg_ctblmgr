@@ -12,7 +12,7 @@ use English qw( -no_match_vars );
 
 $OUTPUT_AUTOFLUSH = 1;
 
-Readonly::Scalar our $DEBUG                     :Export( :MANDATORY ) => 0;
+# Constants
 Readonly::Scalar our $CLEAN_UP                  :Export( :MANDATORY ) => 0;
 Readonly::Scalar our $LOG_LEVEL_FATAL           :Export( :MANDATORY ) => 5;
 Readonly::Scalar our $LOG_LEVEL_ERROR           :Export( :MANDATORY ) => 4;
@@ -35,7 +35,10 @@ Readonly::Scalar our $SCHEMA_NAME               :Export( :MANDATORY ) => 'pgctbl
 Readonly::Scalar our $SQL_STATE_ADMIN_TERM      :Export( :MANDATORY ) => '57P01';
 Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014';
 
-## USER GLOBALS
+## USER CONFIGURABLE GLOBALS
+# Enable verbose messaging related to process state
+Readonly::Scalar our $DEBUG                        :Export( :MANDATORY ) => 0;
+
 # Number of times to retry a query prior to giving up and going into an error
 # condition.
 Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 3;
@@ -44,12 +47,13 @@ Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 3;
 Readonly::Scalar our $ENABLE_FAST_DELETE           :Export( :MANDATORY ) => 1;
 
 # Entry length for historic transaction storage. This allows fast delete to work
-Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 10;
+Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 5;
 
-# Soread of XID map - the larger the number, the larger the spacing between XID
-# map entries. This increases the likelyhood that long running tx's result in a
+# Soread of XID map - This is the spacing between historic snapshots in minutes
+# the larger the number, the larger the spacing between XID map entries.
+# This increases the likelyhood that long running tx's result in a
 # fast delete.
-Readonly::Scalar our $XID_MAP_SPREAD               :Export( :MANDATORY ) => 100;
+Readonly::Scalar our $XID_MAP_SPREAD               :Export( :MANDATORY ) => 300;
 
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather
 # than one insert

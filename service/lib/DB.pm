@@ -10,6 +10,8 @@ use FindBin;
 use English qw( -no_match_vars );
 use Params::Validate qw( :all );
 use JSON::XS;
+use IO::Select;
+use IO::Handle;
 
 use Data::Dumper;
 
@@ -18,45 +20,16 @@ use Util;
 
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
+our $LOCAL_PK_MAINTENANCE_OBJECT :Export( :MANDATORY );
+our $SKIP_SHM_CLEANUP            :Export( :MANDATORY ) = 0;
+our $MAINTENANCE_CHANNEL         :Export( :MANDATORY ) = '';
+our $SELECTOR                    :Export( :MANDATORY );
+our $FILE_DESCRIPTOR             :Export( :MANDATORY );
+our $SKIP_LOCK_CHECK             :Export( :MANDATORY ) = 0;
 
 Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
-
-Readonly::Scalar my $DEFAULT_SEEK_COUNT => 100;
-Readonly::Scalar my $CREATE_REPLICATION_SLOT => <<"END_SQL";
-    SELECT *
-      FROM pg_catalog.pg_create_logical_replication_slot(
-               ?,
-               '$EXTENSION_NAME'
-           );
-END_SQL
-
-Readonly::Scalar my $GET_SLOT_NAME => <<"END_SQL";
-    SELECT lower(
-                pg_catalog.regexp_replace(
-                    current_database()::VARCHAR,
-                    '[^[:alnum:]]',
-                    '_',
-                    'g'
-                )
-             || '__'
-             || '$EXTENSION_NAME'
-           )::VARCHAR AS slot_name
-END_SQL
-
-Readonly::Scalar my $CHECK_REPLICATION_SLOT => <<'END_SQL';
-    SELECT plugin,
-           slot_type
-      FROM pg_catalog.pg_replication_slots
-     WHERE slot_name = ?
-END_SQL
-
-Readonly::Scalar my $DROP_REPLICATION_SLOT => <<'END_SQL';
-    SELECT pg_drop_replication_slot( slot_name )
-      FROM pg_catalog.pg_stat_replication_slots
-     WHERE slot_name = ?
-END_SQL
 
 Readonly::Scalar my $CHECK_EXTENSION_RUNNING_QUERY => <<"END_SQL";
     SELECT pg_try_advisory_lock(
@@ -167,24 +140,6 @@ INNER JOIN ${SCHEMA_NAME}.tb_maintenance_group mg
         ON mg.maintenance_group = mo.maintenance_group
 END_SQL
 
-Readonly::Scalar my $REPLICATION_SEEK_QUERY => <<END_SQL;
-    SELECT lsn,
-           xid,
-           data::JSONB AS data
-      FROM pg_catalog.pg_logical_slot_get_changes(
-               ?::NAME,
-               NULL::PG_LSN,
-               ${DEFAULT_SEEK_COUNT}::INTEGER,
-               'wal-level'::VARCHAR,
-               ?::VARCHAR,
-               'filter-tables'::VARCHAR,
-               ?::VARCHAR,
-               'include-transaction'::VARCHAR,
-               'FALSE'::VARCHAR
-           )
-  ORDER BY lsn ASC
-END_SQL
-
 Readonly::Scalar my $CHECK_CACHE_TABLE_EXISTS => <<END_SQL;
     SELECT c.oid
       FROM pg_catalog.pg_class c
@@ -289,6 +244,7 @@ Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
            mo.name,
            mo.definition,
            rs.filter,
+           rs.maintenance_channel,
            mo.unique_index,
            mo.indexes
       FROM ${SCHEMA_NAME}.tb_driver d
@@ -611,22 +567,74 @@ Readonly::Scalar my $GET_DEPENDENT_INDEXES => <<"END_SQL";
            FROM tt_indexes;
 END_SQL
 
-sub get_slot_name($) :Export( :MANDATORY )
+Readonly::Scalar my $CHECK_WORKER_LOCK => <<"END_SQL";
+    SELECT l.*
+      FROM pg_locks l
+INNER JOIN pg_class c
+        ON c.oid = l.classid
+       AND c.relname = '__pgctblmgr_repl_slot'
+INNER JOIN pg_namespace n
+        ON n.nspname = '${SCHEMA_NAME}'
+       AND n.oid = c.relnamespace
+INNER JOIN pg_database d
+        ON d.oid = l.database
+       AND d.datname = current_database()
+     WHERE l.objid = ?
+       AND l.pid = pg_backend_pid()
+END_SQL
+
+Readonly::Scalar my $GET_LOCK => <<"END_SQL";
+    SELECT pg_try_advisory_lock( c.oid::INTEGER, rs.id::INTEGER ) AS locked
+      FROM pg_class c
+INNER JOIN pg_namespace n
+        ON n.nspname = '${SCHEMA_NAME}'
+       AND n.oid = c.relnamespace
+INNER JOIN ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
+        ON rs.id = ?::INTEGER
+     WHERE c.relname = '__pgctblmgr_repl_slot'
+END_SQL
+
+sub try_lock($) :Export( :MANDATORY )
 {
+    #NOTE: Using try_query here will lead to deep recursion
     my( $handle ) = validate_pos(
         @_,
         { type => OBJECT },
     );
 
-    my $slot_name_sth = &try_query( $handle, $GET_SLOT_NAME );
+    return 1 if( defined $SKIP_LOCK_CHECK && $SKIP_LOCK_CHECK );
+    my $sth = $handle->prepare( $CHECK_WORKER_LOCK );
+    return 0 unless( $sth );
 
-    return undef unless( $slot_name_sth );
-    my $slot_name_row = $slot_name_sth->fetchrow_hashref();
+    $sth->bind_param( 1, $LOCAL_PK_MAINTENANCE_OBJECT );
+    return 0 unless( $sth->execute() );
+    
+    if( $sth->rows() > 0 )
+    {
+        $sth->finish();
+        return 1;
+    }
 
-    my $slot_name = $slot_name_row->{slot_name};
+    $sth->finish();
 
-    $slot_name_sth->finish();
-    return $slot_name;
+    $sth = $handle->prepare( $GET_LOCK );
+
+    return 0 unless( $sth );
+    $sth->bind_param( 1, $LOCAL_PK_MAINTENANCE_OBJECT );
+    return 0 unless( $sth->execute() );
+    return 0 if( $sth->rows() <= 0 );
+
+    my $row = $sth->fetchrow_hashref();
+    my $locked = $row->{locked};
+
+    $sth->finish();
+
+    if( $locked && ( $locked =~ m/t/i || $locked =~ m/1/ ) )
+    {
+        return 1;
+    }
+
+    return 0;
 }
 
 sub get_ct_definition($$$) :Export( :MANDATORY )
@@ -647,14 +655,15 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
     if( $ct_sth )
     {
         my $row = $ct_sth->fetchrow_hashref();
-        $cache_hash->{schema}        = $row->{namespace};
-        $cache_hash->{driver}        = $row->{driver};
-        $cache_hash->{name}          = $row->{name};
-        $cache_hash->{definition}    = $row->{definition};
-        $cache_hash->{filter_tables} = $row->{filter};
-        $cache_hash->{indexes}       = $row->{indexes};
-        $cache_hash->{unique_index}  = $row->{unique_index};
-        $cache_hash->{maintenance_object} = $pk_maintenance_object;
+        $cache_hash->{schema}              = $row->{namespace};
+        $cache_hash->{driver}              = $row->{driver};
+        $cache_hash->{name}                = $row->{name};
+        $cache_hash->{definition}          = $row->{definition};
+        $cache_hash->{filter_tables}       = $row->{filter};
+        $cache_hash->{indexes}             = $row->{indexes};
+        $cache_hash->{unique_index}        = $row->{unique_index};
+        $cache_hash->{maintenance_object}  = $pk_maintenance_object;
+        $cache_hash->{maintenance_channel} = $row->{maintenance_channel};
         $ct_sth->finish();
 
         $cache_hash->{digest} = get_ct_digest(
@@ -674,31 +683,6 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
     }
 
     return 0;
-}
-
-sub drop_replication_slot($) :Export( :MANDATORY )
-{
-    my( $handle ) = validate_pos(
-        @_,
-        { type => OBJECT },
-    );
-
-    my $drop_sth = $handle->prepare( $DROP_REPLICATION_SLOT );
-
-    return -1 unless( $drop_sth );
-
-    $drop_sth->bind_param( 1, $SLOT_NAME );
-
-    return -1 unless( $drop_sth->execute() );
-
-    if( $drop_sth->rows() == 0 )
-    {
-        $drop_sth->finish();
-        return 0;
-    }
-
-    $drop_sth->finish();
-    return 1;
 }
 
 # Dependent object logic
@@ -1007,11 +991,12 @@ sub replace_cache_table($$) :Export( :MANDATORY )
     return 1;
 }
 
-sub db_connect(;$) :Export( :MANDATORY )
+sub db_connect(;$$) :Export( :MANDATORY )
 {
-    my( $handle ) = validate_pos(
+    my( $handle, $is_aged ) = validate_pos(
         @_,
-        { type => OBJECT | UNDEF, optional => 1 }
+        { type => OBJECT | UNDEF, optional => 1 },
+        { type => SCALAR | UNDEF, optional => 1 },
     );
 
     # Fast conn check & ret
@@ -1021,6 +1006,21 @@ sub db_connect(;$) :Export( :MANDATORY )
     }
     else
     {
+        # Cleanup pid's globals to avoid any leaks via orphaned objs
+        if( $PROCESS_ID != $PARENT_PID && !defined( $is_aged ) )
+        {
+            if( $FILE_DESCRIPTOR )
+            {
+                close( $FILE_DESCRIPTOR );
+                undef( $FILE_DESCRIPTOR );
+            }
+
+            if( $SELECTOR )
+            {
+                undef( $SELECTOR );
+            }
+        }
+
         if(
               !defined( $CONNECTION_MAP )
            || !defined( $CONNECTION_MAP->{connection_string} )
@@ -1073,7 +1073,31 @@ sub db_connect(;$) :Export( :MANDATORY )
 	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
 	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
 #    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $DEBUG );
+
+    if( !defined( $is_aged ) )
+    {
+        &do_listen( $handle );
+    }
+
     return $handle;
+}
+
+sub do_listen($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    if( $PROCESS_ID != $PARENT_PID && length( $MAINTENANCE_CHANNEL ) > 0 )
+    {
+        $handle->do( "LISTEN $MAINTENANCE_CHANNEL" );
+        $FILE_DESCRIPTOR = $handle->func( 'getfd' );
+        $SELECTOR        = IO::Select->new( $FILE_DESCRIPTOR );
+        _log( $LOG_LEVEL_INFO, "Worker $PROCESS_ID listening on $MAINTENANCE_CHANNEL" );
+    }
+
+    return;
 }
 
 sub try_query($$;$) :Export( :MANDATORY )
@@ -1104,10 +1128,22 @@ sub try_query($$;$) :Export( :MANDATORY )
     {
         unless( check_extension_running( $handle ) )
         {
+            $SKIP_SHM_CLEANUP = 1;
             _log(
                 $LOG_LEVEL_FATAL,
                 'Failed to acquire lock after reconnecting to database or '
               . 'extension not installed'
+            );
+        }
+    }
+    else
+    {
+        unless( &try_lock( $handle ) )
+        {
+            _log(
+                $LOG_LEVEL_FATAL,
+                'There seems to be another worker using maintenance object '
+              . $LOCAL_PK_MAINTENANCE_OBJECT . ' on this database'
             );
         }
     }
@@ -1226,49 +1262,6 @@ sub check_extension($) :Export( :MANDATORY )
     return 0;
 }
 
-sub create_replication_slot($) :Export( :MANDATORY )
-{
-    my( $handle ) = validate_pos(
-        @_,
-        { type => OBJECT },
-    );
-
-    $SLOT_NAME = get_slot_name( $handle );
-    my $check_sth = &try_query(
-        $handle,
-        $CHECK_REPLICATION_SLOT,
-        [ $SLOT_NAME ]
-    );
-
-    return 0 unless( $check_sth );
-
-    if( $check_sth->rows() == 0 )
-    {
-        my $create_sth = &try_query(
-            $handle,
-            $CREATE_REPLICATION_SLOT,
-            [ $SLOT_NAME ]
-        );
-
-        if( !$create_sth )
-        {
-            $check_sth->finish();
-            return 0;
-        }
-        _log( $LOG_LEVEL_DEBUG, "slot $SLOT_NAME created" );
-        $create_sth->finish();
-    }
-    else
-    {
-        # slot exists
-        _log( $LOG_LEVEL_DEBUG, "Slot $SLOT_NAME exists!" );
-    }
-
-    $check_sth->finish();
-
-    return 1;
-}
-
 sub check_extension_running($) :Export( :MANDATORY )
 {
     # This subroutine needs to use DBI methods to avoid deep recursion
@@ -1351,183 +1344,6 @@ sub get_worker_list($;$) :Export( :MANDATORY )
 
     $sth->finish();
     return undef;
-}
-
-sub get_current_lsn($) :Export( :MANDATORY )
-{
-    my( $handle ) = validate_pos(
-        @_,
-        { type => OBJECT },
-    );
-
-    $handle = &db_connect( $handle );
-
-    my $sth = $handle->prepare(
-        'SELECT pg_catalog.pg_current_wal_lsn() AS lsn'
-    );
-
-    unless( $sth && $sth->execute() )
-    {
-        _log( $LOG_LEVEL_ERROR, 'Failed to get current LSN' );
-        return undef;
-    }
-
-    my $row = $sth->fetchrow_hashref();
-
-    my $lsn = $row->{lsn};
-
-    $sth->finish();
-    return undef unless( $lsn );
-    return $lsn;
-}
-
-sub replication_peek($$$$) :Export( :MANDATORY )
-{
-    my(
-        $handle,
-        $filter_tables,
-        $wal_level,
-        $max_lsn
-      ) = validate_pos(
-        @_,
-        { type => OBJECT | UNDEF },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALARREF },
-    );
-
-    my $sth;
-    $handle = &db_connect( $handle );
-
-    # Disable spurrious logging on replication seek. logical replication using
-    # our method emits  INFO level, and the typically encountered WARNING/ERROR
-    # level will pass the INFO log levels which ends up spamming the crap out
-    # of logs since we are polling the slot.
-    
-    $handle->do( "SET log_min_messages = 'FATAL'" ) if( $handle && $DEBUG );
-
-    if( defined( $filter_tables ) && length( $filter_tables ) > 0 )
-    {
-        $sth = try_query(
-            $handle,
-            $REPLICATION_SEEK_QUERY,
-            [ $SLOT_NAME, $wal_level, $filter_tables ] #, $$max_lsn, $$max_lsn ]
-        );
-    }
-
-    return 0 unless( $sth );
-    if( $sth->rows() <= 0 )
-    {
-        $sth->finish();
-        return 0;
-    }
-
-    my $intermediate_data = {};
-    my $xids              = [];
-
-    while( my $row = $sth->fetchrow_hashref() )
-    {
-        my $lsn  = $row->{lsn};
-        if( !defined( $$max_lsn ) || lsn_cmp( $$max_lsn, $lsn ) < 0 )
-        {
-            $$max_lsn = $lsn;
-        }
-
-        my $xid = $row->{xid};
-        my $data;
-        $data = decode_json( $row->{data} ) if( $row->{data} );
-        my $out  = { lsn => $lsn, xid => $xid };
-
-        if( $wal_level eq 'F' )
-        {
-            $out->{data} = $data;
-        }
-        elsif( $wal_level eq 'M' )
-        {
-            if( defined( $data->{d} ) )
-            {
-                #inflate data
-                $out->{data}->{table_name}  = $data->{t};
-                $out->{data}->{schema_name} = $data->{s};
-                $out->{data}->{key}  = $data->{key};
-                $out->{data}->{type} = 'INSERT' if( $data->{d} eq 'I' );
-                $out->{data}->{type} = 'UPDATE' if( $data->{d} eq 'U' );
-                $out->{data}->{type} = 'DELETE' if( $data->{d} eq 'D' );
-            }
-            $out->{data}->{xid} = $data->{x};
-        }
-
-        unless( grep /^$xid$/, @$xids )
-        {
-            push( @$xids, $xid );
-        }
-
-        if(
-              (
-                $wal_level eq 'F'
-             && defined( $data->{type} )
-             && $data->{type} ne 'COMMIT'
-             && $data->{type} ne 'BEGIN'
-             && $data->{type} ne 'ROLLBACK'
-              )
-           || (
-                $wal_level eq 'M'
-             && !defined( $data->{b} )
-              )
-          )
-        {
-            push( @{$intermediate_data->{$xid}->{DML}}, $out );
-        }
-        else
-        {
-            # Assume transaction demarcation
-            my $type;
-            if( $wal_level eq 'F' )
-            {
-                $type = $data->{type};
-            }
-            elsif( $wal_level eq 'M' )
-            {
-                $type = 'BEGIN' if( $data->{b} eq 'B' );
-                $type = 'COMMIT' if( $data->{b} eq 'C' );
-                $type = 'ROLLBACK' if( $data->{b} eq 'R' );
-            }
-
-            $intermediate_data->{$xid}->{$type} = $out->{lsn};
-        }
-    }
-
-    $sth->finish();
-    my $out_data = [];
-    # Step through transactional data and only output DML if we detect both
-    # a valid BEGIN and COMMIT for the DML's XID
-    foreach my $xid( @$xids )
-    {
-        if(
-              exists( $intermediate_data->{$xid}->{DML} )
-           && scalar( @{$intermediate_data->{$xid}->{DML}} )
-          )
-        {
-            foreach my $dml( @{$intermediate_data->{$xid}->{DML}} )
-            {
-                $dml->{commit_lsn} = $intermediate_data->{$xid}->{data}->{lsn};
-                $dml->{commit_lsn} = $intermediate_data->{$xid}->{BEGIN} if( defined( $intermediate_data->{$xid}->{BEGIN} ) );
-                $dml->{commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
-                if( $DEBUG )
-                {
-                    $dml->{begin_lsn} = $intermediate_data->{$xid}->{BEGIN};
-                    $dml->{real_commit_lsn} = $intermediate_data->{$xid}->{COMMIT} if( defined( $intermediate_data->{$xid}->{COMMIT} ) );
-                }
-                push( @$out_data, $dml );
-            }
-        }
-    }
-
-    return if( scalar( @$out_data ) == 0 );
-    return $out_data;
-
-    $sth->finish();
-    return 0;
 }
 
 sub check_ct_exists($) :Export( :MANDATORY )
@@ -1774,7 +1590,7 @@ sub test_query($$) :Export( :MANDATORY )
     return 0 if( !defined( $sth ) );
     unless( $sth->execute() )
     {
-        print "Failed to exec: $test_query\n";
+        _log( $LOG_LEVEL_ERROR, "Failed to exec: $test_query\n" );
         return 0;
     }
 
@@ -2337,27 +2153,11 @@ END_SQL
     }
 
     my $where_filters = [];
-    # TODO move count here
-    if( $current_temp_table->{count} == $aged_sth->rows() )
-    {
-        # no rows previously existed
-        _log(
-            $LOG_LEVEL_DEBUG,
-            'Fast delete early exit - no rows previously existed '
-          . 'matching this filter or subset rough match'
-        );
-
-        $aged_sth->finish();
-        $insert_sth->finish();
-        $aged_handle->do( 'ROLLBACK' );
-        $aged_handle->disconnect();
-        return 1;
-    }
 
     unless( $aged_sth->rows() > 0 )
     {
          # Likely an anti-join involved - revert to slow delete
-        _log( $LOG_LEVEL_WARNING, "Insufficient data in aged handle" );
+        _log( $LOG_LEVEL_DEBUG, "Insufficient data in aged handle" );
         $insert_sth->finish();
         $aged_sth->finish();
         $aged_handle->do( 'ROLLBACK' );
@@ -2435,7 +2235,7 @@ END_SQL
     # is in the present timeline
     my $unique_column_select = join(
         ',',
-        map { "vw.$_" } keys %$column_data_type_hash
+        map { "tt.$_" } keys %$column_data_type_hash
     );
 
     my $left_join_clauses = [];
@@ -2453,7 +2253,7 @@ END_SQL
 
         my $where_clause = join(
             ' AND ',
-            map { "tt.$_ IS NULL" } @$unique_columns
+            map { "vw.$_ IS NULL" } @$unique_columns
         );
 
         push( @$left_join_wheres, $where_clause );
@@ -2474,11 +2274,10 @@ END_SQL
     WITH tt_rows_to_delete AS
     (
         SELECT $unique_column_select
-          FROM $cache_table_schema.$cache_table_name vw
-     LEFT JOIN $past_temp_table tt
+          FROM $past_temp_table tt
+     LEFT JOIN $current_temp_table->{name} vw
             ON $left_join_predicate
          WHERE $left_join_where
-           AND $main_filter
     )
         DELETE FROM $cache_table_schema.$cache_table_name vw
               USING tt_rows_to_delete tt
@@ -2550,20 +2349,19 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     $DELETE_Q = <<"END_SQL";
 WITH tt_rows_to_delete AS
 (
+    SELECT $vw_sel
+      FROM $cache_table_schema.$cache_table_name vw
+    EXCEPT
     SELECT $tt_sel
       FROM (
                $definition
            ) tt
-    EXCEPT
-    SELECT $vw_sel
-      FROM $cache_table_schema.$cache_table_name vw
 )
     DELETE FROM $cache_table_schema.$cache_table_name vw
           USING tt_rows_to_delete tt
           WHERE $join_predicate
 END_SQL
 
-    #print "$DELETE_Q\n";
     $sth = &try_query( $handle, $DELETE_Q, [] );
     return 0 unless( $sth );
     $sth->finish();

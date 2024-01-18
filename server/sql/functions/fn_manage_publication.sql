@@ -35,10 +35,6 @@ BEGIN
             EXECUTE 'CREATE UNIQUE INDEX ix_' || NEW.name || ' ON "' || NEW.namespace || '.' || NEW.name || '" ( ' || array_to_string( NEW.indexes, ',' ) || ')';
         END IF;
     ELSIF( TG_OP = 'DELETE' ) THEN
-        PERFORM @extschema@.fn_notify_maintenance_channel(
-            OLD.maintenance_object,
-            'object_remove'
-        );
         DELETE FROM @extschema@.__pgctblmgr_repl_slot
               WHERE id = OLD.maintenance_object;
         RETURN OLD;
@@ -59,8 +55,8 @@ BEGIN
                     ),
                     @extschema@.fn_get_dependencies( NEW.maintenance_object )
                 )
-    ON CONFLICT ( id )
-  DO UPDATE SET filter = @extschema@.fn_get_dependencies( NEW.maintenance_object );
+             ON CONFLICT ( id ) DO NOTHING;
+
     RETURN NEW;
 END
  $_$

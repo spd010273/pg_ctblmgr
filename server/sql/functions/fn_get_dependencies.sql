@@ -34,7 +34,7 @@ BEGIN
     WITH tt_pk_locator AS
     (
         SELECT c.oid,
-			   c_n.nspname::VARCHAR AS schema_name,
+               c_n.nspname::VARCHAR AS schema_name,
                c.relname::VARCHAR AS table_name,
                array_agg( DISTINCT con_a_att.attname::VARCHAR ) AS primary,
                array_agg( DISTINCT con_b_att.attname::VARCHAR ) AS secondary,
