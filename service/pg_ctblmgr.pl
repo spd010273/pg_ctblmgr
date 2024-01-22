@@ -154,7 +154,7 @@ sub _terminate(;$$$)
     exit( 0 );
 }
 
-$SIG{HUP} = \&_handle_sighup; 
+$SIG{HUP} = \&_handle_sighup;
 $SIG{INT} = \&_terminate_sigint;
 $SIG{__DIE__} = \&_terminate;
 
@@ -374,7 +374,7 @@ sub parent_loop($)
     # Timing vars
     my $xid_start;
     my $worker_check_start;
-    
+
     while( 1 )
     {
         ## XID CHAIN MANAGEMENT
@@ -392,7 +392,7 @@ sub parent_loop($)
             $XID_MAP = readmem( $XID_KEY );
             $last_xid_create = [ gettimeofday() ];
 
-            if( 
+            if(
                   !defined( $XID_MAP )
                || ref( $XID_MAP ) ne 'ARRAY'
                || scalar( @$XID_MAP ) < $MAX_XID_LENGTH
@@ -507,7 +507,7 @@ sub parent_loop($)
 
                 do_lock( $XID_KEY, $WRITE_TO_READ );
             }
-        
+
             do_lock( $XID_KEY, $READ_UNLOCK );
         }
 
@@ -977,9 +977,9 @@ sub worker_entrypoint($$)
             my $changes  = {};
             my $WAL_DATA = {};
 
-            #TODO: Replace dequeue w/ listen here. WAL_DATA is structured as $WAL_DATA->{filter_table}->[ changes ] 
+            #TODO: Replace dequeue w/ listen here. WAL_DATA is structured as $WAL_DATA->{filter_table}->[ changes ]
             # We block here waiting on data
-            
+
             $SELECTOR->can_read;
             my $change_count = 0;
             while( my $notifications = $handle->func( 'pg_notifies' ) )
@@ -987,7 +987,7 @@ sub worker_entrypoint($$)
                 my $notify_channel = $notifications->[0];
                 my $notify_pid     = $notifications->[1];
                 my $notify_data    = $notifications->[2];
-            
+
                 next unless( defined( $notify_data ) && length( $notify_data ) > 0 );
                 my $data;
 
@@ -1424,7 +1424,7 @@ FD_FALLBACK:
                     {
                         _log( $LOG_LEVEL_DEBUG, "Fast update skipped INSERT" );
                     }
-                    
+
                     # definition has changed
                     unless( &drop_temp_table( $handle, $temp_table ) )
                     {
