@@ -36,9 +36,9 @@ BEGIN
         SELECT c.oid,
                c_n.nspname::VARCHAR AS schema_name,
                c.relname::VARCHAR AS table_name,
-               array_agg( DISTINCT con_a_att.attname::VARCHAR ) AS primary,
-               array_agg( DISTINCT con_b_att.attname::VARCHAR ) AS secondary,
-               array_agg( DISTINCT con_c_att.attname::VARCHAR ) AS tertiary
+               NULLIF( array_agg( DISTINCT con_a_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS primary,
+               NULLIF( array_agg( DISTINCT con_b_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS secondary,
+               NULLIF( array_agg( DISTINCT con_c_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS tertiary
           FROM pg_depend d
     INNER JOIN pg_rewrite rw
             ON rw.oid = d.objid
