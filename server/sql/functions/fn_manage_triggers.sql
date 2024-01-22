@@ -24,9 +24,9 @@ BEGIN
                 SELECT c.oid,
                        c_n.nspname::VARCHAR AS schema_name,
                        c.relname::VARCHAR AS table_name,
-                       array_agg( DISTINCT con_a_att.attname::VARCHAR ) AS primary,
-                       array_agg( DISTINCT con_b_att.attname::VARCHAR ) AS secondary,
-                       array_agg( DISTINCT con_c_att.attname::VARCHAR ) AS tertiary
+                       NULLIF( array_agg( DISTINCT con_a_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS primary,
+                       NULLIF( array_agg( DISTINCT con_b_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS secondary,
+                       NULLIF( array_agg( DISTINCT con_c_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS tertiary
                   FROM pg_class c
             INNER JOIN pg_namespace c_n
                     ON c_n.oid = c.relnamespace
@@ -68,12 +68,16 @@ BEGIN
                 SELECT COALESCE( "primary", secondary, tertiary )
                   INTO my_table_pk
                   FROM tt_pks;
-            EXECUTE format(
-                        'CREATE OR REPLACE TRIGGER tr_pgctblmgr_notify_change '
-                     || '    AFTER INSERT OR DELETE OR UPDATE ON ' || my_rel
-                     || '    FOR EACH ROW EXECUTE PROCEDURE @extschema@.fn_pgctblmgr_notify_change( %L )',
-                        my_table_pk
-                    );
+            IF( my_table_pk IS NULL ) THEN
+                RAISE NOTICE 'Relation % will miss updates - no primary or unique key', my_rel;
+            ELSE
+                EXECUTE format(
+                            'CREATE OR REPLACE TRIGGER tr_pgctblmgr_notify_change '
+                         || '    AFTER INSERT OR DELETE OR UPDATE ON ' || my_rel
+                         || '    FOR EACH ROW EXECUTE PROCEDURE @extschema@.fn_pgctblmgr_notify_change( %L )',
+                            my_table_pk
+                        );
+            END IF;
         END LOOP;
     ELSIF( TG_OP = 'UPDATE' ) THEN
         IF( NEW.filter::VARCHAR IS NOT DISTINCT FROM OLD.filter::VARCHAR ) THEN
@@ -104,9 +108,9 @@ BEGIN
                 SELECT c.oid,
                        c_n.nspname::VARCHAR AS schema_name,
                        c.relname::VARCHAR AS table_name,
-                       array_agg( DISTINCT con_a_att.attname::VARCHAR ) AS primary,
-                       array_agg( DISTINCT con_b_att.attname::VARCHAR ) AS secondary,
-                       array_agg( DISTINCT con_c_att.attname::VARCHAR ) AS tertiary
+                       NULLIF( array_agg( DISTINCT con_a_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS primary,
+                       NULLIF( array_agg( DISTINCT con_b_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS secondary,
+                       NULLIF( array_agg( DISTINCT con_c_att.attname::VARCHAR ), ARRAY[ NULL ]::VARCHAR[] ) AS tertiary
                   FROM pg_class c
             INNER JOIN pg_namespace c_n
                     ON c_n.oid = c.relnamespace
@@ -148,12 +152,17 @@ BEGIN
                 SELECT COALESCE( "primary", secondary, tertiary )
                   INTO my_table_pk
                   FROM tt_pks;
-            EXECUTE format(
-                        'CREATE OR REPLACE TRIGGER tr_pgctblmgr_notify_change '
-                     || '    AFTER INSERT OR DELETE OR UPDATE ON ' || my_rel
-                     || '    FOR EACH ROW EXECUTE PROCEDURE @extschema@.fn_pgctblmgr_notify_change( %L )',
-                        my_table_pk
-                    );
+
+            IF( my_table_pk IS NULL ) THEN
+                RAISE NOTICE 'Relation % will miss updates - no primary or unique key', my_rel;
+            ELSE
+                EXECUTE format(
+                            'CREATE OR REPLACE TRIGGER tr_pgctblmgr_notify_change '
+                         || '    AFTER INSERT OR DELETE OR UPDATE ON ' || my_rel
+                         || '    FOR EACH ROW EXECUTE PROCEDURE @extschema@.fn_pgctblmgr_notify_change( %L )',
+                            my_table_pk
+                        );
+            END IF;
         END LOOP;
     ELSE
         my_record := OLD;
