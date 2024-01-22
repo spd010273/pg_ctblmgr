@@ -608,7 +608,7 @@ sub try_lock($) :Export( :MANDATORY )
 
     $sth->bind_param( 1, $LOCAL_PK_MAINTENANCE_OBJECT );
     return 0 unless( $sth->execute() );
-    
+
     if( $sth->rows() > 0 )
     {
         $sth->finish();
@@ -1065,6 +1065,45 @@ sub db_connect(;$$) :Export( :MANDATORY )
         {
             # is our database still here? is the server down??
             return undef;
+        }
+
+        if( $connect_count == 3 )
+        {
+            # Sanity check - does the DB exist?
+            my $pg_handle = DBI->connect(
+                $CONNECTION_MAP->{pg_connection_string},
+                $CONNECTION_MAP->{user_name},
+                undef
+            );
+
+            next unless( $pg_handle );
+            my $check_sth = $pg_handle->prepare( 'SELECT datallowconn FROM pg_database WHERE datname = ?' );
+            next unless( $check_sth );
+            $check_sth->bind_param( 1, $CONNECTION_MAP->{dbname} );
+            next unless( $check_sth->execute() );
+
+            if( $check_sth->rows() == 0 )
+            {
+                _log(
+                    $LOG_LEVEL_FATAL,
+                    "Database '$CONNECTION_MAP->{dbname}' does not exist! "
+                  . 'Check your connection settings and restart the service'
+                );
+            }
+
+            my $allowconn_row = $check_sth->fetchrow_hashref();
+            my $allowconn = $allowconn_row->{datallowconn};
+
+            unless( $allowconn )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Database '$CONNECTION_MAP->{dbname}' is not accepting connections. "
+                  . 'The service will sleep for 15 minutes and retry its connection.'
+                );
+                $connect_count = 0;
+                sleep( 54000 );
+            }
         }
     }
 

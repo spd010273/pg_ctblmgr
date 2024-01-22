@@ -1349,7 +1349,7 @@ FD_FALLBACK:
                     # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
                     # use slow deletes iff the XID map isn't full
                     # For production use we're banking on steady-state operation
-                    if( !$can_fast_delete && ( $xid_map_size == $MAX_XID_LENGTH || !$ENABLE_FAST_DELETE ) )
+                    if( !$can_fast_delete && ( $xid_map_size > 0 || !$ENABLE_FAST_DELETE ) )
                     {
                         update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
 
@@ -1493,9 +1493,11 @@ unless( defined( $host ) && length( $host ) > 0 )
 }
 
 my $conn_string = "dbi:Pg:dbname=${dbname};host=${host};port=${port}";
-$CONNECTION_MAP->{connection_string} = $conn_string;
-$CONNECTION_MAP->{user_name}         = $user;
-$CONNECTION_MAP->{dbname}            = $dbname;
+my $pg_conn_string = "dbi:Pg:dbname=postgres;host=${host};port=${port}";
+$CONNECTION_MAP->{connection_string}    = $conn_string;
+$CONNECTION_MAP->{pg_connection_string} = $pg_conn_string;
+$CONNECTION_MAP->{user_name}            = $user;
+$CONNECTION_MAP->{dbname}               = $dbname;
 
 daemonize() unless( defined( $DAEMONIZE ) && $DAEMONIZE );
 
