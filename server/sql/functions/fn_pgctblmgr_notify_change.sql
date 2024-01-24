@@ -34,7 +34,7 @@ BEGIN
           USING my_record;
 
         my_data := array_append( my_data, '"' || my_unique || '":"' || my_val || '"' );
-    END LOOP; 
+    END LOOP;
 
     my_data_string := '{"xid":' || txid_current()::INTEGER
                    || ',"data":{'

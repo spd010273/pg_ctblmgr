@@ -2193,15 +2193,26 @@ END_SQL
 
     my $where_filters = [];
 
-    unless( $aged_sth->rows() > 0 )
+    my $aged_rows = $aged_sth->rows();
+
+    if( $aged_rows == 0 )
     {
-         # Likely an anti-join involved - revert to slow delete
-        _log( $LOG_LEVEL_DEBUG, "Insufficient data in aged handle" );
-        $insert_sth->finish();
-        $aged_sth->finish();
-        $aged_handle->do( 'ROLLBACK' );
-        $aged_handle->disconnect();
-        return 0;
+        if( $CONSERVATIVE_FAST_DELETE )
+        {
+            _log( $LOG_LEVEL_DEBUG, "Insufficient data ( $aged_rows rows ) in aged handle" );
+            $insert_sth->finish();
+            $aged_sth->finish();
+            $aged_handle->do( 'ROLLBACK' );
+            $aged_handle->disconnect();
+            return 0;
+        }
+        else
+        {
+            _log( $LOG_LEVEL_DEBUG, "Skipping fast/slow delete, $aged_rows rows in aged set" );
+            $insert_sth->finish();
+            $aged_sth->finish();
+            return 1;
+        }
     }
 
     while( my $row = $aged_sth->fetchrow_hashref() )

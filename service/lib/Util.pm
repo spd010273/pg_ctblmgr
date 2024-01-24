@@ -39,6 +39,11 @@ Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014'
 # Enable verbose messaging related to process state
 Readonly::Scalar our $DEBUG                        :Export( :MANDATORY ) => 0;
 
+# In situations where we can normally perform a fast delete but the aged data set
+# contains no rows, we will fall back to a slow delete in cases where this flag
+# is set.
+Readonly::Scalar our $CONSERVATIVE_FAST_DELETE     :Export( :MANDATORY ) => 0;
+
 # Number of times to retry a query prior to giving up and going into an error
 # condition.
 Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 3;

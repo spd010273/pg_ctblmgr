@@ -83,7 +83,7 @@ BEGIN
         IF( NEW.filter::VARCHAR IS NOT DISTINCT FROM OLD.filter::VARCHAR ) THEN
             RETURN NEW;
         END IF;
-    
+
         my_record := NEW;
 
         FOR my_rel IN(
@@ -98,7 +98,7 @@ BEGIN
                               FROM unnest( OLD.filter ) x
                              WHERE NOT ARRAY[ x ]  @> NEW.filter
                                AND NOT ARRAY[ x ] <@ ( SELECT arr FROM tt_all )
-                     ) LOOP 
+                     ) LOOP
             EXECUTE 'DROP TRIGGER IF EXISTS tr_pgctblmgr_notify_change ON ' || my_rel;
         END LOOP;
 
@@ -178,7 +178,7 @@ BEGIN
                             SELECT x
                               FROM unnest( OLD.filter ) x
                              WHERE NOT ARRAY[ x ] <@ ( SELECT arr FROM tt_all )
-                     ) LOOP 
+                     ) LOOP
            EXECUTE 'DROP TRIGGER IF EXISTS tr_pgctblmgr_notify_change ON ' || my_rel;
         END LOOP;
     END IF;
