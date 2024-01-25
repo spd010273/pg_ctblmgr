@@ -182,10 +182,9 @@ sub populate_worker_data($$)
         foreach my $worker_entry( @$worker_data )
         {
             my $pk_maintenance_object = $worker_entry->{maintenance_object};
-            my $target                = $WORKER_DATA->{$pk_maintenance_object};
 
-            $target->{hash} = $worker_entry->{hash};
-            $target->{name} = $worker_entry->{name};
+            $WORKER_DATA->{$pk_maintenance_object}->{hash} = $worker_entry->{hash};
+            $WORKER_DATA->{$pk_maintenance_object}->{name} = $worker_entry->{name};
         }
     }
     else
@@ -899,7 +898,7 @@ sub worker_entrypoint($$)
                 _log( $LOG_LEVEL_INFO, "PID $worker_pid commanded to shutdown" );
                 update_status( { status => $WORKER_STATUS_EXITED } );
 
-                my $dct = try_query( $handle, "DROP TABLE $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
+                my $dct = try_query( $handle, "DROP TABLE IF EXISTS $CACHE_HASH->{schema}.$CACHE_HASH->{name}" );
 
                 unless( $dct )
                 {
@@ -944,6 +943,13 @@ sub worker_entrypoint($$)
                     'Failed to check maintenance object '
                   . 'for definition change (SHA256)'
                 );
+                # CT may have been removed, lets exit
+                do_lock( $WS_KEY, $WRITE_LOCK );
+                $WORKER_STATUSES = readmem( $WS_KEY );
+                $WORKER_STATUSES->{$worker_pid}->{shutdown} = 1;
+                writemem( $WS_KEY, $WORKER_STATUSES );
+                do_lock( $WS_KEY, $WRITE_UNLOCK );
+                next;
             }
             else
             {
@@ -1539,7 +1545,7 @@ my $shm_init_err         = 0;
 unless( get_or_create_shm( $WS_KEY ) )
 {
     do_lock( $WS_KEY, $WRITE_LOCK );
-    unless( write_mem( $WS_KEY, $WORKER_STATUSES ) )
+    unless( writemem( $WS_KEY, $WORKER_STATUSES ) )
     {
         warn "Failed to initialize worker statuses\n";
         $shm_init_err = 1;
