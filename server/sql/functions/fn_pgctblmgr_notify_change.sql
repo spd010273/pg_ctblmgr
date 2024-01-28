@@ -36,7 +36,7 @@ BEGIN
         my_data := array_append( my_data, '"' || my_unique || '":"' || my_val || '"' );
     END LOOP;
 
-    my_data_string := '{"xid":' || txid_current()::INTEGER
+    my_data_string := '{"xid":' || txid_current()::BIGINT
                    || ',"data":{'
                    || '"schema_name":"' || my_schema
                    || '","table_name":"' || my_rel
