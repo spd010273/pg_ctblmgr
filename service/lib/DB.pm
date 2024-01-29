@@ -1009,7 +1009,7 @@ sub db_connect(;$$) :Export( :MANDATORY )
         # Cleanup pid's globals to avoid any leaks via orphaned objs
         if( $PROCESS_ID != $PARENT_PID && !defined( $is_aged ) )
         {
-            if( $FILE_DESCRIPTOR )
+            if( defined( $FILE_DESCRIPTOR ) && fileno( $FILE_DESCRIPTOR ) )
             {
                 close( $FILE_DESCRIPTOR );
                 undef( $FILE_DESCRIPTOR );

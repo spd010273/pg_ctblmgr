@@ -124,6 +124,7 @@ sub do_lock($$) :Export( :MANDATORY )
     {
         $area_info = &get_or_create_shm( $id );
         return 0 unless( $area_info );
+        return 0 unless( $area_info->{sem} );
     }
     else
     {

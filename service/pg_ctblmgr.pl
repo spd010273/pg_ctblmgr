@@ -387,7 +387,7 @@ sub parent_loop($)
             )
           )
         {
-            do_lock( $XID_KEY, $READ_LOCK );
+            do_lock( $XID_KEY, $WRITE_LOCK );
             $XID_MAP = readmem( $XID_KEY );
             $last_xid_create = [ gettimeofday() ];
 
@@ -403,13 +403,11 @@ sub parent_loop($)
 
                 if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
                 {
-                    do_lock( $XID_KEY, $READ_UNLOCK );
                     _log( $LOG_LEVEL_DEBUG, "Could not generate new XID chain member" );
+                    do_lock( $XID_KEY, $WRITE_UNLOCK );
                     next;
                 }
 
-                do_lock( $XID_KEY, $READ_UNLOCK );
-                do_lock( $XID_KEY, $WRITE_LOCK );
                 $XID_MAP = readmem( $XID_KEY );
                 $local_xid_map->{$new_xid} = $new_handle;
                 push(
@@ -422,7 +420,6 @@ sub parent_loop($)
                 );
 
                 writemem( $XID_KEY, $XID_MAP );
-                do_lock( $XID_KEY, $WRITE_TO_READ );
             }
             else
             {
@@ -453,12 +450,10 @@ sub parent_loop($)
                 if( !defined( $candidate_replace ) )
                 {
                     _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
-                    do_lock( $XID_KEY, $READ_UNLOCK );
+                    do_lock( $XID_KEY, $WRITE_UNLOCK );
                     next;
                 }
 
-                do_lock( $XID_KEY, $READ_UNLOCK );
-                do_lock( $XID_KEY, $WRITE_LOCK );
                 $XID_MAP = readmem( $XID_KEY );
                 my $replace_handle = $local_xid_map->{$candidate_replace};
 
@@ -503,11 +498,9 @@ sub parent_loop($)
                 };
                 writemem( $XID_KEY, $XID_MAP );
                 $local_xid_map->{$new_xid} = $replace_handle;
-
-                do_lock( $XID_KEY, $WRITE_TO_READ );
             }
 
-            do_lock( $XID_KEY, $READ_UNLOCK );
+            do_lock( $XID_KEY, $WRITE_UNLOCK );
         }
 
         if( $TIMING )
@@ -1148,6 +1141,7 @@ sub worker_entrypoint($$)
                     _log( $LOG_LEVEL_DEBUG, "Query parse took $query_parse_time seconds" );
 
                     my $xid_map_size = 0;
+RETRY_XID:
                     if( $ENABLE_FAST_DELETE )
                     {
                         # search XID_MAP for suitable XID
@@ -1156,6 +1150,7 @@ sub worker_entrypoint($$)
                         my $best_candidate;
                         my $best_candidate_ind;
                         my $ind = 0;
+                        do_lock( $XID_KEY, $READ_UNLOCK );
 
                         foreach my $elem( @$XID_MAP )
                         {
@@ -1174,9 +1169,14 @@ sub worker_entrypoint($$)
                         {
                             unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
                             {
-                                do_lock( $XID_KEY, $READ_UNLOCK );
                                 do_lock( $XID_KEY, $WRITE_LOCK );
                                 $XID_MAP = readmem( $XID_KEY );
+                                if( $XID_MAP->[$best_candidate_ind]->{xid} != $best_candidate )
+                                {
+                                    do_lock( $XID_KEY, $WRITE_UNLOCK );
+                                    _log( $LOG_LEVEL_ERROR, "XID map changed during read lock promotion, retrying" );
+                                    goto RETRY_XID;
+                                }
                                 push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
                                 $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
                                 $using_xid       = $best_candidate;
@@ -1184,7 +1184,7 @@ sub worker_entrypoint($$)
                                 $can_fast_delete = 1;
                                 _log( $LOG_LEVEL_DEBUG, 'Found candidate XID for fast delete' );
                                 writemem( $XID_KEY, $XID_MAP );
-                                do_lock( $XID_KEY, $WRITE_TO_READ );
+                                do_lock( $XID_KEY, $WRITE_UNLOCK );
                             }
                         }
                         else
@@ -1200,8 +1200,6 @@ sub worker_entrypoint($$)
                             }
                             _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
                         }
-
-                        do_lock( $XID_KEY, $READ_UNLOCK );
                     }
 
                     # Generate temp table containing state of rows relevent to the keys that have changed
