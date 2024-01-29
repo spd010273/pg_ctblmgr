@@ -10,11 +10,11 @@ use Perl6::Export::Attrs;
 use Params::Validate qw( :all );
 use English qw( -no_match_vars );
 
+our $PID_LOCKSTATE;
 Readonly::Scalar our $WRITE_LOCK         :Export( :MANDATORY ) => 'WL';
 Readonly::Scalar our $WRITE_UNLOCK       :Export( :MANDATORY ) => 'WUL';
 Readonly::Scalar our $READ_LOCK          :Export( :MANDATORY ) => 'RL';
 Readonly::Scalar our $READ_UNLOCK        :Export( :MANDATORY ) => 'RUL'; # Read to write removed - theres a deadlock scenario
-Readonly::Scalar our $WRITE_TO_READ      :Export( :MANDATORY ) => 'W2R'; # downgrade a write exclusive
 Readonly::Scalar our $READ_NOWAIT        :Export( :MANDATORY ) => 'RNW';
 Readonly::Scalar our $WRITE_CHECK_NOWAIT :Export( :MANDATORY ) => 'WCNW';
 Readonly my $SHM_CREATE_FLAGS => IPC_EXCL | IPC_CREAT;
@@ -46,14 +46,7 @@ Readonly my $SEMOP_ARGS       => {
     $READ_UNLOCK => pack(
         $PACKMOD,
         @{[
-            1, -1, IPC_NOWAIT # Deassert read
-        ]}
-    ),
-    $WRITE_TO_READ => pack(
-        $PACKMOD,
-        @{[
-            0, -1, ( IPC_NOWAIT | SEM_UNDO ),              # Deassert write
-            1, 1, ( IPC_NOWAIT | SEM_UNDO ) # Assert read
+            1, -1, ( SEM_UNDO | IPC_NOWAIT ) # Deassert read
         ]}
     ),
     $READ_NOWAIT => pack(
@@ -72,6 +65,7 @@ Readonly my $SEMOP_ARGS       => {
 };
 
 Readonly my $DEFAULT_ALLOCSIZE => 256;
+
 ## structure is {SEM/SHM ID}->{ sem => semget key, shm => shmget key }
 my $ACTIVE_KEYS = {};
 my $_PARENT_PID;
@@ -132,7 +126,15 @@ sub do_lock($$) :Export( :MANDATORY )
     }
 
     my $ret = semop( $area_info->{sem}, $SEMOP_ARGS->{$mode} );
-    $PROGRAM_NAME = $old_pk_name;
+    $PID_LOCKSTATE = '';
+
+    if( $mode eq $WRITE_LOCK || $mode eq $READ_LOCK )
+    {
+        $PID_LOCKSTATE = "| $mode ($id)";
+    }
+
+    $old_pk_name  =~ s/\|.*$//;
+    $PROGRAM_NAME = $old_pk_name . $PID_LOCKSTATE;
     return $ret;
 }
 

@@ -90,6 +90,7 @@ our $SLOT_NAME  :Export( :MANDATORY ) = '';
 our $DAEMONIZE  :Export( :MANDATORY ) = 0;
 our $LOG_FH     :Export( :MANDATORY ) = undef;
 our $LOG_FILE   :Export( :MANDATORY ) = '';
+our $PID_LOCKSTATE :Export( :MANDATORY ) = '';
 
 Readonly::Scalar my $USAGE => <<"USAGE";
     Usage:
@@ -326,7 +327,7 @@ sub set_program_name($$) :Export( :MANDATORY )
         $handle->do( "SET application_name = '$program_name'" );
     }
 
-    $PROGRAM_NAME = $EXTENSION_NAME . ' ' . $program_name;
+    $PROGRAM_NAME = $EXTENSION_NAME . ' ' . $program_name . ' ' . $PID_LOCKSTATE;
     return;
 }
 
