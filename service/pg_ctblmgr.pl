@@ -87,6 +87,11 @@ sub update_status($;$)
             $targ->{$key} = $info_hash->{$key};
         }
 
+        if( $PROCESS_ID != $PARENT_PID )
+        {
+            $targ->{backend_pid} = $BACKEND_PID;
+        }
+
         writemem( $WS_KEY, $WORKER_STATUSES );
 
         $success = 1;
@@ -121,6 +126,34 @@ sub _terminate_sigint()
     _terminate();
 }
 
+sub terminate_child_conns()
+{
+    my $handle = db_connect();
+    my $WS_DATA;
+    do_lock( $WS_KEY, $READ_LOCK );
+    $WS_DATA = readmem( $WS_KEY );
+    do_lock( $WS_KEY, $READ_UNLOCK );
+    my $term_q = <<END_SQL;
+    SELECT pg_terminate_backend( pid )
+      FROM pg_stat_activity
+     WHERE pid = ?
+END_SQL
+    my $term_sth = $handle->prepare( $term_q );
+
+    return unless( $term_sth );
+    foreach my $worker_pid( keys %$WS_DATA )
+    {
+        my $backend = $WS_DATA->{$worker_pid}->{backend_pid};
+
+        if( $backend )
+        {
+            $term_sth->bind_param( 1, $backend );
+            $term_sth->execute();
+        }
+    }
+    return;
+}
+
 sub _terminate(;$$$)
 {
     my( $package, $file, $line ) = validate_pos(
@@ -133,6 +166,7 @@ sub _terminate(;$$$)
     if( $PROCESS_ID == $PARENT_PID )
     {
         #this is crucial to prevent running out of shm after crashes / term
+        terminate_child_conns();
         unless( defined( $SKIP_SHM_CLEANUP ) && $SKIP_SHM_CLEANUP )
         {
             &do_shm_cleanup();
@@ -275,6 +309,7 @@ sub new_xid_placeholder($$$)
     return 0 unless( $$new_handle );
 
     $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
+    $$new_handle->do( "SET idle_in_transaction_session_timeout = $XID_IDLE_TIMEOUT" );
     $$new_handle->do( 'BEGIN' );
 
     my $sth = $$new_handle->prepare( 'SELECT txid_current() AS xid' );
@@ -390,6 +425,43 @@ sub parent_loop($)
             do_lock( $XID_KEY, $WRITE_LOCK );
             $XID_MAP = readmem( $XID_KEY );
             $last_xid_create = [ gettimeofday() ];
+            
+            # Safety check - remove XIDs that have been hanging around for a long time.
+            my $max_allowed_age = ( $MAX_XID_LENGTH * $XID_MAP_SPREAD ) * 2;
+            foreach my $aged_xid( keys %$local_xid_map )
+            {
+                if( tv_interval( $local_xid_map->{$aged_xid}->{created}, [ gettimeofday() ] ) >= $max_allowed_age )
+                {
+                    _log( $LOG_LEVEL_WARNING, "Old XID map member found older than $max_allowed_age seconds. Pruning" );
+                    my $prune_handle = $local_xid_map->{$aged_xid}->{handle};
+                    if( $prune_handle && $prune_handle->ping() > 0 && $prune_handle->pg_ping() > 0 )
+                    {
+                        $prune_handle->disconnect();
+                        undef( $prune_handle );
+                    }
+
+                    delete( $local_xid_map->{$aged_xid} );
+                    my $found = 0;
+                    my $ind = 0;
+                    foreach my $xid_map_ind( @$XID_MAP )
+                    {
+                        if( defined( $xid_map_ind ) && $xid_map_ind->{xid} == $aged_xid )
+                        {
+                            $found = 1;
+                            delete( $XID_MAP->[$ind] );
+                            last;
+                        }
+                        $ind++;
+                    }
+
+                    if( !$found )
+                    {
+                        _log( $LOG_LEVEL_ERROR, "Mismatch between XID map and local copy, could not locate xid $aged_xid" );
+                    }
+
+                    writemem( $XID_KEY, $XID_MAP );
+                }
+            }
 
             if(
                   !defined( $XID_MAP )
@@ -409,7 +481,7 @@ sub parent_loop($)
                 }
 
                 $XID_MAP = readmem( $XID_KEY );
-                $local_xid_map->{$new_xid} = $new_handle;
+                $local_xid_map->{$new_xid} = { handle => $new_handle, created => [ gettimeofday() ] };
                 push(
                     @$XID_MAP,
                     {
@@ -423,10 +495,10 @@ sub parent_loop($)
             }
             else
             {
-                # Replace oldest chain member
+                # Replace oldest chain member in terms of XID
                 my $candidate_replace;
                 my $candidate_replace_ind;
-                my $replace_ind = 0;
+                my $replace_ind     = 0;
 
                 foreach my $elem( @$XID_MAP )
                 {
@@ -450,12 +522,14 @@ sub parent_loop($)
                 if( !defined( $candidate_replace ) )
                 {
                     _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
+                    # Safety check - leave no dangling XIDs, perform a time-based check
+
                     do_lock( $XID_KEY, $WRITE_UNLOCK );
                     next;
                 }
 
                 $XID_MAP = readmem( $XID_KEY );
-                my $replace_handle = $local_xid_map->{$candidate_replace};
+                my $replace_handle = $local_xid_map->{$candidate_replace}->{handle};
 
                 if( !defined( $replace_handle ) )
                 {
@@ -479,7 +553,7 @@ sub parent_loop($)
 
                 if( !new_xid_placeholder( \$replace_handle, \$new_xid, \$snapshot ) )
                 {
-                    _log( $LOG_LEVEL_DEBUG, "Failed to generate replacement xid member" );
+                    _log( $LOG_LEVEL_ERROR, "Failed to generate replacement xid member" );
                     do_lock( $XID_KEY, $WRITE_UNLOCK );
                     next;
                 }
@@ -497,7 +571,7 @@ sub parent_loop($)
                     in_use   => [],
                 };
                 writemem( $XID_KEY, $XID_MAP );
-                $local_xid_map->{$new_xid} = $replace_handle;
+                $local_xid_map->{$new_xid} = { handle => $replace_handle, created => [ gettimeofday() ] };
             }
 
             do_lock( $XID_KEY, $WRITE_UNLOCK );
@@ -651,6 +725,7 @@ sub parent_loop($)
                                 maintenance_object => $pk_maintenance_object,
                                 name               => $ct_name,
                                 replace            => 0,
+                                backend_pid        => 0,
                             },
                             $child_pid
                         );
@@ -770,6 +845,23 @@ sub worker_cache_refresh($$$$)
     return;
 }
 
+sub release_all_xid()
+{
+    my $XID_MAP = [];
+    my $ind = 0;
+    do_lock( $XID_KEY, $WRITE_LOCK );
+    $XID_MAP = readmem( $XID_KEY );
+    foreach my $elem( @$XID_MAP )
+    {
+        @{$XID_MAP->[$ind]->{in_use}} = grep { $_ ne $PROCESS_ID } @{$XID_MAP->[$ind]->{in_use}}; 
+        $ind++;
+    }
+    
+    writemem( $XID_KEY, $XID_MAP );
+    do_lock( $XID_KEY, $WRITE_UNLOCK );
+    return;
+}
+
 ## WORKER
 sub worker_entrypoint($$)
 {
@@ -786,6 +878,7 @@ sub worker_entrypoint($$)
     my $CACHE_HASH           = {};
     my $WORKER_STATUSES      = {};
     my $XID_MAP              = [];
+    my $backend_pid          = 0;
     my $worker_pid           = $PROCESS_ID;
     my $worker_shm_err       = 0;
     $LOCAL_PK_MAINTENANCE_OBJECT = $pk_maintenance_object;
@@ -1003,7 +1096,7 @@ sub worker_entrypoint($$)
             }
 
             _log( $LOG_LEVEL_DEBUG, "Got $change_count change(s) on $LOCAL_PK_MAINTENANCE_OBJECT" );
-            my $youngest_xid;
+            my $oldest_xid;
 
             foreach my $filter_table( keys %$WAL_DATA )
             {
@@ -1016,9 +1109,9 @@ sub worker_entrypoint($$)
                     {
                         my $schema = $change->{data}->{schema_name};
                         my $table  = $change->{data}->{table_name};
-                        if( !defined $youngest_xid || $change->{xid} < $youngest_xid )
+                        if( !defined $oldest_xid || $change->{xid} < $oldest_xid )
                         {
-                            $youngest_xid = $change->{xid};
+                            $oldest_xid = $change->{xid};
                         }
 
                         foreach my $key( keys %{$change->{data}->{key}} )
@@ -1154,9 +1247,9 @@ RETRY_XID:
 
                         foreach my $elem( @$XID_MAP )
                         {
-                            if( defined( $elem->{xid} ) && $elem->{xid} <= $youngest_xid )
+                            if( defined( $elem->{xid} ) && $elem->{xid} <= $oldest_xid )
                             {
-                                $best_candidate = $XID_MAP->[$ind]->{xid};
+                                $best_candidate     = $XID_MAP->[$ind]->{xid};
                                 $best_candidate_ind = $ind;
                             }
 
@@ -1192,7 +1285,7 @@ RETRY_XID:
                             _log(
                                 $LOG_LEVEL_DEBUG,
                                 'Could not find candidate XID for fast delete '
-                              . "- looking for $youngest_xid. Candidates were:"
+                              . "- looking for $oldest_xid. Candidates were:"
                             );
                             foreach my $elem( @$XID_MAP )
                             {
@@ -1260,10 +1353,17 @@ RETRY_XID:
                             goto FD_FALLBACK;
                         }
 
+
+                        unless( $aged_handle->do( "SET idle_in_transaction_session_timeout = $XID_IDLE_TIMEOUT" ) )
+                        {
+                            $can_fast_delete = 0;
+                            _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
+                            goto FD_FALLBACK;
+                        }
                         _log(
                             $LOG_LEVEL_DEBUG,
                             "Established aged handle at snapshot $aged_snapshot "
-                          . "with XID $using_xid, target $youngest_xid"
+                          . "with XID $using_xid, target $oldest_xid"
                         );
                     }
 
@@ -1277,12 +1377,7 @@ FD_FALLBACK:
                             $aged_handle->disconnect();
                             undef( $aged_handle );
                         }
-
-                        do_lock( $XID_KEY, $WRITE_LOCK );
-                        $XID_MAP = readmem( $XID_KEY );
-                        @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
-                        writemem( $XID_KEY, $XID_MAP );
-                        do_lock( $XID_KEY, $WRITE_UNLOCK );
+                        # OLD XID RELEASE
                     }
 
                     if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
@@ -1342,12 +1437,18 @@ FD_FALLBACK:
 
                         $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
                         _log( $LOG_LEVEL_DEBUG, "Fast delete took $fast_delete_time seconds" );
-                        do_lock( $XID_KEY, $WRITE_LOCK );
-                        $XID_MAP = readmem( $XID_KEY );
-                        @{$XID_MAP->[$using_xid_ind]->{in_use}} = grep { $_ ne $worker_pid } @{$XID_MAP->[$using_xid_ind]->{in_use}};
-                        writemem( $XID_KEY, $XID_MAP );
-                        do_lock( $XID_KEY, $WRITE_UNLOCK );
+                        #OLD XID RELEASE
                         _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
+                    }
+
+                    if( defined( $using_xid ) )
+                    {
+                        release_all_xid();
+                        if( $aged_handle && $aged_handle->ping() > 0 )
+                        {
+                            $aged_handle->disconnect();
+                            undef( $aged_handle );
+                        }
                     }
 
                     # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
@@ -1583,7 +1684,7 @@ else
         my $filter_tables         = $worker_entry->{filter_tables};
         my $pk_maintenance_object = $worker_entry->{maintenance_object};
         my $ct_name               = $worker_entry->{name};
-        my $child_pid = fork();
+        my $child_pid             = fork();
 
         if( defined( $child_pid ) and $child_pid == 0 )
         {
@@ -1601,6 +1702,7 @@ else
             $WORKER_STATUSES->{$child_pid}->{replace}            = 0;
             $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
             $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
+            $WORKER_STATUSES->{$child_pid}->{backend_pid}        = 0;
             _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
         }
         else

@@ -647,41 +647,12 @@ sub read_worker_statuses()
     return $worker_statuses;
 }
 
-sub read_worker_filter_tables()
-{
-    my $WORKER_FILTER_TABLES = {};
-
-    unless( get_or_create_shm( $WFT_KEY ) )
-    {
-        warn( "Could not tie WORKER_FILTER_TABLES - is $EXTENSION_NAME running?\n" );
-        return undef;
-    }
-
-    do_lock( $WFT_KEY, $READ_LOCK );
-    $WORKER_FILTER_TABLES = readmem( $WFT_KEY );
-    do_lock( $WFT_KEY, $READ_UNLOCK );
-    my $worker_filter_tables = {};
-    foreach my $pid( keys %$WORKER_FILTER_TABLES )
-    {
-        foreach my $filter_table( keys %{$WORKER_FILTER_TABLES->{$pid}} )
-        {
-            next if( $filter_table eq '__ACTIVE_CHANGES__' );
-            # We could likely read the queue data but we'd need the WAL level fed in from $WORKER_STATUSES
-            my $queued_change_count = scalar( @{$WORKER_FILTER_TABLES->{$pid}->{$filter_table}} );
-            $worker_filter_tables->{$pid}->{$filter_table} = $queued_change_count;
-        }
-    }
-
-    return $worker_filter_tables;
-}
-
 sub print_worker_table()
 {
     my $xid_map = read_xid_map();
-    my $worker_filter_tables = read_worker_filter_tables();
     my $worker_statuses = read_worker_statuses();
 
-    if( !defined $xid_map || !defined( $worker_filter_tables ) || !defined( $worker_statuses ) )
+    if( !defined $xid_map || !defined( $worker_statuses ) )
     {
         return;
     }
@@ -690,8 +661,6 @@ sub print_worker_table()
         "Cache Table\n-----------", "|\n|",
         "Status\n------", "|\n|",
         "Last LSN\n--------", "|\n|",
-        "Filter Tables\n-------------", "|\n|",
-        "Total Queued\n-------------", "|\n|",
         "Snapshot\n--------", "|\n|",
         "XID\n---"
     );
@@ -729,48 +698,15 @@ sub print_worker_table()
             }
         }
 
-        # Find queue depth for filter_tables
-        my $queue = {};
-        my $total_queued = 0;
-        my $filter_tables = 0;
-        foreach my $filter_table( keys %{$worker_filter_tables->{$pid}} )
-        {
-            $filter_tables++;
-            if( $worker_filter_tables->{$pid}->{$filter_table} > 0 )
-            {
-                $queue->{$filter_table} = $worker_filter_tables->{$pid}->{$filter_table};
-                $total_queued += $worker_filter_tables->{$pid}->{$filter_table};
-            }
-        }
-
         $table->add(
             $pid, '|',
             $ct_name, '|',
             $status_text, '|',
             $last_lsn, '|',
-            $filter_tables, '|',
-            $total_queued, '|',
             $held_snapshot, '|',
             $held_xid
         );
 
-        if( scalar( keys %$queue ) > 0 )
-        {
-            foreach my $filter_table( sort { $a cmp $b } keys %$queue )
-            {
-                my $count = $queue->{$filter_table};
-                $table->add(
-                    undef, '|',
-                    undef, '|',
-                    undef, '|',
-                    undef, '|',
-                    $filter_table, '|',
-                    $count, '|',
-                    undef, '|',
-                    undef
-                );
-            }
-        }
     }
 
     print $table;

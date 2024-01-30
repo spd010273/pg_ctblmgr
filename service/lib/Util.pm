@@ -37,7 +37,7 @@ Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014'
 
 ## USER CONFIGURABLE GLOBALS
 # Enable verbose messaging related to process state
-Readonly::Scalar our $DEBUG                        :Export( :MANDATORY ) => 0;
+Readonly::Scalar our $DEBUG                        :Export( :MANDATORY ) => 1;
 
 # In situations where we can normally perform a fast delete but the aged data set
 # contains no rows, we will fall back to a slow delete in cases where this flag

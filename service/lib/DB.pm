@@ -26,6 +26,7 @@ our $MAINTENANCE_CHANNEL         :Export( :MANDATORY ) = '';
 our $SELECTOR                    :Export( :MANDATORY );
 our $FILE_DESCRIPTOR             :Export( :MANDATORY );
 our $SKIP_LOCK_CHECK             :Export( :MANDATORY ) = 0;
+our $BACKEND_PID                 :Export( :MANDATORY ) = 0;
 
 Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
@@ -1111,11 +1112,14 @@ sub db_connect(;$$) :Export( :MANDATORY )
 	$handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
 	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
 	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+
 #    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $DEBUG );
 
     if( !defined( $is_aged ) )
     {
         &do_listen( $handle );
+        my $row = $handle->selectrow_hashref( 'SELECT pg_backend_pid() AS pid' );
+        $BACKEND_PID = $row->{pid};
     }
 
     return $handle;
