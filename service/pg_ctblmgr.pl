@@ -425,9 +425,11 @@ sub parent_loop($)
             do_lock( $XID_KEY, $WRITE_LOCK );
             $XID_MAP = readmem( $XID_KEY );
             $last_xid_create = [ gettimeofday() ];
-            
+
             # Safety check - remove XIDs that have been hanging around for a long time.
             my $max_allowed_age = ( $MAX_XID_LENGTH * $XID_MAP_SPREAD ) * 2;
+            $max_allowed_age    = $XID_IDLE_TIMEOUT if( $XID_IDLE_TIMEOUT > $max_allowed_age );
+
             foreach my $aged_xid( keys %$local_xid_map )
             {
                 if( tv_interval( $local_xid_map->{$aged_xid}->{created}, [ gettimeofday() ] ) >= $max_allowed_age )
@@ -853,10 +855,9 @@ sub release_all_xid()
     $XID_MAP = readmem( $XID_KEY );
     foreach my $elem( @$XID_MAP )
     {
-        @{$XID_MAP->[$ind]->{in_use}} = grep { $_ ne $PROCESS_ID } @{$XID_MAP->[$ind]->{in_use}}; 
+        @{$XID_MAP->[$ind]->{in_use}} = grep { $_ ne $PROCESS_ID } @{$XID_MAP->[$ind]->{in_use}};
         $ind++;
     }
-    
     writemem( $XID_KEY, $XID_MAP );
     do_lock( $XID_KEY, $WRITE_UNLOCK );
     return;
