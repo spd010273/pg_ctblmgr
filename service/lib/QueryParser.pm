@@ -116,20 +116,6 @@ INNER JOIN pg_constraint co
            a.attname
 END_SQL
 
-Readonly::Scalar my $GET_RELATION_TYPEMODS => <<END_SQL;
-    SELECT a.attname::VARCHAR AS column,
-           t.typname::VARCHAR AS type
-      FROM pg_class c
-INNER JOIN pg_attribute a
-        ON a.attrelid = c.oid
-INNER JOIN pg_type t
-        ON t.oid = a.atttypid
-INNER JOIN pg_namespace n
-        ON n.oid = c.relnamespace
-       AND n.nspname::VARCHAR = ?
-     WHERE c.relname::VARCHAR = ?
-END_SQL
-
 Readonly::Scalar my $GET_PARSE_TREE => <<"END_SQL";
     SELECT ${SCHEMA_NAME}.fn_get_parse_tree(
         \$_\$__DEFINITION__\$_\$
@@ -249,53 +235,6 @@ sub get_relcache($) :Export( :MANDATORY )
     $sth->finish();
 
     return $cache;
-}
-
-sub get_typmods($$$;$)
-{
-    my( $handle, $schema, $table, $column ) = validate_pos(
-        @_,
-        { type => OBJECT },
-        { type => SCALAR },
-        { type => SCALAR },
-        { type => SCALAR | UNDEF, optional => 1 },
-    );
-
-    my $query = $GET_RELATION_TYPEMODS;
-    my @binds;
-
-    push( @binds, $schema );
-    push( @binds, $table );
-
-    if( defined( $column ) )
-    {
-        $query .= 'AND a.attname::VARCHAR = ?';
-        push( @binds, $column );
-    }
-
-    my $sth = try_query( $handle, $query, \@binds );
-
-    unless( $sth )
-    {
-        _log( $LOG_LEVEL_FATAL, "Failed to get typmods for '$table'" );
-    }
-
-    if( $sth->rows() > 0 )
-    {
-        my $ret = { };
-
-        while( my $row = $sth->fetchrow_hashref() )
-        {
-            my $column = $row->{column};
-            my $type   = $row->{type};
-
-            $ret->{$column} = $type;
-        }
-
-        return $ret;
-    }
-
-    return;
 }
 
 sub resolve_fk($$$$)
@@ -2616,16 +2555,18 @@ sub bind_filters($)
     my $schema   = $map->{schema};
     my $relation = $map->{relation};
     my $alias    = $map->{alias};
+    my $TYPMODS  = $map->{TYPMODS};
     my $entries  = [];
 
     foreach my $key( keys( %{$filters->{$schema}->{$relation}} ) )
     {
-        my $typmod = &get_typmods(
-            $handle,
-            $schema,
-            $relation,
-            $key
-        );
+        if( !defined( $TYPMODS ) )
+        {
+            warn( "Typmod cache is not populated. Unable to coerce binds" );
+            next;
+        }
+
+        my $typmod = $TYPMODS->{"${schema}.${relation}"};
 
         if( !defined( $typmod ) )
         {
@@ -2729,6 +2670,7 @@ sub recursive_bind_helper($$)
     my $handle    = $map->{handle};
     my $RELS      = $map->{RELS};
     my $BINDS     = $map->{BINDS};
+    my $TYPMODS   = $map->{TYPMODS};
 
     return unless( defined( $next_bind ) && ref( $next_bind ) eq 'ARRAY' );
 
@@ -2764,6 +2706,7 @@ END_SQL
                 filters  => $filters,
                 schema   => $outer_schema,
                 relation => $outer_relation,
+                TYPMODS  => $TYPMODS,
             } );
 
             $q .= ' ' . join( ' AND ', @$binds ) . ') ' if( $binds );;
@@ -2800,6 +2743,7 @@ END_SQL
                 next_bind   => $next_next_binds,
                 RELS        => $new_rels,
                 BINDS       => $BINDS,
+                TYPMODS     => $TYPMODS,
             },
             $chain,
         );
@@ -2912,6 +2856,7 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                              RELS       => $RELS,
                              filters    => $filters,
                              BINDS      => $BINDS,
+                             TYPMODS    => $relcache->{typmods},
                             },
                             $chain
                         );
@@ -3082,6 +3027,7 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                                     schema   => $schema,
                                     relation => $table_name,
                                     alias    => $alias,
+                                    TYPMODS  => $relcache->{typmods},
                                 }
                             );
 
@@ -3094,7 +3040,7 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                 }
             }
         }
-        
+
         if( $where_expressions->{$position} )
         {
             push( @{$where_expressions->{$position}}, @$where_entries );

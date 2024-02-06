@@ -568,6 +568,12 @@ Readonly::Scalar my $GET_DEPENDENT_INDEXES => <<"END_SQL";
            FROM tt_indexes;
 END_SQL
 
+Readonly::Scalar my $UPDATE_FILTERS => <<"END_SQL";
+    UPDATE ${SCHEMA_NAME}.__pgctblmgr_repl_slot
+       SET filter = ?
+     WHERE id = ?
+END_SQL
+
 Readonly::Scalar my $CHECK_WORKER_LOCK => <<"END_SQL";
     SELECT l.*
       FROM pg_locks l
@@ -593,6 +599,21 @@ INNER JOIN pg_namespace n
 INNER JOIN ${SCHEMA_NAME}.__pgctblmgr_repl_slot rs
         ON rs.id = ?::INTEGER
      WHERE c.relname = '__pgctblmgr_repl_slot'
+END_SQL
+
+Readonly::Scalar my $FETCH_TYPMODS_QUERY => <<"END_SQL";
+    SELECT a.attname::VARCHAR AS column,
+           t.typname::VARCHAR AS type
+      FROM pg_class c
+INNER JOIN pg_attribute a
+        ON a.attrelid = c.oid
+       AND a.attisdropped IS FALSE
+       AND a.attnum > 0
+INNER JOIN pg_type t
+        ON t.oid = a.atttypid
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+     WHERE n.nspname::VARCHAR || '.' || c.relname::VARCHAR = ?
 END_SQL
 
 sub try_lock($) :Export( :MANDATORY )
@@ -686,6 +707,50 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
     return 0;
 }
 
+sub populate_typmods($$) :Export( :MANDATORY )
+{
+    my( $handle, $filter_tables ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => ARRAYREF },
+    );
+
+    my $result_typmods = {};
+    foreach my $filter_table( @$filter_tables )
+    {
+        my $sth = try_query( $handle, $FETCH_TYPMODS_QUERY, [ $filter_table ] );
+
+        unless( $sth )
+        {
+            _log( $LOG_LEVEL_ERROR, "Unable to get typmods for '$filter_table'" );
+        }
+
+        while( my $row = $sth->fetchrow_hashref )
+        {
+            $result_typmods->{$filter_table}->{$row->{column}} = $row->{type};
+        }
+    }
+
+    return $result_typmods;
+}
+
+sub update_filter_tables($$$) :Export( :MANDATORY )
+{
+    my( $handle, $new_filter_tables, $pk_maintenance_object ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => ARRAYREF },
+        { type => SCALAR },
+    );
+
+    unless( try_query( $handle, $UPDATE_FILTERS, [ $new_filter_tables, $pk_maintenance_object ] ) )
+    {
+        return;
+    }
+
+    return 1;
+}
+
 # Dependent object logic
 sub create_dependent_temp_table($$)
 {
@@ -695,6 +760,9 @@ sub create_dependent_temp_table($$)
         { type => HASHREF },
     );
 
+    $handle->do( "SET client_min_messages = 'ERROR'" );
+    $handle->do( "DROP TABLE IF EXISTS tt_dependent_objects" );
+    $handle->do( "SET client_min_messages TO DEFAULT" );
     my $sth = &try_query( $handle, $CREATE_CT_DEPENDENT_OBJECT_TT );
 
     unless( $sth )
@@ -869,7 +937,7 @@ sub drop_dependency_temp_table($)
         { type => OBJECT },
     );
 
-    $handle->do( 'DROP TABLE tt_dependent_objects' );
+    $handle->do( 'DROP TABLE  IF EXISTS tt_dependent_objects' );
 
     return 1;
 }
@@ -1422,6 +1490,9 @@ sub check_ct_exists($) :Export( :MANDATORY )
         );
 
         my $create_tt = $CREATE_COLUMN_CHECK_TABLE;
+        $handle->do( "SET client_min_messages = 'ERROR'" );
+        $handle->do( "DROP TABLE IF EXISTS tt_column_verify" );
+        $handle->do( "SET client_min_messages TO DEFAULT" );
         $create_tt =~ s/__DEFINITION__/$ct_hash->{definition}/;
         $sth = try_query(
             $handle,
@@ -1703,6 +1774,10 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
     $handle = &db_connect( $handle );
     my $temp_table_name = 'tt_' . $ct_hash->{name};
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
+    $handle->do( "SET client_min_messages = 'ERROR'" );
+    $handle->do( "DROP TABLE IF EXISTS $temp_table_name" );
+    $handle->do( "SET client_min_messages TO DEFAULT" );
+
     my $sth             = try_query( $handle, $tt_query );
 
     if( $sth )

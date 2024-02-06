@@ -785,6 +785,7 @@ sub worker_cache_refresh($$$$)
         _log( $LOG_LEVEL_FATAL, "Failed to get cache table definition" );
     }
 
+    # TODO, we should filter the relcache based on our worker's filter tables to save RAM
     $cache_hash->{relcache}      = &get_relcache( $handle );
     $cache_hash->{table_mapping} = {};
     $cache_hash->{parse_tree} = &find_table_aliases(
@@ -793,6 +794,48 @@ sub worker_cache_refresh($$$$)
         $cache_hash->{definition},
         $cache_hash->{table_mapping}
     );
+
+    # This is where we fixup the trigger'd tables in __pgctblmgr_repl_slot. The
+    # initial parse will likely be incorrect if the query is complex. We've now
+    # had the chance for a much more accurate parse and can update the filters
+    # to be 100% correct.
+    my $binds = $cache_hash->{table_mapping}->{BINDS};
+    my $filter_tables_hash = {};
+    my $new_filter_tables  = [];
+    my $ft_needs_fixup     = 0; # onshot for said update
+    foreach my $bind_position( keys %$binds )
+    {
+        foreach my $bind_schema( keys %{$binds->{$bind_position}->{rels}} )
+        {
+            foreach my $bind_alias( keys %{$binds->{$bind_position}->{rels}->{$bind_schema}} )
+            {
+                 foreach my $bind_table( keys %{$binds->{$bind_position}->{rels}->{$bind_schema}->{$bind_alias}} )
+                 {
+                     # Note - no need to attempt to discover relations in the outer-join bind infos, if present.
+                     # This will not lead to undiscovered tables but is more for bind planning.
+                     next unless( $cache_hash->{relcache}->{rels}->{$bind_schema}->{$bind_table} );
+                     next if defined( $filter_tables_hash->{$bind_schema}->{$bind_table} );
+                     $filter_tables_hash->{$bind_schema}->{$bind_table} = 1;
+                     my $rel = "${bind_schema}.${bind_table}";
+                     push( @$new_filter_tables, $rel );
+                     unless( grep /^$rel$/, @$filter_tables )
+                     {
+                        $ft_needs_fixup = 1;
+                     }
+                 }
+            }
+        }
+    }
+
+    if( $ft_needs_fixup )
+    {
+        _log( $LOG_LEVEL_INFO, "Detected new filter tables update for __pgctblmgr_repl_slot!" );
+        @$filter_tables = @$new_filter_tables;
+        update_filter_tables( $handle, $new_filter_tables, $pk_maintenance_object );
+    }
+
+    # Optimization to cache relevant typmods to this worker
+    $cache_hash->{relcache}->{typmods} = &populate_typmods( $handle, $filter_tables );
 
     # Columns in order of appearance on table
     $cache_hash->{cache_table_columns} = &get_cache_table_columns(
@@ -1073,7 +1116,18 @@ sub worker_entrypoint($$)
             #TODO: Replace dequeue w/ listen here. WAL_DATA is structured as $WAL_DATA->{filter_table}->[ changes ]
             # We block here waiting on data
 
-            $SELECTOR->can_read;
+            # Note: There's a strange behavior in DBI's control methods here for pg_notifies.
+            # If notifications happen too closely, they can sometime pile up into the next notification
+            # without triggering the file_handle->can_read logic. I've opted to switch this out to a polling-based
+            # timeout setup, where if an update occurs we pass this block without waiting for timeout, but if we're in
+            # a period of heavy updates, there's not a chance we won't see the data until the next notification.
+
+            # I did a crap job of explaining the above, so the behavior can be reproduced by spamming something like
+            # UPDATE <table> SET <some_attribute> WHERE <pk> IN( SELECT <pk> FROM <table> ORDER BY random() LIMIT 1 );
+            # with the $SELECTOR->can_read uncommented and the call to IO::SELECT commented
+            #$SELECTOR->can_read;
+            IO::Select::select( $SELECTOR, undef, undef, 2.5 );
+
             my $change_count = 0;
             while( my $notifications = $handle->func( 'pg_notifies' ) )
             {
@@ -1096,7 +1150,7 @@ sub worker_entrypoint($$)
                 $change_count++;
             }
 
-            _log( $LOG_LEVEL_DEBUG, "Got $change_count change(s) on $LOCAL_PK_MAINTENANCE_OBJECT" );
+            _log( $LOG_LEVEL_DEBUG, "Got $change_count change(s) on $LOCAL_PK_MAINTENANCE_OBJECT" ) if( $change_count );
             my $oldest_xid;
 
             foreach my $filter_table( keys %$WAL_DATA )
@@ -1290,7 +1344,7 @@ RETRY_XID:
                             );
                             foreach my $elem( @$XID_MAP )
                             {
-                                _log( $LOG_LEVEL_DEBUG, "$elem->{xid}" );
+                                _log( $LOG_LEVEL_DEBUG, "$elem->{xid}" ) if( defined( $elem && $elem->{xid} ) );
                             }
                             _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
                         }
