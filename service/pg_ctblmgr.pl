@@ -39,7 +39,8 @@ use Shm;
 # to lookup historic data
 
 Readonly my $REFRESH_ON_START   => 0;
-Readonly my $XID_IDLE_TIMEOUT   => 1000 * 3600; # 1 hour
+# Expressed in MS:
+Readonly my $XID_IDLE_TIMEOUT   => ( 1000 * $XID_MAP_SPREAD ) + ( 1000 * 30 ); # XID_MAP_SPREAD + 30 seconds
 Readonly my $SLEEP_TIMER        => 0.25; # seconds for main loop
 Readonly my $XID_START_SIZE     => 768;
 Readonly my $WS_KEY             => 17783313;
@@ -427,8 +428,8 @@ sub parent_loop($)
             $last_xid_create = [ gettimeofday() ];
 
             # Safety check - remove XIDs that have been hanging around for a long time.
-            my $max_allowed_age = ( $MAX_XID_LENGTH * $XID_MAP_SPREAD ) * 2;
-            $max_allowed_age    = $XID_IDLE_TIMEOUT if( $XID_IDLE_TIMEOUT > $max_allowed_age );
+            my $max_allowed_age = ( $MAX_XID_LENGTH * $XID_MAP_SPREAD ) + $XID_MAP_SPREAD;
+            $max_allowed_age    = ( $XID_IDLE_TIMEOUT / 1000 ) if( ( $XID_IDLE_TIMEOUT / 1000 ) > $max_allowed_age );
 
             foreach my $aged_xid( keys %$local_xid_map )
             {
@@ -450,7 +451,7 @@ sub parent_loop($)
                         if( defined( $xid_map_ind ) && $xid_map_ind->{xid} == $aged_xid )
                         {
                             $found = 1;
-                            delete( $XID_MAP->[$ind] );
+                            splice( @$XID_MAP, $ind, 1 );
                             last;
                         }
                         $ind++;
@@ -462,6 +463,34 @@ sub parent_loop($)
                     }
 
                     writemem( $XID_KEY, $XID_MAP );
+                }
+                else
+                {
+                    my $aged_handle = $local_xid_map->{$aged_xid}->{handle};
+                    if( !defined $aged_handle || $aged_handle->ping() <= 0 || $aged_handle->pg_ping() <= 0 )
+                    {
+                        _log( $LOG_LEVEL_DEBUG, "Found local XID entry with bad handle for $aged_xid" );
+                        delete( $local_xid_map->{$aged_xid} );
+                        my $ind = 0;
+                        my $found = 1;
+                        foreach my $xid_map_ind( @$XID_MAP )
+                        {
+                            $found = 1;
+                            splice( @$XID_MAP, $ind, 1 );
+                            last;
+                        }
+                        $ind++;
+
+                        if( !$found )
+                        {
+                            _log(
+                                $LOG_LEVEL_ERROR,
+                                "Mismatch between XID map and local copy. Terminated handle for $aged_xid could not be found"
+                            );
+                        }
+
+                        writemem( $XID_KEY, $XID_MAP );
+                    }
                 }
             }
 
@@ -1450,6 +1479,10 @@ FD_FALLBACK:
                         # OLD XID RELEASE
                     }
 
+                    my $aged_data_type_hash = {};
+                    my $where_filters = [];
+                    my $aged_temp_table;
+
                     if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
                     {
                         $SKIP_LOCK_CHECK = 1;
@@ -1458,7 +1491,7 @@ FD_FALLBACK:
                         &set_program_name( $aged_handle, "fast delete $CACHE_HASH->{name}" );
                         _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                         # Create temp table in aged handle && perform fast delete
-                        my $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
+                        $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
 
                         unless( $aged_temp_table )
                         {
@@ -1473,11 +1506,13 @@ FD_FALLBACK:
 
                         my $fast_delete_start = [ gettimeofday() ];
                         unless(
-                            &generate_aged_delete_statement(
+                            &fast_forward_aged_data(
                                 $aged_handle,
                                 $handle,
                                 $aged_temp_table,
                                 $temp_table,
+                                $aged_data_type_hash,
+                                $where_filters,
                                 $CACHE_HASH
                             )
                               )
@@ -1521,6 +1556,25 @@ FD_FALLBACK:
                         }
                     }
 
+                    if( $can_fast_delete && $tried_fast_delete )
+                    {
+                        $SKIP_LOCK_CHECK = 1;
+                        unless(
+                            &generate_aged_delete_statement(
+                                $handle,
+                                $aged_temp_table,
+                                $temp_table,
+                                $aged_data_type_hash,
+                                $where_filters,
+                                $CACHE_HASH
+                            )
+                              )
+                        {
+                            _log( $LOG_LEVEL_ERROR, "Fast delete failed, falling back to slow delete" );
+                            $can_fast_delete   = 0;
+                            $tried_fast_delete = 1;
+                        }
+                    }
                     # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
                     # use slow deletes iff the XID map isn't full
                     # For production use we're banking on steady-state operation

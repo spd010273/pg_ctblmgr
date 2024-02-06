@@ -2115,13 +2115,15 @@ END_SQL
     return 1;
 }
 
-sub generate_aged_delete_statement($$$$$) :Export( :MANDATORY )
+sub fast_forward_aged_data($$$$$$$) :Export( :MANDATORY )
 {
     my(
         $aged_handle,
         $current_handle,
         $aged_temp_table,
         $current_temp_table,
+        $column_data_type_hash,
+        $where_filters,
         $cache_hash
       ) = validate_pos(
         @_,
@@ -2129,6 +2131,8 @@ sub generate_aged_delete_statement($$$$$) :Export( :MANDATORY )
         { type => OBJECT },
         { type => HASHREF },
         { type => HASHREF },
+        { type => HASHREF },
+        { type => ARRAYREF },
         { type => HASHREF },
     );
 
@@ -2144,7 +2148,6 @@ sub generate_aged_delete_statement($$$$$) :Export( :MANDATORY )
         "SET application_name = 'Lookback: $cache_table_name'"
     );
 
-    my $column_data_type_hash = {};
     my $column_data_types = [];
     my $get_type_q = <<END_SQL;
     SELECT t.typname AS datatype
@@ -2270,8 +2273,6 @@ END_SQL
         return 0;
     }
 
-    my $where_filters = [];
-
     my $aged_rows = $aged_sth->rows();
 
     if( $aged_rows == 0 )
@@ -2359,9 +2360,39 @@ END_SQL
     $aged_sth->finish();
     $aged_handle->do( 'ROLLBACK' );
     $aged_handle->disconnect();
+    return 1;
+}
 
+sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
+{
+    my(
+        $current_handle,
+        $aged_temp_table,
+        $current_temp_table,
+        $column_data_type_hash,
+        $where_filters,
+        $cache_hash
+      ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => HASHREF },
+        { type => HASHREF },
+        { type => HASHREF },
+        { type => ARRAYREF },
+        { type => HASHREF },
+    );
+
+    my $definition         = $cache_hash->{definition};
+    my $cache_table_schema = $cache_hash->{schema};
+    my $cache_table_name   = $cache_hash->{name};
+    my $uniques            = $cache_hash->{cache_table_uniques};
+
+    # We can actually release the XID here :(
     # at this point, past_temp_table contains data from a historic timeline but
     # is in the present timeline
+    my $past_temp_table = "tt_past_data_${PROCESS_ID}";
+    $current_handle->do( "ANALYZE $past_temp_table" );
+    $current_handle->do( "ANALYZE $current_temp_table->{name}" );
     my $unique_column_select = join(
         ',',
         map { "tt.$_" } keys %$column_data_type_hash
@@ -2369,6 +2400,7 @@ END_SQL
 
     my $left_join_clauses = [];
     my $left_join_wheres  = [];
+    my $ind = 0;
 
     foreach my $unique_columns( @$uniques )
     {
@@ -2385,6 +2417,8 @@ END_SQL
             map { "vw.$_ IS NULL" } @$unique_columns
         );
 
+        $current_handle->do( "CREATE INDEX ix_past_data_$ind ON $past_temp_table( " . join( ',', @$unique_columns ) . " ) " );
+        $ind++;
         push( @$left_join_wheres, $where_clause );
         push( @$left_join_clauses, $join_clause );
     }
