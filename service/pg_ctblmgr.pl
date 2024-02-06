@@ -831,7 +831,16 @@ sub worker_cache_refresh($$$$)
     {
         _log( $LOG_LEVEL_INFO, "Detected new filter tables update for __pgctblmgr_repl_slot!" );
         @$filter_tables = @$new_filter_tables;
-        update_filter_tables( $handle, $new_filter_tables, $pk_maintenance_object );
+        unless( update_filter_tables( $handle, $new_filter_tables, $pk_maintenance_object ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Failed to update filter tables (and install triggers) '
+              . "for maintenance object $pk_maintenance_object. This is likely "
+              . 'due to deadlocking. The service WILL miss some updates. Please '
+              . 'restart the service at a time when your cluster is less busy.'
+            );
+        }
     }
 
     # Optimization to cache relevant typmods to this worker
@@ -1302,7 +1311,13 @@ RETRY_XID:
 
                         foreach my $elem( @$XID_MAP )
                         {
-                            if( defined( $elem->{xid} ) && $elem->{xid} <= $oldest_xid )
+                            if(
+                                defined( $elem->{xid} )
+                             && $elem->{xid} <= $oldest_xid
+                             && (
+                                    !defined( $best_candidate )
+                                 || $elem->{xid} > $best_candidate )
+                               )
                             {
                                 $best_candidate     = $XID_MAP->[$ind]->{xid};
                                 $best_candidate_ind = $ind;
