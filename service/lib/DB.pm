@@ -2451,8 +2451,8 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
             $join_clause = join(
                 ' AND ',
                 map {
-                    "( vw.$_ IS NULL AND tt.$_ IS NULL ) "
-                  . "OR ( vw.$_ = tt.$_ )"
+                    "( ( vw.$_ IS NULL AND tt.$_ IS NULL ) "
+                  . "OR ( vw.$_ = tt.$_ ) )"
                 } @$unique_columns
             );
         }
