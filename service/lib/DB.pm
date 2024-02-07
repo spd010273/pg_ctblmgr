@@ -1678,12 +1678,6 @@ sub create_cache_table_unique($$) :Export( :MANDATORY )
     );
 
     return 0 unless( $sth );
-
-    foreach my $col( $ct_hash->{unique_index} )
-    {
-        push( @{$ct_hash->{cache_table_uniques}}, $col );
-    }
-
     $sth->finish();
     return 1;
 }
@@ -1920,24 +1914,45 @@ sub generate_update_statement($$$) :Export( :MANDATORY )
     my $where_clauses      = [];
     my $distinct_uniques   = [];
     my $non_unique_columns = [];
+    my $join_clause;
+    my $where_clause;
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join(
-            ' AND ',
-            map {
-                "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
-              . "OR ( tt.$_ = vw.$_ ) )"
-           } @$unique_columns
-        );
+        if( $NULL_IN_UNIQUE )
+        {
+            $join_clause  = join(
+                ' AND ',
+                map {
+                    "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
+                  . "OR ( tt.$_ = vw.$_ ) )"
+               } @$unique_columns
+            );
 
-        my $where_clause = join(
-            ' AND ',
-            map {
-                "( ( ct.$_ IS NULL AND tt.$_ IS NULL ) "
-              . "OR ( ct.$_ = tt.$_ ) )"
-            } @$unique_columns
-        );
+            $where_clause = join(
+                ' AND ',
+                map {
+                    "( ( ct.$_ IS NULL AND tt.$_ IS NULL ) "
+                  . "OR ( ct.$_ = tt.$_ ) )"
+                } @$unique_columns
+            );
+        }
+        else
+        {
+            $join_clause = join(
+                ' AND ',
+                map {
+                    " ( tt.$_ = vw.$_ ) "
+                } @$unique_columns
+            );
+
+            $where_clause = join(
+                ' AND ',
+                map {
+                    " ( tt.$_ = ct.$_ ) "
+                } @$unique_columns
+            );
+        }
 
         push( @$join_clauses,  $join_clause  );
         push( @$where_clauses, $where_clause );
@@ -2071,22 +2086,37 @@ sub generate_insert_statement($$$) :Export( :MANDATORY )
 
     my $join_clauses  = [];
     my $where_clauses = [];
+    my $join_clause;
+    my $where_clause_elem;
 
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause  = join(
-            ' AND ',
-            map {
-                "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
-              . "OR ( tt.$_ = vw.$_ ) )"
-            } @$unique_columns
-        );
-        my $where_clause = join(
+        if( $NULL_IN_UNIQUE )
+        {
+            $join_clause  = join(
+                ' AND ',
+                map {
+                    "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
+                  . "OR ( tt.$_ = vw.$_ ) )"
+                } @$unique_columns
+            );
+        }
+        else
+        {
+            $join_clause = join(
+                ' AND ',
+                map {
+                    " ( tt.$_ = vw.$_ ) "
+                } @$unique_columns
+            );
+        }
+
+        $where_clause_elem = join(
             ' AND ',
             map { "tt.$_ IS NULL" } @$unique_columns
         );
         push( @$join_clauses,  $join_clause  );
-        push( @$where_clauses, $where_clause );
+        push( @$where_clauses, $where_clause_elem );
     }
 
     my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
@@ -2302,6 +2332,7 @@ END_SQL
 
         foreach my $unique_columns( @$uniques )
         {
+            my $where_elem;
             my $where_elems = [];
             foreach my $unique( @$unique_columns )
             {
@@ -2318,10 +2349,19 @@ END_SQL
                     $value = 'NULL::' . $column_data_type_hash->{$unique};
                 }
 
+                if( $NULL_IN_UNIQUE )
+                {
+                    $where_elem = "( vw.$unique IS NULL AND  $value IS NULL ) "
+                                . "OR ( vw.$unique = $value )";
+                }
+                else
+                {
+                    $where_elem = " ( vw.$unique = $value ) ";
+                }
+
                 push(
                     @$where_elems,
-                    "( vw.$unique IS NULL AND  $value IS NULL ) "
-                  . "OR ( vw.$unique = $value )"
+                    $where_elem
                 );
             }
 
@@ -2387,7 +2427,6 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     my $cache_table_name   = $cache_hash->{name};
     my $uniques            = $cache_hash->{cache_table_uniques};
 
-    # We can actually release the XID here :(
     # at this point, past_temp_table contains data from a historic timeline but
     # is in the present timeline
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
@@ -2402,15 +2441,30 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     my $left_join_wheres  = [];
     my $ind = 0;
 
+    my $join_clause;
+    my $where_clause;
+
     foreach my $unique_columns( @$uniques )
     {
-        my $join_clause = join(
-            ' AND ',
-            map {
-                "( vw.$_ IS NULL AND tt.$_ IS NULL ) "
-              . "OR ( vw.$_ = tt.$_ )"
-            } @$unique_columns
-        );
+        if( $NULL_IN_UNIQUE )
+        {
+            $join_clause = join(
+                ' AND ',
+                map {
+                    "( vw.$_ IS NULL AND tt.$_ IS NULL ) "
+                  . "OR ( vw.$_ = tt.$_ )"
+                } @$unique_columns
+            );
+        }
+        else
+        {
+            $join_clause = join(
+                ' AND ',
+                map {
+                    " ( vw.$_ = tt.$_ ) "
+                } @$unique_columns
+            );
+        }
 
         my $where_clause = join(
             ' AND ',
@@ -2488,15 +2542,30 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
             ) unless( grep /^$unique_column$/, @$unique_uniques );
         }
 
-        push(
-            @$join_preds,
-            join(
+        my $pred;
+        if( $NULL_IN_UNIQUE )
+        {
+            $pred = join(
                 ' AND ',
                 map {
                     "(( tt.$_ IS NULL AND vw.$_ IS NULL ) "
                   . "OR ( tt.$_ = vw.$_ ))"
                 } @$unique_columns
-            )
+            );
+        }
+        else
+        {
+            $pred = join(
+                ' AND ',
+                map {
+                    " ( tt.$_ = vw.$_ ) "
+                } @$unique_columns
+            );
+        }
+
+        push(
+            @$join_preds,
+            $pred
         );
     }
 

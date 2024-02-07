@@ -35,7 +35,9 @@ Readonly::Scalar our $SCHEMA_NAME               :Export( :MANDATORY ) => 'pgctbl
 Readonly::Scalar our $SQL_STATE_ADMIN_TERM      :Export( :MANDATORY ) => '57P01';
 Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014';
 
-## USER CONFIGURABLE GLOBALS
+###############################################################################
+################################ USER GLOBALS #################################
+
 # Enable verbose messaging related to process state
 Readonly::Scalar our $DEBUG                        :Export( :MANDATORY ) => 0;
 
@@ -48,6 +50,9 @@ Readonly::Scalar our $CONSERVATIVE_FAST_DELETE     :Export( :MANDATORY ) => 0;
 # condition.
 Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 3;
 
+###############################################################################
+############################## QUERY PERFORMANCE ##############################
+
 # Enable fast delete functionality - 1 is enable, 0 is disable
 Readonly::Scalar our $ENABLE_FAST_DELETE           :Export( :MANDATORY ) => 1;
 
@@ -59,6 +64,11 @@ Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 3;
 # This increases the likelyhood that long running tx's result in a
 # fast delete.
 Readonly::Scalar our $XID_MAP_SPREAD               :Export( :MANDATORY ) => 300;
+
+# Indicated that the user has cache tables where the one or more component of
+# a cache table's unique index can possibly be NULL. Setting this to enabled
+# ( '1' ) with NULL components will result in inaccurate results.
+Readonly::Scalar our $NULL_IN_UNIQUE               :Export( :MANDATORY ) => 1;
 
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather
 # than one insert
@@ -85,11 +95,10 @@ Readonly::Scalar our $OUTER_FALLBACK_TO_LARGEST    :Export( :MANDATORY ) => 1;
 Readonly::Scalar our $CONSERVATIVE_TABLE_FILTERING :Export( :MANDATORY ) => 1;
 
 # Globals initialized at runtime start
-our $PARENT_PID :Export( :MANDATORY ) = 0;
-our $SLOT_NAME  :Export( :MANDATORY ) = '';
-our $DAEMONIZE  :Export( :MANDATORY ) = 0;
-our $LOG_FH     :Export( :MANDATORY ) = undef;
-our $LOG_FILE   :Export( :MANDATORY ) = '';
+our $PARENT_PID    :Export( :MANDATORY ) = 0;
+our $DAEMONIZE     :Export( :MANDATORY ) = 0;
+our $LOG_FH        :Export( :MANDATORY ) = undef;
+our $LOG_FILE      :Export( :MANDATORY ) = '';
 our $PID_LOCKSTATE :Export( :MANDATORY ) = '';
 
 Readonly::Scalar my $USAGE => <<"USAGE";

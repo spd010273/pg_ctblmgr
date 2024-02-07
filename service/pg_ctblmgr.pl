@@ -832,6 +832,7 @@ sub worker_cache_refresh($$$$)
     my $filter_tables_hash = {};
     my $new_filter_tables  = [];
     my $ft_needs_fixup     = 0; # onshot for said update
+
     foreach my $bind_position( keys %$binds )
     {
         foreach my $bind_schema( keys %{$binds->{$bind_position}->{rels}} )
