@@ -27,10 +27,25 @@ our $SELECTOR                    :Export( :MANDATORY );
 our $FILE_DESCRIPTOR             :Export( :MANDATORY );
 our $SKIP_LOCK_CHECK             :Export( :MANDATORY ) = 0;
 our $BACKEND_PID                 :Export( :MANDATORY ) = 0;
+our $NO_TEMP_TABLES              :Export( :MANDATORY ) = 0;
 
 Readonly::Scalar my $TCP_KEEPALIVE          => 60;
 Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
 Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
+Readonly::Scalar my $GET_TABLE_COLUMNS_DATATYPES => <<END_SQL;
+    SELECT a.attname AS column_name,
+           t.typname AS datatype
+      FROM pg_class c
+      JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+      JOIN pg_attribute a
+        ON a.attnum > 0
+       AND a.attrelid = c.oid
+      JOIN pg_type t
+        ON t.oid = a.atttypid
+     WHERE n.nspname = ?
+       AND c.relname = ?
+END_SQL
 
 Readonly::Scalar my $CHECK_EXTENSION_RUNNING_QUERY => <<"END_SQL";
     SELECT pg_try_advisory_lock(
@@ -688,6 +703,11 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
         $cache_hash->{maintenance_channel} = $row->{maintenance_channel};
         $ct_sth->finish();
 
+        if( $cache_hash->{unique_index} )
+        {
+            @{$cache_hash->{unique_index}} = sort { $a cmp $b } @{$cache_hash->{unique_index}};
+        }
+
         $cache_hash->{digest} = get_ct_digest(
             $handle,
             $pk_maintenance_object
@@ -701,6 +721,13 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
             );
         }
 
+        $ct_sth = &try_query( $handle, $GET_TABLE_COLUMNS_DATATYPES, [ $cache_hash->{schema}, $cache_hash->{name} ] );
+        while( $row = $ct_sth->fetchrow_hashref() )
+        {
+            $cache_hash->{columns}->{$row->{column_name}} = $row->{datatype};
+        }
+
+        $ct_sth->finish();
         return 1;
     }
 
@@ -1890,16 +1917,18 @@ sub get_cache_table_unique($$$) :Export( :MANDATORY )
     return $uniques;
 }
 
-sub generate_update_statement($$$) :Export( :MANDATORY )
+sub generate_update_statement($$$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $temp_table,
+        $query,
         $cache_hash
       ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => HASHREF },
+        { type => SCALAR },
         { type => HASHREF },
     );
 
@@ -2046,10 +2075,20 @@ END_SQL
                                 } @$non_unique_columns
                              )
                             . ' )';
+        my $tt;
+        if( $NO_TEMP_TABLES )
+        {
+            $tt = "( $query )";
+        }
+        else
+        {
+            $tt = $temp_table->{name};
+        }
+
         my $UPDATE_Q        = <<END_SQL;
         UPDATE $cache_table_schema.$cache_table_name ct
            SET $update_fragment
-          FROM $temp_table->{name} tt
+          FROM $tt tt
          WHERE $where_clause
            AND $diff_distinct
 END_SQL
@@ -2063,16 +2102,18 @@ END_SQL
     return 1;
 }
 
-sub generate_insert_statement($$$) :Export( :MANDATORY )
+sub generate_insert_statement($$$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $temp_table,
+        $query,
         $cache_hash
       ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => HASHREF },
+        { type => SCALAR },
         { type => HASHREF },
     );
 
@@ -2119,20 +2160,30 @@ sub generate_insert_statement($$$) :Export( :MANDATORY )
         push( @$where_clauses, $where_clause_elem );
     }
 
+    my $ins_columns    = join( ', ', @$table_columns );
     my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
     my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
     my $where_clause   = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
+    my $tt;
+    if( $NO_TEMP_TABLES )
+    {
+        $tt = "( $query )";
+    }
+    else
+    {
+        $tt = $temp_table->{name};
+    }
 
     my $INSERT_Q = <<END_SQL;
-    WITH tt_records_to_insert AS MATERIALIZED
+    WITH tt_records_to_insert AS
     (
         SELECT $columns
-          FROM $temp_table->{name} vw
+          FROM $tt vw
      LEFT JOIN $cache_table_schema.$cache_table_name tt
             ON $join_predicate
          WHERE $where_clause
     )
-    INSERT INTO $cache_table_schema.$cache_table_name
+    INSERT INTO $cache_table_schema.$cache_table_name ( $ins_columns )
          SELECT $columns
            FROM tt_records_to_insert vw
 END_SQL
@@ -2145,15 +2196,41 @@ END_SQL
     return 1;
 }
 
-sub fast_forward_aged_data($$$$$$$) :Export( :MANDATORY )
+sub get_change_volume($$$) :Export( :MANDATORY )
+{
+    my( $handle, $query, $cache_hash ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => HASHREF },
+    );
+
+    my $q = <<"END_SQL";
+    WITH tt_count AS
+    (
+        $query
+    )
+        SELECT COUNT( * ) AS change_volume
+          FROM tt_count
+END_SQL
+
+    my $sth = &try_query( $handle, $q, [] );
+
+    return 0 unless( $sth );
+    my $count_row = $sth->fetchrow_hashref();
+
+    my $count = $count_row->{change_volume};
+    $sth->finish();
+    return $count;
+}
+
+sub fast_forward_aged_data($$$$$$) :Export( :MANDATORY )
 {
     my(
         $aged_handle,
         $current_handle,
         $aged_temp_table,
         $current_temp_table,
-        $column_data_type_hash,
-        $where_filters,
         $cache_hash
       ) = validate_pos(
         @_,
@@ -2161,8 +2238,6 @@ sub fast_forward_aged_data($$$$$$$) :Export( :MANDATORY )
         { type => OBJECT },
         { type => HASHREF },
         { type => HASHREF },
-        { type => HASHREF },
-        { type => ARRAYREF },
         { type => HASHREF },
     );
 
@@ -2198,65 +2273,42 @@ END_SQL
             $LOG_LEVEL_ERROR,
             'Failed to prepare type lookup query for aged handle'
         );
-        return 0;
+        return;
     }
 
-    foreach my $unique_column_set( @$uniques )
+    foreach my $unique_column( @{$cache_hash->{unique_index}} )
     {
-        foreach my $unique_column( @$unique_column_set )
-        {
-            next if( defined( $column_data_type_hash->{$unique_column} ) );
-            $get_type_sth->bind_param( 1, $aged_temp_table->{name} );
-            $get_type_sth->bind_param( 2, $unique_column );
-            unless( $get_type_sth->execute() )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    'Failed to lookup datatype for unique column '
-                  . "$unique_column on aged handle"
-                );
-                return 0;
-            }
-
-            unless( $get_type_sth->rows() > 0 )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    "No column found on aged handle for $unique_column"
-                );
-                return 0;
-            }
-
-            my $row = $get_type_sth->fetchrow_hashref();
-            push(
-                @$column_data_types,
-                $unique_column . ' ' . $row->{datatype}
-            );
-            $column_data_type_hash->{$unique_column} = $row->{datatype};
-        }
+        push(
+            @$column_data_types,
+            $unique_column . ' ' . $cache_hash->{columns}->{$unique_column}
+        );
     }
 
     $get_type_sth->finish();
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
-    $current_handle->do( "SET client_min_messages = 'ERROR'" );
-    $current_handle->do( "DROP TABLE IF EXISTS $past_temp_table" );
-    $current_handle->do( "SET client_min_messages TO DEFAULT" );
-    my $temp_table_q = "CREATE TEMP TABLE $past_temp_table ( "
-                     . join( ',', @$column_data_types )
-                     . ' )';
 
-    unless( $current_handle->do( $temp_table_q ) )
+    unless( $NO_TEMP_TABLES )
     {
-        _log( $LOG_LEVEL_ERROR, "Failed to create $past_temp_table" );
-        $aged_handle->do( 'ROLLBACK' );
-        $aged_handle->disconnect();
-        return 0;
+        $current_handle->do( "SET client_min_messages = 'ERROR'" );
+        $current_handle->do( "DROP TABLE IF EXISTS $past_temp_table" );
+        $current_handle->do( "SET client_min_messages TO DEFAULT" );
+        my $temp_table_q = "CREATE TEMP TABLE $past_temp_table ( "
+                         . join( ',', @$column_data_types )
+                         . ' )';
+
+        unless( $current_handle->do( $temp_table_q ) )
+        {
+            _log( $LOG_LEVEL_ERROR, "Failed to create $past_temp_table" );
+            $aged_handle->do( 'ROLLBACK' );
+            $aged_handle->disconnect();
+            return;
+        }
     }
 
-    my $unique_columns = join( ',', keys %$column_data_type_hash );
+    my $unique_columns = join( ',', @{$cache_hash->{unique_index}} );
     my $AGED_DATA_QUERY = <<END_SQL;
         SELECT $unique_columns
-          FROM $aged_temp_table->{name}
+          FROM $aged_temp_table->{name} x
 END_SQL
 
     my $aged_sth = $aged_handle->prepare( $AGED_DATA_QUERY );
@@ -2267,7 +2319,7 @@ END_SQL
             $LOG_LEVEL_ERROR,
             'Failed to prepare aged data query for fast delete'
         );
-        return 0;
+        return;
     }
 
     unless( $aged_sth->execute() )
@@ -2276,31 +2328,35 @@ END_SQL
             $LOG_LEVEL_DEBUG,
             'Failed to execute aged data query for fast delete'
         );
-        return 0;
+        return;
     }
 
+    my $aged_data   = [];
     my $bind_points = '?'
                     . (
-                        ',?' x ( scalar( keys %$column_data_type_hash ) - 1 )
+                        ',?' x ( scalar( @$column_data_types ) - 1 )
                       );
     my $insert_q    = "INSERT INTO $past_temp_table( "
                     . join(
                           ',',
-                          sort { $a cmp $b } keys %$column_data_type_hash
+                          @{$cache_hash->{unique_index}}
                       )
                     . " ) VALUES ( $bind_points )";
-
-    my $insert_sth = $current_handle->prepare( $insert_q );
-    unless( $insert_sth )
+    my $insert_sth;
+    unless( $NO_TEMP_TABLES )
     {
-        _log(
-            $LOG_LEVEL_ERROR,
-            'Failed to prepared insert statement for past data transfer'
-        );
-        $aged_sth->finish();
-        $aged_handle->do( 'ROLLBACK' );
-        $aged_handle->disconnect();
-        return 0;
+        $insert_sth = $current_handle->prepare( $insert_q );
+        unless( $insert_sth )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                'Failed to prepared insert statement for past data transfer'
+            );
+            $aged_sth->finish();
+            $aged_handle->do( 'ROLLBACK' );
+            $aged_handle->disconnect();
+            return;
+        }
     }
 
     my $aged_rows = $aged_sth->rows();
@@ -2310,97 +2366,67 @@ END_SQL
         if( $CONSERVATIVE_FAST_DELETE )
         {
             _log( $LOG_LEVEL_DEBUG, "Insufficient data ( $aged_rows rows ) in aged handle" );
-            $insert_sth->finish();
+            $insert_sth->finish() if( $insert_sth );
             $aged_sth->finish();
             $aged_handle->do( 'ROLLBACK' );
             $aged_handle->disconnect();
-            return 0;
+            return;
         }
         else
         {
             _log( $LOG_LEVEL_DEBUG, "Skipping fast/slow delete, $aged_rows rows in aged set" );
-            $insert_sth->finish();
+            $insert_sth->finish() if( $insert_sth );
             $aged_sth->finish();
-            return 1;
+            return [];
         }
     }
-
+    _log( $LOG_LEVEL_DEBUG, "Moving $aged_rows rows to present timeline" );
     while( my $row = $aged_sth->fetchrow_hashref() )
     {
-        my $where_filter_elems = [];
+        my $row_arr = [];
         my $index = 1;
-
-        foreach my $unique_columns( @$uniques )
+        foreach my $unique( @{$cache_hash->{unique_index}} )
         {
-            my $where_elem;
-            my $where_elems = [];
-            foreach my $unique( @$unique_columns )
+            if( $NO_TEMP_TABLES )
             {
-                my $value;
-                if( $row->{$unique} )
+                if( defined( $row->{$unique} ) )
                 {
-                    $value = "'"
-                           . $row->{$unique}
-                           . "'::"
-                           . $column_data_type_hash->{$unique};
+                    push( @$row_arr, "'" . $row->{$unique} . "'::" . $cache_hash->{columns}->{$unique} );
                 }
                 else
                 {
-                    $value = 'NULL::' . $column_data_type_hash->{$unique};
+                    push( @$row_arr, 'NULL::' . $cache_hash->{columns}->{$unique} );
                 }
-
-                if( $NULL_IN_UNIQUE )
-                {
-                    $where_elem = "( vw.$unique IS NULL AND  $value IS NULL ) "
-                                . "OR ( vw.$unique = $value )";
-                }
-                else
-                {
-                    $where_elem = " ( vw.$unique = $value ) ";
-                }
-
-                push(
-                    @$where_elems,
-                    $where_elem
-                );
             }
-
-            push(
-                @$where_filter_elems,
-                ' ( ( '
-              . join( ' ) AND ( ', @$where_elems )
-              . ' ) ) '
-            );
+            else
+            {
+                $insert_sth->bind_param( $index, $row->{$unique} );
+                $index++;
+            }
         }
 
-        push(
-            @$where_filters,
-            ' ( ( '
-          . join( ' ) OR ( ', @$where_filter_elems )
-          . ' ) ) '
-        );
-
-        foreach my $unique( sort { $a cmp $b } keys %$column_data_type_hash )
+        if( $NO_TEMP_TABLES )
         {
-            $insert_sth->bind_param( $index, $row->{$unique} );
-            $index++;
+            push( @$aged_data, $row_arr );
         }
-
-        unless( $insert_sth->execute() )
+        else
         {
-            _log(
-                $LOG_LEVEL_ERROR,
-                'Failed to insert aged data into current timeline'
-            );
-            return 0;
+            unless( $insert_sth->execute() )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    'Failed to insert aged data into current timeline'
+                );
+                return;
+            }
         }
     }
 
-    $insert_sth->finish();
+    $insert_sth->finish() if( $insert_sth );
     $aged_sth->finish();
     $aged_handle->do( 'ROLLBACK' );
     $aged_handle->disconnect();
-    return 1;
+    return $aged_data;
 }
 
 sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
@@ -2409,9 +2435,8 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
         $current_handle,
         $aged_temp_table,
         $current_temp_table,
-        $column_data_type_hash,
-        $where_filters,
-        $cache_hash
+        $cache_hash,
+        $aged_data
       ) = validate_pos(
         @_,
         { type => OBJECT },
@@ -2419,7 +2444,6 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
         { type => HASHREF },
         { type => HASHREF },
         { type => ARRAYREF },
-        { type => HASHREF },
     );
 
     my $definition         = $cache_hash->{definition};
@@ -2430,11 +2454,29 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     # at this point, past_temp_table contains data from a historic timeline but
     # is in the present timeline
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
-    $current_handle->do( "ANALYZE $past_temp_table" );
-    $current_handle->do( "ANALYZE $current_temp_table->{name}" );
+
+    if( $NO_TEMP_TABLES )
+    {
+        return 1 if( scalar( @$aged_data ) == 0 );
+
+        $past_temp_table = '( VALUES ';
+        my $rows = [];
+        foreach my $row( @$aged_data )
+        {
+            push( @$rows, '( ' . join( ',', @$row ) . ' )' );
+        }
+
+        $past_temp_table .= join( ',', @$rows );
+        $past_temp_table .= ') AS tt (' . join( ',', @{$cache_hash->{unique_index}} )  . ' )' ;
+    }
+    else
+    {
+        $current_handle->do( "ANALYZE $past_temp_table" );
+        $current_handle->do( "ANALYZE $current_temp_table->{name}" );
+    }
     my $unique_column_select = join(
         ',',
-        map { "tt.$_" } keys %$column_data_type_hash
+        map { "tt.$_" } @{$cache_hash->{unique_index}}
     );
 
     my $left_join_clauses = [];
@@ -2471,7 +2513,7 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
             map { "vw.$_ IS NULL" } @$unique_columns
         );
 
-        $current_handle->do( "CREATE INDEX ix_past_data_$ind ON $past_temp_table( " . join( ',', @$unique_columns ) . " ) " );
+        $current_handle->do( "CREATE INDEX ix_past_data_$ind ON $past_temp_table( " . join( ',', @$unique_columns ) . " ) " ) unless( $NO_TEMP_TABLES );
         $ind++;
         push( @$left_join_wheres, $where_clause );
         push( @$left_join_clauses, $join_clause );
@@ -2483,15 +2525,13 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     my $left_join_where      = ' ( ( '
                              . join( ' ) OR ( ', @$left_join_wheres )
                              . ' ) ) ';
-    my $main_filter          = '( '
-                             . join( ') OR (', @$where_filters )
-                             . ' )';
 
+    $past_temp_table .= ' tt' unless( $NO_TEMP_TABLES );;
     my $delete_query = <<END_SQL;
     WITH tt_rows_to_delete AS
     (
         SELECT $unique_column_select
-          FROM $past_temp_table tt
+          FROM $past_temp_table
      LEFT JOIN $current_temp_table->{name} vw
             ON $left_join_predicate
          WHERE $left_join_where
@@ -2500,7 +2540,6 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
               USING tt_rows_to_delete tt
               WHERE $left_join_predicate
 END_SQL
-
     unless( $current_handle->do( $delete_query ) )
     {
         _log( $LOG_LEVEL_ERROR, 'Failed to execute fast delete query' );

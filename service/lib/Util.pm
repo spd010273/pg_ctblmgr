@@ -53,11 +53,37 @@ Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 3;
 ###############################################################################
 ############################## QUERY PERFORMANCE ##############################
 
+# Enables logic that correlates changes to base tables to changes in cache table
+# output on a row-count basis. This helps pg_ctblmgr determine whether it should
+# use temp tables or common table expressions when performing its DML updates
+# to cache tables. If this is disabled, pg_ctblmgr will use the raw change count
+# to determine if temp tables should be used. This can result no costly count
+# queries, but also inefficient DML if a highly normalized table receives an
+# update, resulting in large changes in the cache table outputs. Because of this
+# if the blowout approximation logic is disabled, it's recommended to set
+# temp_table_cutoff to a smaller value
+Readonly::Scalar our $ENABLE_BLOWOUT_APPROXIMATE   :Export( :MANDATORY ) => 1;
+
+Readonly::Scalar our $CLEAR_STATS_ON_SIGHUP        :Export( :MANDATORY ) => 0;
+
+# Above this number of changes in a given worker, the worker will use temp tables
+# in the following situations:
+#  - Storing rows fast-forwarded from a historic timeline
+#  - Storing the changed rows of a dataset when doing UPDATE / INSERT ops
+# Below this threshold, workers will opt for CTE (Common Table Expressions) and
+# VALUES() statements. This will reduce the number of MATERIALIZE operations a
+# server experiences
+Readonly::Scalar our $TEMP_TABLE_CUTOFF            :Export( :MANDATORY ) => 100;
+
+# Number of changes that occur between updates to the blowout_factors of
+# varios base tables as they relate to cache table output.
+Readonly::Scalar our $CHANGES_BETWEEN_REAVG        :Export( :MANDATORY ) => 5;
+
 # Enable fast delete functionality - 1 is enable, 0 is disable
 Readonly::Scalar our $ENABLE_FAST_DELETE           :Export( :MANDATORY ) => 1;
 
 # Entry length for historic transaction storage. This allows fast delete to work
-Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 3;
+Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 2;
 
 # Soread of XID map - This is the spacing between historic snapshots in minutes
 # the larger the number, the larger the spacing between XID map entries.
