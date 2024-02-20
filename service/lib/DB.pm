@@ -2388,11 +2388,10 @@ END_SQL
                 );
                 return;
             }
-
-            $current_handle->do( "ANALYZE $aged_temp_table->{name}" );
         }
     }
 
+    $current_handle->do( "ANALYZE $past_temp_table" ) unless( $NO_TEMP_TABLES );
     $insert_sth->finish() if( $insert_sth );
     $aged_sth->finish();
     $aged_handle->do( 'ROLLBACK' );
