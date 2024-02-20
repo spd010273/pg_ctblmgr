@@ -2036,7 +2036,7 @@ sub generate_update_statement($$$$) :Export( :MANDATORY )
           . ' possible rows)'
         );
         $handle->do( 'BEGIN' );
-        $handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
+        #$handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
         my $delete_where = join( ' AND ', @$where_clauses );
         my $DELETE_Q = <<END_SQL;
         DELETE FROM $cache_table_schema.$cache_table_name ct
@@ -2073,12 +2073,12 @@ END_SQL
             return 0
         }
 
-        unless( create_cache_table_unique( $handle, $cache_hash ) )
-        {
-            $handle->do( 'ROLLBACK' );
-            _log( $LOG_LEVEL_ERROR, "Failed to recreate unique index" );
-            return 0;
-        }
+        #unless( create_cache_table_unique( $handle, $cache_hash ) )
+        #{
+        #    $handle->do( 'ROLLBACK' );
+        #    _log( $LOG_LEVEL_ERROR, "Failed to recreate unique index" );
+        #    return 0;
+        #}
         $handle->do( 'COMMIT' );
         $handle->do( "ANALYZE $cache_table_schema.$cache_table_name" );
     }
