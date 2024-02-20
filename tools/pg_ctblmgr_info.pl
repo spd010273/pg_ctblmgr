@@ -201,6 +201,7 @@ sub command_rebuild($)
         $WORKER_STATUSES->{$found}->{replace} = 1 if( defined( $WORKER_STATUSES->{$found} ) );
         writemem( $WS_KEY, $WORKER_STATUSES );
         do_lock( $WS_KEY, $WRITE_UNLOCK );
+        system( "kill -1 $found" );
         return $found;
     }
     else

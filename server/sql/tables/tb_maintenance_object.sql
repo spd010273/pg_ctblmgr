@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS @extschema@.tb_maintenance_object
     driver             INTEGER NOT NULL,
     location           INTEGER NOT NULL,
     unique_index       VARCHAR[] NOT NULL,
-    indexes            VARCHAR[]
+    not_null_unique    VARCHAR[],
+    indexes            VARCHAR[],
+    CONSTRAINT check_not_null_unique_in_unique CHECK ( not_null_unique IS NULL OR not_null_unique <@ unique_index )
 );
 
 COMMENT ON TABLE @extschema@.tb_maintenance_object IS 'Definition of object which pg_ctblmgr is maintaining';
@@ -21,4 +23,5 @@ COMMENT ON COLUMN @extschema@.tb_maintenance_object.name IS 'Canonical name of t
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.driver IS 'Driver used to maintain this object';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.location IS 'The location of this object';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.unique_index IS 'Specifies column(s) participating in the required unique index. Each member is a column of that index';
+COMMENT ON COLUMN @extschema@.tb_maintenance_object.not_null_unique IS 'Specifies the members of the unqiue_index array that are guaranteed to be not null, if any. This enables more performant DML generation.';
 COMMENT ON COLUMN @extschema@.tb_maintenance_object.indexes IS 'Specifies additional indexes, where each element is an index and index members are separated by commas';

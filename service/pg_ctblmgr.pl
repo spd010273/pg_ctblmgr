@@ -144,8 +144,10 @@ END_SQL
     my $term_sth = $handle->prepare( $term_q );
 
     return unless( $term_sth );
+    my $child_pids = [];
     foreach my $worker_pid( keys %$WS_DATA )
     {
+        push( @$child_pids, $worker_pid );
         my $backend = $WS_DATA->{$worker_pid}->{backend_pid};
 
         if( $backend )
@@ -154,6 +156,22 @@ END_SQL
             $term_sth->execute();
         }
     }
+
+    _log( $LOG_LEVEL_DEBUG, "Child backends term'd, performing WAITPID" );
+    foreach my $child_pid( @$child_pids )
+    {
+        my $loop = 0;
+        my $st   = 1;
+        while( $st > 0 )
+        {
+            $st = waitpid( $child_pid, WNOHANG );
+            select( undef, undef, undef, 0.25 ) if( $loop > 2 );
+            $loop++;
+            _log( $LOG_LEVEL_INFO, "Still waiting for child $child_pid to terminate" ) if( $loop > 10 );
+        }
+        _log( $LOG_LEVEL_DEBUG, "Child $child_pid exited" );
+    }
+
     return;
 }
 
@@ -1063,6 +1081,8 @@ sub worker_entrypoint($$)
 
         my $BLOWOUT_FACTORS = {};
         # MAIN LOOP
+        my $l_counter = 0;
+
         while( 1 )
         {
             # Check for commanded exit or replacement
@@ -1222,6 +1242,17 @@ sub worker_entrypoint($$)
 
                     last NOTIFY_LOOP;
                 }
+
+                if( $l_counter > 100 )
+                {
+                    $l_counter = 0;
+                    _log( $LOG_LEVEL_DEBUG, "Validating $CACHE_HASH->{name} exists" );
+                    # May need to add a check for pg_restore here iff user uses this service in downstream
+                    # environments
+                    &check_ct_exists( $handle, $CACHE_HASH, 1 );
+                }
+
+                $l_counter++;
             }
 
             while( my $notification = $handle->func( 'pg_notifies' ) )
@@ -1320,10 +1351,10 @@ sub worker_entrypoint($$)
                 _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
             }
 
-            $NO_TEMP_TABLES = 1;
+            $NO_TEMP_TABLES = 0;
             if( !$ENABLE_BLOWOUT_APPROXIMATE )
             {
-                $NO_TEMP_TABLES = 0 if( $change_count > $TEMP_TABLE_CUTOFF );
+                $NO_TEMP_TABLES = 1 if( $change_count < $TEMP_TABLE_CUTOFF );
             }
             # Note that we iterate over the different bind positions so that we do not accidentally logically ANDing
             # two disparate changes together:
@@ -1433,7 +1464,7 @@ sub worker_entrypoint($$)
                     {
                         my $c_start = [ gettimeofday() ];
                         my $actual_change_count = get_change_volume( $handle, $query, $CACHE_HASH );
-                        $NO_TEMP_TABLES = 0 if( $actual_change_count > $TEMP_TABLE_CUTOFF );
+                        $NO_TEMP_TABLES = 1 if( $actual_change_count <= $TEMP_TABLE_CUTOFF );
                         my $c_dur = tv_interval( $c_start, [ gettimeofday() ] );
                         _log(
                             $LOG_LEVEL_DEBUG,
@@ -1474,7 +1505,7 @@ sub worker_entrypoint($$)
                     else
                     {
                         # We have enough approximate data to not run the above count query
-                        $NO_TEMP_TABLES = 0 if( $total_blowout > $TEMP_TABLE_CUTOFF );
+                        $NO_TEMP_TABLES = 1 if( $total_blowout <= $TEMP_TABLE_CUTOFF );
                         _log( $LOG_LEVEL_DEBUG, "Approx change count: $total_blowout, NTT: $NO_TEMP_TABLES for $CACHE_HASH->{name}" );
                     }
                 }
@@ -1710,7 +1741,7 @@ FD_FALLBACK:
                     }
 
                     $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
-                    _log( $LOG_LEVEL_DEBUG, "Fast delete took $fast_delete_time seconds" );
+                    _log( $LOG_LEVEL_DEBUG, "Fast delete ($CACHE_HASH->{name}) took $fast_delete_time seconds" );
                     #OLD XID RELEASE
                     _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
                 }
@@ -1769,7 +1800,7 @@ FD_FALLBACK:
                         next;
                     }
                     $slow_delete_time = tv_interval( $slow_delete_start, [ gettimeofday() ] );
-                    _log( $LOG_LEVEL_DEBUG, "Slow delete took $slow_delete_time seconds" );
+                    _log( $LOG_LEVEL_DEBUG, "Slow delete ($CACHE_HASH->{name}) took $slow_delete_time seconds" );
                 }
 
                 update_status( { status => $WORKER_STATUS_UPDATE } );
@@ -1792,7 +1823,7 @@ FD_FALLBACK:
                     next;
                 }
                 $update_time = tv_interval( $update_start, [ gettimeofday() ] );
-                _log( $LOG_LEVEL_DEBUG, "Update took $update_time seconds" );
+                _log( $LOG_LEVEL_DEBUG, "Update ($CACHE_HASH->{name}) took $update_time seconds" );
 
                 if( $temp_table->{count} <= $BULK_ACTION_CUTOFF )
                 {
@@ -1818,7 +1849,7 @@ FD_FALLBACK:
                         next;
                     }
                     $insert_time = tv_interval( $insert_start, [ gettimeofday() ] );
-                    _log( $LOG_LEVEL_DEBUG, "Insert took $insert_time seconds" );
+                    _log( $LOG_LEVEL_DEBUG, "Insert ($CACHE_HASH->{name}) took $insert_time seconds" );
                 }
                 else
                 {

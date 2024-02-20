@@ -91,11 +91,6 @@ Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 2;
 # fast delete.
 Readonly::Scalar our $XID_MAP_SPREAD               :Export( :MANDATORY ) => 300;
 
-# Indicated that the user has cache tables where the one or more component of
-# a cache table's unique index can possibly be NULL. Setting this to enabled
-# ( '1' ) with NULL components will result in inaccurate results.
-Readonly::Scalar our $NULL_IN_UNIQUE               :Export( :MANDATORY ) => 1;
-
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather
 # than one insert
 Readonly::Scalar our $BATCHED_CREATE               :Export( :MANDATORY ) => 1;

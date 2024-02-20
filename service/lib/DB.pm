@@ -18,6 +18,7 @@ use Data::Dumper;
 use lib "$FindBin::Bin";
 use Util;
 
+my $PRINT_QUERIES = 0; # Debug only
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 our $LOCAL_PK_MAINTENANCE_OBJECT :Export( :MANDATORY );
@@ -255,14 +256,10 @@ WITH tt_def AS
 END_SQL
 
 Readonly::Scalar my $GET_CACHE_TABLE_DEFINITION => <<"END_SQL";
-    SELECT d.name AS driver,
-           mo.namespace,
-           mo.name,
-           mo.definition,
+    SELECT d.name AS driver_name,
            rs.filter,
            rs.maintenance_channel,
-           mo.unique_index,
-           mo.indexes
+           mo.*
       FROM ${SCHEMA_NAME}.tb_driver d
 INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
         ON mo.driver = d.driver
@@ -693,7 +690,7 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
     {
         my $row = $ct_sth->fetchrow_hashref();
         $cache_hash->{schema}              = $row->{namespace};
-        $cache_hash->{driver}              = $row->{driver};
+        $cache_hash->{driver}              = $row->{driver_name};
         $cache_hash->{name}                = $row->{name};
         $cache_hash->{definition}          = $row->{definition};
         $cache_hash->{filter_tables}       = $row->{filter};
@@ -701,7 +698,29 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
         $cache_hash->{unique_index}        = $row->{unique_index};
         $cache_hash->{maintenance_object}  = $pk_maintenance_object;
         $cache_hash->{maintenance_channel} = $row->{maintenance_channel};
+        $cache_hash->{not_null_unique}     = [];
+        $cache_hash->{not_null_unique}     = $row->{not_null_unique} if( $row->{not_null_unique} );
+        $cache_hash->{null_unique}         = [];
+
         $ct_sth->finish();
+
+        foreach my $unique_column( @{$row->{unique_index}} )
+        {
+            unless( grep /^$unique_column$/, @{$row->{not_null_unique}} )
+            {
+                push( @{$cache_hash->{null_unique}}, $unique_column );
+            }
+        }
+
+        if( $cache_hash->{null_unique} )
+        {
+            @{$cache_hash->{null_unique}} = sort { $a cmp $b } @{$cache_hash->{null_unique}};
+        }
+
+        if( $cache_hash->{not_null_unique} )
+        {
+            @{$cache_hash->{not_null_unique}} = sort { $a cmp $b } @{$cache_hash->{not_null_unique}};
+        }
 
         if( $cache_hash->{unique_index} )
         {
@@ -1074,6 +1093,14 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         _log( $LOG_LEVEL_ERROR, "Failed to rename index for $name" );
     }
 
+    unless(
+            $handle->do(
+                "ALTER INDEX IF EXISTS ix_null_$temp_name RENAME TO ix_null_$name"
+            )
+          )
+    {
+        _log( $LOG_LEVEL_ERROR, "Faild to rename nullable unique index for $name" );
+    }
     &drop_dependency_temp_table( $handle );
     $ct_hash->{name} = $name;
     &rename_cache_table_indexes( $handle, $ct_hash );
@@ -1484,12 +1511,13 @@ sub get_worker_list($;$) :Export( :MANDATORY )
     return undef;
 }
 
-sub check_ct_exists($) :Export( :MANDATORY )
+sub check_ct_exists($$;$) :Export( :MANDATORY )
 {
-    my( $handle, $ct_hash ) = validate_pos(
+    my( $handle, $ct_hash, $short_validation ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => HASHREF },
+        { type => SCALAR | UNDEF, optional => 1 },
     );
 
     $handle = &db_connect( $handle );
@@ -1511,6 +1539,7 @@ sub check_ct_exists($) :Export( :MANDATORY )
     if( $sth && $sth->rows() > 0 )
     {
         $sth->finish();
+        return if( defined $short_validation && $short_validation );
         _log(
             $LOG_LEVEL_DEBUG,
             "Cache Table $ct_hash->{schema}.$ct_hash->{name} already exists"
@@ -1706,6 +1735,18 @@ sub create_cache_table_unique($$) :Export( :MANDATORY )
 
     return 0 unless( $sth );
     $sth->finish();
+
+    if( $ct_hash->{null_unique} && scalar( @{$ct_hash->{null_unique}} ) > 0 )
+    {
+        $index_columns = join( ',', @{$ct_hash->{null_unique}} );
+        $sth = try_query(
+            $handle,
+            "CREATE INDEX IF NOT EXISTS ix_null_$ct_hash->{name} "
+          . "ON $ct_hash->{schema}.\"$ct_hash->{name}\"( $index_columns )"
+        );
+
+        $sth->finish() if( $sth );
+    }
     return 1;
 }
 
@@ -1834,6 +1875,23 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
             );
         }
 
+        if( $ct_hash->{null_unique} && scalar( @{$ct_hash->{null_unique}} ) > 0 )
+        {
+            $sth = try_query(
+                $handle,
+                "CREATE INDEX ix_null_${temp_table_name} ON $temp_table_name( " . join( ',', @{$ct_hash->{null_unique}} ) . ' )'
+            );
+
+            if( $sth )
+            {
+                $sth->finish();
+            }
+            else
+            {
+                _log( $LOG_LEVEL_WARNING, "Failed to generate complementary null index on ${temp_table_name}" );
+            }
+        }
+
         return $return_data;
     }
 
@@ -1935,7 +1993,10 @@ sub generate_update_statement($$$$) :Export( :MANDATORY )
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
     my $table_columns      = $cache_hash->{cache_table_columns};
-    my $uniques            = $cache_hash->{cache_table_uniques};
+
+    my $uniques         = $cache_hash->{unique_index};
+    my $not_null_unique = $cache_hash->{not_null_unique};
+    my $null_unique     = $cache_hash->{null_unique};
 
     $handle = &db_connect( $handle );
     $handle->do( "SET application_name = 'update: $cache_table_name'" );
@@ -1943,63 +2004,28 @@ sub generate_update_statement($$$$) :Export( :MANDATORY )
     my $where_clauses      = [];
     my $distinct_uniques   = [];
     my $non_unique_columns = [];
-    my $join_clause;
-    my $where_clause;
 
-    foreach my $unique_columns( @$uniques )
-    {
-        if( $NULL_IN_UNIQUE )
-        {
-            $join_clause  = join(
-                ' AND ',
-                map {
-                    "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
-                  . "OR ( tt.$_ = vw.$_ ) )"
-               } @$unique_columns
-            );
-
-            $where_clause = join(
-                ' AND ',
-                map {
-                    "( ( ct.$_ IS NULL AND tt.$_ IS NULL ) "
-                  . "OR ( ct.$_ = tt.$_ ) )"
-                } @$unique_columns
-            );
-        }
-        else
-        {
-            $join_clause = join(
-                ' AND ',
-                map {
-                    " ( tt.$_ = vw.$_ ) "
-                } @$unique_columns
-            );
-
-            $where_clause = join(
-                ' AND ',
-                map {
-                    " ( tt.$_ = ct.$_ ) "
-                } @$unique_columns
-            );
-        }
-
-        push( @$join_clauses,  $join_clause  );
-        push( @$where_clauses, $where_clause );
-
-        foreach my $unique_column( @$unique_columns )
-        {
-            unless( grep /^$unique_column$/, @$distinct_uniques )
-            {
-                push( @$distinct_uniques, $unique_column );
-            }
-        }
-    }
+    push( @$join_clauses, map { "tt.$_ = vw.$_" } @$not_null_unique );
+    push( @$join_clauses, map { "( ( tt.$_ = vw.$_ ) OR ( tt.$_ IS NULL AND vw.$_ IS NULL ) )" } @$null_unique );
+    push( @$where_clauses, map { "ct.$_ = tt.$_" } @$not_null_unique );
+    push( @$where_clauses, map { "( ( ct.$_ = tt.$_ ) OR ( ct.$_ IS NULL AND tt.$_ IS NULL ) )" } @$null_unique );
 
     foreach my $column_name( @$table_columns )
     {
-        next if( grep( /^$column_name$/, @$distinct_uniques ) );
+        next if( grep( /^$column_name$/, @$uniques ) );
         push( @$non_unique_columns, $column_name );
     }
+
+    my $tt;
+    if( $NO_TEMP_TABLES )
+    {
+        $tt = "( $query )";
+    }
+    else
+    {
+        $tt = $temp_table->{name};
+    }
+
 
     if( $temp_table->{count} > $BULK_ACTION_CUTOFF )
     {
@@ -2011,15 +2037,13 @@ sub generate_update_statement($$$$) :Export( :MANDATORY )
         );
         $handle->do( 'BEGIN' );
         $handle->do( "DROP INDEX IF EXISTS ix_$cache_hash->{name}" );
-        my $delete_where = '( ( '
-                         . join( ' ) OR ( ', @$where_clauses )
-                         . ' ) )';
+        my $delete_where = join( ' AND ', @$where_clauses );
         my $DELETE_Q = <<END_SQL;
         DELETE FROM $cache_table_schema.$cache_table_name ct
-              USING $temp_table->{name} tt
+              USING $tt tt
               WHERE $delete_where
 END_SQL
-
+        print "$DELETE_Q\n" if( $PRINT_QUERIES );
         unless( &try_query( $handle, $DELETE_Q, [] ) )
         {
             _log(
@@ -2036,9 +2060,9 @@ END_SQL
                         $columns
                     )
              SELECT $columns
-               FROM $temp_table->{name}
+               FROM $tt
 END_SQL
-
+        print "$INSERT_Q\n" if( $PRINT_QUERIES );
         unless( &try_query( $handle, $INSERT_Q ) )
         {
             $handle->do( 'ROLLBACK' );
@@ -2064,9 +2088,7 @@ END_SQL
             ', ',
             map { "$_ = tt.$_" } @$non_unique_columns
         );
-        my $where_clause    = '( ( '
-                            . join( ' ) OR ( ', @$where_clauses )
-                            . ' ) )';
+        my $where_clause    = join( ' AND ', @$where_clauses );
         my $diff_distinct   = '( '
                             . join(
                                 ' OR ',
@@ -2075,15 +2097,6 @@ END_SQL
                                 } @$non_unique_columns
                              )
                             . ' )';
-        my $tt;
-        if( $NO_TEMP_TABLES )
-        {
-            $tt = "( $query )";
-        }
-        else
-        {
-            $tt = $temp_table->{name};
-        }
 
         my $UPDATE_Q        = <<END_SQL;
         UPDATE $cache_table_schema.$cache_table_name ct
@@ -2092,6 +2105,7 @@ END_SQL
          WHERE $where_clause
            AND $diff_distinct
 END_SQL
+        print "$UPDATE_Q\n" if( $PRINT_QUERIES );
         my $sth = &try_query( $handle, $UPDATE_Q, [] );
 
         return 0 unless( $sth );
@@ -2120,7 +2134,10 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
     my $table_columns      = $cache_hash->{cache_table_columns};
-    my $uniques            = $cache_hash->{cache_table_uniques};
+
+    my $uniques         = $cache_hash->{unique_index};
+    my $not_null_unique = $cache_hash->{not_null_unique};
+    my $null_unique     = $cache_hash->{null_unique};
 
     $handle = &db_connect( $handle );
     $handle->do( "SET application_name = 'insert: $cache_table_name'" );
@@ -2130,40 +2147,14 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
     my $join_clause;
     my $where_clause_elem;
 
-    foreach my $unique_columns( @$uniques )
-    {
-        if( $NULL_IN_UNIQUE )
-        {
-            $join_clause  = join(
-                ' AND ',
-                map {
-                    "( ( tt.$_ IS NULL AND vw.$_ IS NULL ) "
-                  . "OR ( tt.$_ = vw.$_ ) )"
-                } @$unique_columns
-            );
-        }
-        else
-        {
-            $join_clause = join(
-                ' AND ',
-                map {
-                    " ( tt.$_ = vw.$_ ) "
-                } @$unique_columns
-            );
-        }
-
-        $where_clause_elem = join(
-            ' AND ',
-            map { "tt.$_ IS NULL" } @$unique_columns
-        );
-        push( @$join_clauses,  $join_clause  );
-        push( @$where_clauses, $where_clause_elem );
-    }
+    push( @$join_clauses, map { "tt.$_ = vw.$_" } @$not_null_unique );
+    push( @$join_clauses, map { "( ( tt.$_ = vw.$_ ) OR ( tt.$_ IS NULL AND vw.$_ IS NULL ) )" } @$null_unique );
+    push( @$where_clauses, map { "tt.$_ IS NULL" } @$uniques );
 
     my $ins_columns    = join( ', ', @$table_columns );
     my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
-    my $join_predicate = '( ( ' . join( ' ) OR ( ', @$join_clauses ) . ' ) )';
-    my $where_clause   = '( ( ' . join( ') AND (', @$where_clauses ) . ' ) )';
+    my $join_predicate = join( ' AND ', @$join_clauses );
+    my $where_clause   = join( ' AND ', @$where_clauses );
     my $tt;
     if( $NO_TEMP_TABLES )
     {
@@ -2187,7 +2178,7 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
          SELECT $columns
            FROM tt_records_to_insert vw
 END_SQL
-
+    print "$INSERT_Q\n" if( $PRINT_QUERIES );
     my $sth = &try_query( $handle, $INSERT_Q, [] );
 
     return 0 unless( $sth );
@@ -2254,27 +2245,6 @@ sub fast_forward_aged_data($$$$$$) :Export( :MANDATORY )
     );
 
     my $column_data_types = [];
-    my $get_type_q = <<END_SQL;
-    SELECT t.typname AS datatype
-      FROM pg_class c
-      JOIN pg_attribute a
-        ON a.attnum > 0
-       AND a.attrelid = c.oid
-      JOIN pg_type t
-        ON t.oid = a.atttypid
-     WHERE c.relname = ?
-       AND a.attname = ?
-END_SQL
-    my $get_type_sth = $aged_handle->prepare( $get_type_q );
-
-    unless( $get_type_sth )
-    {
-        _log(
-            $LOG_LEVEL_ERROR,
-            'Failed to prepare type lookup query for aged handle'
-        );
-        return;
-    }
 
     foreach my $unique_column( @{$cache_hash->{unique_index}} )
     {
@@ -2284,7 +2254,6 @@ END_SQL
         );
     }
 
-    $get_type_sth->finish();
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
 
     unless( $NO_TEMP_TABLES )
@@ -2419,6 +2388,8 @@ END_SQL
                 );
                 return;
             }
+
+            $current_handle->do( "ANALYZE $aged_temp_table->{name}" );
         }
     }
 
@@ -2449,8 +2420,10 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     my $definition         = $cache_hash->{definition};
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
-    my $uniques            = $cache_hash->{cache_table_uniques};
 
+    my $uniques         = $cache_hash->{unique_index};
+    my $not_null_unique = $cache_hash->{not_null_unique};
+    my $null_unique     = $cache_hash->{null_unique};
     # at this point, past_temp_table contains data from a historic timeline but
     # is in the present timeline
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
@@ -2486,45 +2459,14 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     my $join_clause;
     my $where_clause;
 
-    foreach my $unique_columns( @$uniques )
-    {
-        if( $NULL_IN_UNIQUE )
-        {
-            $join_clause = join(
-                ' AND ',
-                map {
-                    "( ( vw.$_ IS NULL AND tt.$_ IS NULL ) "
-                  . "OR ( vw.$_ = tt.$_ ) )"
-                } @$unique_columns
-            );
-        }
-        else
-        {
-            $join_clause = join(
-                ' AND ',
-                map {
-                    " ( vw.$_ = tt.$_ ) "
-                } @$unique_columns
-            );
-        }
+    push( @$left_join_wheres, map { "vw.$_ IS NULL" } @$uniques );
+    push( @$left_join_clauses, map { "vw.$_ = tt.$_" } @$not_null_unique );
+    push( @$left_join_clauses, map { "( ( vw.$_ = tt.$_ ) OR ( vw.$_ IS NULL AND tt.$_ IS NULL ) )" } @$null_unique );
 
-        my $where_clause = join(
-            ' AND ',
-            map { "vw.$_ IS NULL" } @$unique_columns
-        );
-
-        $current_handle->do( "CREATE INDEX ix_past_data_$ind ON $past_temp_table( " . join( ',', @$unique_columns ) . " ) " ) unless( $NO_TEMP_TABLES );
-        $ind++;
-        push( @$left_join_wheres, $where_clause );
-        push( @$left_join_clauses, $join_clause );
-    }
-
-    my $left_join_predicate  = ' ( ( '
-                             . join( ' ) OR ( ', @$left_join_clauses )
-                             . ' ) ) ';
-    my $left_join_where      = ' ( ( '
-                             . join( ' ) OR ( ', @$left_join_wheres )
-                             . ' ) ) ';
+    $current_handle->do( "CREATE INDEX ix_past_data ON $past_temp_table( " . join( ',', @$uniques ) . " ) " ) unless( $NO_TEMP_TABLES );
+    $current_handle->do( "CREATE INDEX ix_past_data_null ON $past_temp_table( " . join( ',', @$null_unique ) . ' )' ) if( !$NO_TEMP_TABLES && scalar( @$null_unique ) > 0 );
+    my $left_join_predicate  = join( ' AND ', @$left_join_clauses );
+    my $left_join_where      = join( ' AND ', @$left_join_wheres );
 
     $past_temp_table .= ' tt' unless( $NO_TEMP_TABLES );;
     my $delete_query = <<END_SQL;
@@ -2540,6 +2482,7 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
               USING tt_rows_to_delete tt
               WHERE $left_join_predicate
 END_SQL
+    print "$delete_query\n" if( $PRINT_QUERIES );
     unless( $current_handle->do( $delete_query ) )
     {
         _log( $LOG_LEVEL_ERROR, 'Failed to execute fast delete query' );
@@ -2564,53 +2507,21 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     my $definition         = $cache_hash->{definition};
     my $cache_table_schema = $cache_hash->{schema};
     my $cache_table_name   = $cache_hash->{name};
-    my $uniques            = $cache_hash->{cache_table_uniques};
+
+    my $null_uniques     = $cache_hash->{null_unique};
+    my $not_null_uniques = $cache_hash->{not_null_unique};
+    my $uniques          = $cache_hash->{unique_index};
 
     $handle->do( "SET application_name = 'delete: $cache_table_name'" );
     my $DELETE_Q;
-    my $unique_uniques = [];
-    my $join_preds     = [];
+    my $join_preds = [];
 
-    foreach my $unique_columns( @$uniques )
-    {
-        foreach my $unique_column( @$unique_columns )
-        {
-            push(
-                @$unique_uniques,
-                $unique_column
-            ) unless( grep /^$unique_column$/, @$unique_uniques );
-        }
+    push( @$join_preds, map { "tt.$_ = vw.$_" } @$not_null_uniques );
+    push( @$join_preds, map { "( ( tt.$_ = vw.$_ ) OR ( tt.$_ IS NULL AND vw.$_ IS NULL ) )" } @$null_uniques );
 
-        my $pred;
-        if( $NULL_IN_UNIQUE )
-        {
-            $pred = join(
-                ' AND ',
-                map {
-                    "(( tt.$_ IS NULL AND vw.$_ IS NULL ) "
-                  . "OR ( tt.$_ = vw.$_ ))"
-                } @$unique_columns
-            );
-        }
-        else
-        {
-            $pred = join(
-                ' AND ',
-                map {
-                    " ( tt.$_ = vw.$_ ) "
-                } @$unique_columns
-            );
-        }
-
-        push(
-            @$join_preds,
-            $pred
-        );
-    }
-
-    my $tt_sel         = join( ',', map { "tt.$_" } @$unique_uniques );
-    my $vw_sel         = join( ',', map { "vw.$_" } @$unique_uniques );
-    my $join_predicate = join( ' ) OR ( ', @$join_preds );
+    my $tt_sel         = join( ',', map { "tt.$_" } @$uniques );
+    my $vw_sel         = join( ',', map { "vw.$_" } @$uniques );
+    my $join_predicate = join( ' AND ', @$join_preds );
 
     if( scalar( @$join_preds ) > 1 )
     {
@@ -2633,6 +2544,7 @@ WITH tt_rows_to_delete AS
           WHERE $join_predicate
 END_SQL
 
+    print "$DELETE_Q\n" if( $PRINT_QUERIES );
     $sth = &try_query( $handle, $DELETE_Q, [] );
     return 0 unless( $sth );
     $sth->finish();
