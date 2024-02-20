@@ -93,7 +93,7 @@ Readonly::Scalar our $XID_MAP_SPREAD               :Export( :MANDATORY ) => 300;
 
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather
 # than one insert
-Readonly::Scalar our $BATCHED_CREATE               :Export( :MANDATORY ) => 1;
+Readonly::Scalar our $BATCHED_CREATE               :Export( :MANDATORY ) => 0;
 
 # Batch size for the above batched create mode.
 Readonly::Scalar our $BATCH_SIZE                   :Export( :MANDATORY ) => 1000000;
