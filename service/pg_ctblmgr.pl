@@ -1222,7 +1222,12 @@ sub worker_entrypoint($$)
                 # through all the logic below.
                 $OS_ERROR = 0;
                 @$ret = IO::Select::select( $SELECTOR, undef, undef, 2.5 );
-                _log( $LOG_LEVEL_ERROR, "Error reading file handle: $OS_ERROR" ) if( $OS_ERROR && !$got_sighup );
+                if( $OS_ERROR && !$got_sighup )
+                {
+                    _log( $LOG_LEVEL_ERROR, "Error reading file handle: $OS_ERROR. Resetting selector..." );
+                    do_listen( $handle );
+                }
+
                 $missed_notifs = $handle->func( 'pg_notifies' ) if( scalar( @$ret ) == 0 );
                 if( $missed_notifs )
                 {
