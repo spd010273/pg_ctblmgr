@@ -82,14 +82,8 @@ Readonly::Scalar our $CHANGES_BETWEEN_REAVG        :Export( :MANDATORY ) => 5;
 # Enable fast delete functionality - 1 is enable, 0 is disable
 Readonly::Scalar our $ENABLE_FAST_DELETE           :Export( :MANDATORY ) => 1;
 
-# Entry length for historic transaction storage. This allows fast delete to work
-Readonly::Scalar our $MAX_XID_LENGTH               :Export( :MANDATORY ) => 2;
-
-# Soread of XID map - This is the spacing between historic snapshots in minutes
-# the larger the number, the larger the spacing between XID map entries.
-# This increases the likelyhood that long running tx's result in a
-# fast delete.
-Readonly::Scalar our $XID_MAP_SPREAD               :Export( :MANDATORY ) => 300;
+Readonly::Array  our @XID_BUCKET_TIMES             :Export( :MANDATORY ) => ( 3, 300 );
+Readonly::Scalar our $XID_BUCKET_COUNT             :Export( :MANDATORY ) => scalar( @XID_BUCKET_TIMES );
 
 # When creating cache tables, use LIMIT / OFFSET to populate the table rather
 # than one insert

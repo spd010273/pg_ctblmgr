@@ -40,7 +40,7 @@ use Shm;
 
 Readonly my $REFRESH_ON_START   => 0;
 # Expressed in MS:
-Readonly my $XID_IDLE_TIMEOUT   => ( 1000 * $XID_MAP_SPREAD ) + ( 1000 * 30 ); # XID_MAP_SPREAD + 30 seconds
+Readonly my $XID_IDLE_TIMEOUT   => ( 1000 * $XID_BUCKET_TIMES[$XID_BUCKET_COUNT-1] ) + ( 1000 * 30 ); # XID_MAP_SPREAD + 30 seconds
 Readonly my $SLEEP_TIMER        => 0.25; # seconds for main loop
 Readonly my $XID_START_SIZE     => 768;
 Readonly my $WS_KEY             => 17783313;
@@ -325,9 +325,11 @@ sub new_xid_placeholder($$$)
         { type => SCALARREF },
     );
 
-    $$new_handle = &db_connect( $$new_handle );
-
-    return 0 unless( $$new_handle );
+    if( !defined( $$new_handle ) )
+    {
+        $$new_handle = &db_connect( $$new_handle );
+        return 0 unless( $$new_handle );
+    }
 
     $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
     $$new_handle->do( "SET idle_in_transaction_session_timeout = $XID_IDLE_TIMEOUT" );
@@ -373,7 +375,7 @@ sub new_xid_placeholder($$$)
         $$new_snapshot = $row->{snapshot};
         $sth->finish();
         $$new_handle->do(
-            "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid'"
+            "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid ($$new_snapshot)'"
         );
         $$new_handle->do( 'SELECT 1' );
         return 1;
@@ -405,6 +407,24 @@ sub parent_loop($)
 
     my $local_xid_map = {};
 
+    # Stub out the local XID map
+    my $bucket_id = 0;
+    for( $bucket_id = 0; $bucket_id < $XID_BUCKET_COUNT; $bucket_id++ )
+    {
+        $local_xid_map->{$bucket_id} = {
+            xid      => undef,
+            handle   => undef,
+            created  => undef,
+            snapshot => undef,
+            next     => {
+                xid      => undef,
+                handle   => undef,
+                snapshot => undef,
+                created  => undef,
+            }
+        };
+    }
+
     unless( $handle )
     {
         _log( $LOG_LEVEL_FATAL, 'Failed to connect to database' );
@@ -434,197 +454,142 @@ sub parent_loop($)
         ## XID CHAIN MANAGEMENT
         ##=====================
         $xid_start = [ gettimeofday() ] if( $TIMING );
-        if(
-            $ENABLE_FAST_DELETE
-         && (
-                !defined( $last_xid_create )
-             || tv_interval( $last_xid_create, [ gettimeofday() ] ) >= $XID_MAP_SPREAD
-            )
-          )
+        if( $ENABLE_FAST_DELETE )
         {
-            do_lock( $XID_KEY, $WRITE_LOCK );
-            $XID_MAP = readmem( $XID_KEY );
-            $last_xid_create = [ gettimeofday() ];
-
-            # Safety check - remove XIDs that have been hanging around for a long time.
-            my $max_allowed_age = ( $MAX_XID_LENGTH * $XID_MAP_SPREAD ) + $XID_MAP_SPREAD;
-            $max_allowed_age    = ( $XID_IDLE_TIMEOUT / 1000 ) if( ( $XID_IDLE_TIMEOUT / 1000 ) > $max_allowed_age );
-
-            foreach my $aged_xid( keys %$local_xid_map )
+            ## Bucket management logic
+            foreach my $bucket_id( sort { $a <=> $b } keys %$local_xid_map )
             {
-                if( tv_interval( $local_xid_map->{$aged_xid}->{created}, [ gettimeofday() ] ) >= $max_allowed_age )
+                my $current_slot    = $local_xid_map->{$bucket_id};
+                my $next_slot;
+
+                if( $bucket_id + 1 < $XID_BUCKET_COUNT )
                 {
-                    _log( $LOG_LEVEL_WARNING, "Old XID map member found older than $max_allowed_age seconds. Pruning" );
-                    my $prune_handle = $local_xid_map->{$aged_xid}->{handle};
-                    if( $prune_handle && $prune_handle->ping() > 0 && $prune_handle->pg_ping() > 0 )
-                    {
-                        $prune_handle->disconnect();
-                        undef( $prune_handle );
-                    }
+                    $next_slot = $local_xid_map->{$bucket_id + 1};
+                }
 
-                    delete( $local_xid_map->{$aged_xid} );
-                    my $found = 0;
-                    my $ind = 0;
-                    foreach my $xid_map_ind( @$XID_MAP )
+                my $max_age_sec = ( $XID_BUCKET_TIMES[$bucket_id] * 2 );
+
+                if( !$current_slot->{next}->{handle} )
+                {
+                    if( $current_slot->{handle} && tv_interval( $current_slot->{created}, [gettimeofday()] ) < $XID_BUCKET_TIMES[$bucket_id] )
                     {
-                        if( defined( $xid_map_ind ) && $xid_map_ind->{xid} == $aged_xid )
+                        my $curr = $current_slot->{handle};
+                        if( !$curr || !$curr->ping() )
                         {
-                            $found = 1;
-                            splice( @$XID_MAP, $ind, 1 );
-                            last;
+                            _log( $LOG_LEVEL_ERROR, "Bad snapshot $current_slot->{snapshot}" );
+                            $current_slot->{handle} = undef;
+                            do_lock( $XID_KEY, $WRITE_LOCK );
+                            $XID_MAP = readmem( $XID_KEY );
+                            delete( $XID_MAP->{$current_slot->{xid}} );
+                            writemem( $XID_KEY, $XID_MAP );
+                            do_lock( $XID_KEY, $WRITE_UNLOCK );
                         }
-                        $ind++;
+                        next;
                     }
-
-                    if( !$found )
+                    my $new_handle;
+                    my $new_xid;
+                    my $new_snapshot;
+                    if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
                     {
-                        _log( $LOG_LEVEL_ERROR, "Mismatch between XID map and local copy, could not locate xid $aged_xid" );
+                        _log( $LOG_LEVEL_ERROR, "Failed to create new XID snapshot" );
                     }
-
-                    writemem( $XID_KEY, $XID_MAP );
+                    else
+                    {
+                        $current_slot->{next} = {
+                            handle   => $new_handle,
+                            xid      => $new_xid,
+                            snapshot => $new_snapshot,
+                            created  => [ gettimeofday() ],
+                        };
+                    }
                 }
                 else
                 {
-                    my $aged_handle = $local_xid_map->{$aged_xid}->{handle};
-                    if( !defined $aged_handle || $aged_handle->ping() <= 0 || $aged_handle->pg_ping() <= 0 )
+                    if( !$current_slot->{handle} )
                     {
-                        _log( $LOG_LEVEL_DEBUG, "Found local XID entry with bad handle for $aged_xid" );
-                        delete( $local_xid_map->{$aged_xid} );
-                        my $ind = 0;
-                        my $found = 1;
-                        foreach my $xid_map_ind( @$XID_MAP )
-                        {
-                            $found = 1;
-                            splice( @$XID_MAP, $ind, 1 );
-                            last;
-                        }
-                        $ind++;
-
-                        if( !$found )
-                        {
-                            _log(
-                                $LOG_LEVEL_ERROR,
-                                "Mismatch between XID map and local copy. Terminated handle for $aged_xid could not be found"
-                            );
-                        }
-
+                        next if( !$current_slot->{next}->{handle} );
+                        $current_slot->{handle}   = $current_slot->{next}->{handle};
+                        $current_slot->{xid}      = $current_slot->{next}->{xid};
+                        $current_slot->{snapshot} = $current_slot->{next}->{snapshot};
+                        $current_slot->{created}  = $current_slot->{next}->{created};
+                        $current_slot->{next}->{handle}   = undef;
+                        $current_slot->{next}->{xid}      = undef;
+                        $current_slot->{next}->{snapshot} = undef;
+                        $current_slot->{next}->{created}  = undef;
+                        # TODO: CReate XID MAP entry
+                        do_lock( $XID_KEY, $WRITE_LOCK );
+                        $XID_MAP = readmem( $XID_KEY );
+                        $XID_MAP->{$current_slot->{xid}} = $current_slot->{snapshot};
                         writemem( $XID_KEY, $XID_MAP );
+                        do_lock( $XID_KEY, $WRITE_UNLOCK );
                     }
-                }
-            }
-
-            if(
-                  !defined( $XID_MAP )
-               || ref( $XID_MAP ) ne 'ARRAY'
-               || scalar( @$XID_MAP ) < $MAX_XID_LENGTH
-              )
-            {
-                my $new_handle;
-                my $new_xid;
-                my $new_snapshot;
-
-                if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "Could not generate new XID chain member" );
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    next;
-                }
-
-                $XID_MAP = readmem( $XID_KEY );
-                $local_xid_map->{$new_xid} = { handle => $new_handle, created => [ gettimeofday() ] };
-                push(
-                    @$XID_MAP,
+                    else
                     {
-                        xid      => $new_xid,
-                        snapshot => $new_snapshot,
-                        in_use   => []
+                        if( tv_interval( $current_slot->{created}, [ gettimeofday() ] ) >= $max_age_sec )
+                        {
+                            do_lock( $XID_KEY, $WRITE_LOCK );
+                            $XID_MAP = readmem( $XID_KEY );
+                            # Age out current slot - upcycle or close
+                            # TODO: swap out XID_MAP entry
+                            my $old_handle = $current_slot->{handle};
+                            my $replace_xid = $current_slot->{xid};
+                            my $new_xid     = $current_slot->{next}->{xid};
+                            my $replace_snapshot = $current_slot->{snapshot};
+                            my $new_snapshot     = $current_slot->{next}->{snapshot};
+                            if( !defined( $XID_MAP->{$replace_xid} ) )
+                            {
+                                _log( $LOG_LEVEL_ERROR, "XID map out of sync of parent copy" );
+                            }
+                            else
+                            {
+                                delete( $XID_MAP->{$replace_xid} );
+                                $XID_MAP->{$new_xid} = $new_snapshot;
+                            }
+                            writemem( $XID_KEY, $XID_MAP );
+                            do_lock( $XID_KEY, $WRITE_UNLOCK );
+                            $old_handle->do( 'ROLLBACK' );
+                            $current_slot->{handle}   = $current_slot->{next}->{handle};
+                            $current_slot->{xid}      = $current_slot->{next}->{xid};
+                            $current_slot->{snapshot} = $current_slot->{next}->{snapshot};
+                            $current_slot->{created}  = $current_slot->{next}->{created};
+                            if( !new_xid_placeholder( \$old_handle, \$new_xid, \$new_snapshot ) )
+                            {
+                                _log( $LOG_LEVEL_ERROR, "Failed to create new XID snapshot" );
+                            }
+                            else
+                            {
+                                $current_slot->{next} = {
+                                    handle   => $old_handle,
+                                    xid      => $new_xid,
+                                    snapshot => $new_snapshot,
+                                    created  => [ gettimeofday() ],
+                                };
+                            }
+                        }
+                        else
+                        {
+                            my $curr = $current_slot->{handle};
+                            my $next = $current_slot->{next}->{handle};
+                            unless( defined( $curr ) && $curr->ping() )
+                            {
+                                _log( $LOG_LEVEL_ERROR, "Bad XID snapshot $current_slot->{snapshot}" );
+                                $current_slot->{handle} = undef;
+                                do_lock( $XID_KEY, $WRITE_LOCK );
+                                $XID_MAP = readmem( $XID_KEY );
+                                delete( $XID_MAP->{$current_slot->{xid}} );
+                                writemem( $XID_KEY, $XID_MAP );
+                                do_lock( $XID_KEY, $WRITE_UNLOCK );
+                            }
+
+                            unless( defined( $next ) && $next->ping() )
+                            {
+                                _log( $LOG_LEVEL_ERROR, "Bad next snapshot $current_slot->{next}->{snapshot}" );
+                                $current_slot->{next}->{handle} = undef;
+                            }
+                        }
                     }
-                );
-
-                writemem( $XID_KEY, $XID_MAP );
+                }
             }
-            else
-            {
-                # Replace oldest chain member in terms of XID
-                my $candidate_replace;
-                my $candidate_replace_ind;
-                my $replace_ind     = 0;
-
-                foreach my $elem( @$XID_MAP )
-                {
-                    if(
-                           defined( $elem )
-                        && defined( $elem->{in_use} )
-                        && scalar( @{$elem->{in_use}} ) == 0
-                        && (
-                                !defined( $candidate_replace )
-                             || $elem->{xid} < $candidate_replace
-                           )
-                      )
-                    {
-                        $candidate_replace     = $elem->{xid};
-                        $candidate_replace_ind = $replace_ind;
-                    }
-
-                    $replace_ind++;
-                }
-
-                if( !defined( $candidate_replace ) )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "No XID replacement candidate" );
-                    # Safety check - leave no dangling XIDs, perform a time-based check
-
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    next;
-                }
-
-                $XID_MAP = readmem( $XID_KEY );
-                my $replace_handle = $local_xid_map->{$candidate_replace}->{handle};
-
-                if( !defined( $replace_handle ) )
-                {
-                    _log( $LOG_LEVEL_DEBUG, "No handle to remove" );
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    next;
-                }
-
-                if( $replace_handle->ping() > 0 && $replace_handle->pg_ping() > 0 )
-                {
-                    $replace_handle->do( 'ROLLBACK' );
-                }
-
-                $replace_handle->disconnect();
-                undef( $replace_handle );
-
-                my $snapshot;
-                my $new_xid;
-
-                delete( $local_xid_map->{$candidate_replace} );
-
-                if( !new_xid_placeholder( \$replace_handle, \$new_xid, \$snapshot ) )
-                {
-                    _log( $LOG_LEVEL_ERROR, "Failed to generate replacement xid member" );
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    next;
-                }
-
-                if( $XID_MAP->[$candidate_replace_ind]->{xid} != $candidate_replace )
-                {
-                    _log( $LOG_LEVEL_ERROR, "XID Chain replacement invalid - index $candidate_replace_ind is invalid for XID" );
-                    do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    next;
-                }
-
-                $XID_MAP->[$candidate_replace_ind] = {
-                    snapshot => $snapshot,
-                    xid      => $new_xid,
-                    in_use   => [],
-                };
-                writemem( $XID_KEY, $XID_MAP );
-                $local_xid_map->{$new_xid} = { handle => $replace_handle, created => [ gettimeofday() ] };
-            }
-
-            do_lock( $XID_KEY, $WRITE_UNLOCK );
         }
 
         if( $TIMING )
@@ -970,22 +935,6 @@ sub worker_cache_refresh($$$$)
     return;
 }
 
-sub release_all_xid()
-{
-    my $XID_MAP = [];
-    my $ind = 0;
-    do_lock( $XID_KEY, $WRITE_LOCK );
-    $XID_MAP = readmem( $XID_KEY );
-    foreach my $elem( @$XID_MAP )
-    {
-        @{$XID_MAP->[$ind]->{in_use}} = grep { $_ ne $PROCESS_ID } @{$XID_MAP->[$ind]->{in_use}};
-        $ind++;
-    }
-    writemem( $XID_KEY, $XID_MAP );
-    do_lock( $XID_KEY, $WRITE_UNLOCK );
-    return;
-}
-
 ## WORKER
 sub worker_entrypoint($$)
 {
@@ -1001,7 +950,7 @@ sub worker_entrypoint($$)
     &set_program_name( undef, "worker startup" );
     my $CACHE_HASH           = {};
     my $WORKER_STATUSES      = {};
-    my $XID_MAP              = [];
+    my $XID_MAP              = {};
     my $backend_pid          = 0;
     my $worker_pid           = $PROCESS_ID;
     my $worker_shm_err       = 0;
@@ -1229,7 +1178,7 @@ sub worker_entrypoint($$)
                 }
 
                 $missed_notifs = $handle->func( 'pg_notifies' ) if( scalar( @$ret ) == 0 );
-                if( $missed_notifs )
+                if( defined $missed_notifs && ref( $missed_notifs ) eq 'ARRAY' && scalar( @$missed_notifs ) > 0 )
                 {
                     push( @$notifications_mat, $missed_notifs );
                     last NOTIFY_LOOP;
@@ -1415,7 +1364,6 @@ sub worker_entrypoint($$)
                 my $can_fast_delete = 0;
                 my $tried_fast_delete = 0;
                 my $using_xid;
-                my $using_xid_ind;
 
                 update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
@@ -1514,59 +1462,24 @@ sub worker_entrypoint($$)
                         _log( $LOG_LEVEL_DEBUG, "Approx change count: $total_blowout, NTT: $NO_TEMP_TABLES for $CACHE_HASH->{name}" );
                     }
                 }
-
-                my $xid_map_size = 0;
 RETRY_XID:
                 if( $ENABLE_FAST_DELETE )
                 {
-                    # search XID_MAP for suitable XID
                     do_lock( $XID_KEY, $READ_LOCK );
                     $XID_MAP = readmem( $XID_KEY );
                     my $best_candidate;
-                    my $best_candidate_ind;
-                    my $ind = 0;
-                    do_lock( $XID_KEY, $READ_UNLOCK );
-
-                    foreach my $elem( @{$XID_MAP} )
+                    foreach my $xid_candidate( sort { $a <=> $b } keys %$XID_MAP )
                     {
-                        if(
-                            defined( $elem->{xid} )
-                         && $elem->{xid} <= $oldest_xid
-                         && (
-                                !defined( $best_candidate )
-                             || $elem->{xid} > $best_candidate )
-                           )
-                        {
-                            $best_candidate     = $XID_MAP->[$ind]->{xid};
-                            $best_candidate_ind = $ind;
-                        }
-
-                        $xid_map_size++;
-                        $ind++;
+                        next if( $xid_candidate >= $oldest_xid );
+                        $best_candidate = $xid_candidate;
                     }
 
                     # Add our PID to the list of PIDS using this XID/snapshot combo
                     if( defined( $best_candidate ) )
                     {
-                        unless( grep( /^$worker_pid$/, @{$XID_MAP->[$best_candidate_ind]->{in_use}} ) )
-                        {
-                            do_lock( $XID_KEY, $WRITE_LOCK );
-                            $XID_MAP = readmem( $XID_KEY );
-                            if( $XID_MAP->[$best_candidate_ind]->{xid} != $best_candidate )
-                            {
-                                do_lock( $XID_KEY, $WRITE_UNLOCK );
-                                _log( $LOG_LEVEL_ERROR, "XID map changed during read lock promotion, retrying" );
-                                goto RETRY_XID;
-                            }
-                            push( @{$XID_MAP->[$best_candidate_ind]->{in_use}}, $worker_pid );
-                            $aged_snapshot   = $XID_MAP->[$best_candidate_ind]->{snapshot};
-                            $using_xid       = $best_candidate;
-                            $using_xid_ind   = $best_candidate_ind;
-                            $can_fast_delete = 1;
-                            _log( $LOG_LEVEL_DEBUG, 'Found candidate XID for fast delete' );
-                            writemem( $XID_KEY, $XID_MAP );
-                            do_lock( $XID_KEY, $WRITE_UNLOCK );
-                        }
+                        $aged_snapshot   = $XID_MAP->{$best_candidate};
+                        $using_xid       = $best_candidate;
+                        $can_fast_delete = 1;
                     }
                     else
                     {
@@ -1576,12 +1489,14 @@ RETRY_XID:
                           . "- looking for $oldest_xid. Candidates were:"
                         );
 
-                        foreach my $elem( @{$XID_MAP} )
+                        foreach my $xid( keys %{$XID_MAP} )
                         {
-                            _log( $LOG_LEVEL_DEBUG, "$elem->{xid}" ) if( defined( $elem && $elem->{xid} ) );
+                            _log( $LOG_LEVEL_DEBUG, "$xid ($XID_MAP->{$xid})" );
                         }
                         _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
                     }
+                    do_lock( $XID_KEY, $READ_UNLOCK );
+                    # Note - to narrow the locking gap here we dont import the snapshot, but we can pull that logic up if needed
                 }
 
                 # Generate temp table containing state of rows relevent to the keys that have changed
@@ -1753,7 +1668,6 @@ FD_FALLBACK:
 
                 if( defined( $using_xid ) )
                 {
-                    release_all_xid();
                     if( $aged_handle && $aged_handle->ping() > 0 )
                     {
                         $aged_handle->disconnect();
@@ -1780,10 +1694,8 @@ FD_FALLBACK:
                         $tried_fast_delete = 1;
                     }
                 }
-                # this is a hack and shouldn't be here - but for ease on CI / Staging infra we're not going to
-                # use slow deletes iff the XID map isn't full
-                # For production use we're banking on steady-state operation
-                if( !$can_fast_delete && ( $xid_map_size > 0 || !$ENABLE_FAST_DELETE ) )
+
+                if( !$can_fast_delete )
                 {
                     update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
 

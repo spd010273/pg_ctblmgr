@@ -141,7 +141,9 @@ Enter fast delete. Fast deletion uses a historic database connection (connection
 
 Slow deletion is the alternative solution. It runs the unfiltered query against the current timeline, and comparing the output with the current state of the cache table, it can be determined which row(s) should be deleted.
 
-As part of the fast delete mechanism, the parent process handles the maintenance of `MAX_XID_LENGTH` historic connections that are `XID_MAP_SPREAD` seconds apart. The snapshot information is stored in shared memory (`XID_MAP`) and, when needed, a worker process imports the 'youngest'historic snapshot it can, given the xid of the change it is processing.
+As part of the fast delete mechanism, the parent process handles the maintenance of a number of historic connections. These connection have exported aged snapshots and are held open for a target period of time. The snapshot information is stored in shared memory (`XID_MAP`) and, when needed, a worker process imports the 'youngest' historic snapshot it can, given the xid of the change it is processing. This XID map was previously implemented in a linear fashion but has since been changed to a step-based function.
+
+For accuracy, it is important to have more-recent aged snapshots available to handle the case where tuples are repeatedly removed and re-added to a base table. For speed, it is important to maintain older aged snapshots so that long-running transactions can leverage fast delete.
 
 ## Regular vs Bulk Update
 
