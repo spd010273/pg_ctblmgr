@@ -586,6 +586,21 @@ Readonly::Scalar my $UPDATE_FILTERS => <<"END_SQL";
      WHERE id = ?
 END_SQL
 
+Readonly::Scalar my $CHECK_PARENT_LOCK => <<"END_SQL";
+    SELECT l.*
+      FROM pg_locks l
+INNER JOIN pg_class c
+        ON c.oid = l.classid
+       AND c.relname = '__pgctblmgr_repl_slot'
+INNER JOIN pg_namespace n
+        ON n.nspname = '${SCHEMA_NAME}'
+       AND n.oid = c.relnamespace
+INNER JOIN pg_database d
+        ON d.oid = l.database
+       AND d.datname = current_database()
+     WHERE l.pid = pg_backend_pid()
+END_SQL
+
 Readonly::Scalar my $CHECK_WORKER_LOCK => <<"END_SQL";
     SELECT l.*
       FROM pg_locks l
@@ -1129,6 +1144,13 @@ sub db_connect(;$$) :Export( :MANDATORY )
     }
     else
     {
+        _log( $LOG_LEVEL_INFO, "P: " . $handle->ping() . " PGP: " . $handle->pg_ping() ) if( defined( $handle ) );
+        if( defined( $handle ) )
+        {
+            $handle->disconnect();
+            undef( $handle );
+        }
+
         # Cleanup pid's globals to avoid any leaks via orphaned objs
         if( $PROCESS_ID != $PARENT_PID && !defined( $is_aged ) )
         {
@@ -1237,11 +1259,20 @@ sub db_connect(;$$) :Export( :MANDATORY )
 
 #    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $DEBUG );
 
-    if( !defined( $is_aged ) )
+    if( !defined( $is_aged ) && $PROCESS_ID != $PARENT_PID )
     {
         &do_listen( $handle );
         my $row = $handle->selectrow_hashref( 'SELECT pg_backend_pid() AS pid' );
         $BACKEND_PID = $row->{pid};
+    
+        unless( &try_lock( $handle ) )
+        {
+            _log(
+                $LOG_LEVEL_FATAL,
+                'There seems to be another worker using maintenance object '
+              . $LOCAL_PK_MAINTENANCE_OBJECT . ' on this database'
+            );
+        }
     }
 
     return $handle;
@@ -1256,7 +1287,28 @@ sub do_listen($) :Export( :MANDATORY )
 
     if( $PROCESS_ID != $PARENT_PID && length( $MAINTENANCE_CHANNEL ) > 0 )
     {
+        if(
+                defined( $SELECTOR )
+             || defined( $FILE_DESCRIPTOR )
+          )
+        {
+            print( "Cleaning up selector\n" );
+            $SELECTOR->remove( $FILE_DESCRIPTOR ) if( defined( $SELECTOR ) );
+            undef( $SELECTOR );
+            if(
+                    defined( $FILE_DESCRIPTOR )
+                 && defined( fileno( $FILE_DESCRIPTOR ) )
+                 && fileno( $FILE_DESCRIPTOR ) >= 0
+              )
+            {
+                print( "Closing old FD\n" );
+                close( $FILE_DESCRIPTOR );
+            }
+            undef( $FILE_DESCRIPTOR );
+        }
+
         $handle->do( "LISTEN $MAINTENANCE_CHANNEL" );
+
         $FILE_DESCRIPTOR = $handle->func( 'getfd' );
         $SELECTOR        = IO::Select->new( $FILE_DESCRIPTOR );
         _log( $LOG_LEVEL_INFO, "Worker $PROCESS_ID listening on $MAINTENANCE_CHANNEL" );
@@ -1287,7 +1339,7 @@ sub try_query($$;$) :Export( :MANDATORY )
     return undef if( $retry_counter > $MAX_QUERY_RETRIES );
 
     $handle = &db_connect( $handle );
-
+    
     # We're connected to the DB at this point
     if( $PARENT_PID == $PROCESS_ID )
     {
@@ -1435,7 +1487,12 @@ sub check_extension_running($) :Export( :MANDATORY )
         { type => OBJECT },
     );
 
-    my $sth = $handle->prepare(
+    my $sth = $handle->prepare( $CHECK_PARENT_LOCK );
+    return 0 unless( $sth );
+    return 0 unless( $sth->execute() );
+    return 1 if( $sth->rows() > 0 );
+    $sth->finish();
+    $sth = $handle->prepare(
         $CHECK_EXTENSION_RUNNING_QUERY
     );
 

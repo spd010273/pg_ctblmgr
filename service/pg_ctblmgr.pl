@@ -451,6 +451,7 @@ sub parent_loop($)
 
     while( 1 )
     {
+        $handle = db_connect( $handle );
         ## XID CHAIN MANAGEMENT
         ##=====================
         $xid_start = [ gettimeofday() ] if( $TIMING );
@@ -1170,6 +1171,8 @@ sub worker_entrypoint($$)
                 # here uses less resources compared to letting the worker flow
                 # through all the logic below.
                 $OS_ERROR = 0;
+                our $SELECTOR;
+                our $FILE_DESCRIPTOR;
                 @$ret = IO::Select::select( $SELECTOR, undef, undef, 2.5 );
                 if( $OS_ERROR && !$got_sighup )
                 {
@@ -1178,10 +1181,17 @@ sub worker_entrypoint($$)
                 }
 
                 $missed_notifs = $handle->func( 'pg_notifies' ) if( scalar( @$ret ) == 0 );
+                
                 if( defined $missed_notifs && ref( $missed_notifs ) eq 'ARRAY' && scalar( @$missed_notifs ) > 0 )
                 {
                     push( @$notifications_mat, $missed_notifs );
                     last NOTIFY_LOOP;
+                }
+                elsif( !defined $missed_notifs && $OS_ERROR > 0 && $OS_ERROR != 11 ) # EAGAIN
+                {
+                    print "Handle cleanup: '$OS_ERROR'" . int( $ERRNO ) . "\n";
+                    # Some kind of issue with handle - clean up old handle and FDs
+                    $handle = db_connect( $handle );
                 }
 
                 if( $got_sighup )
