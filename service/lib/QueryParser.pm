@@ -163,11 +163,12 @@ sub get_query_parsetree($$) :Export( :MANDATORY )
     return $parse_tree_obj;
 }
 
-sub get_relcache($) :Export( :MANDATORY )
+sub get_relcache($;$) :Export( :MANDATORY )
 {
-    my( $handle ) = validate_pos(
+    my( $handle, $outer_fallback_to_largest ) = validate_pos(
         @_,
-        { type => OBJECT },
+        { type => OBJECT                              },
+        { type => SCALAR, optional => 1, default => 1 },
     );
 
     my $sth = try_query( $handle, $OID_CACHE, undef );
@@ -178,6 +179,7 @@ sub get_relcache($) :Export( :MANDATORY )
     }
 
     my $cache = {};
+
     while( my $row = $sth->fetchrow_hashref() )
     {
         my $schema = $row->{schema_name};
@@ -190,7 +192,7 @@ sub get_relcache($) :Export( :MANDATORY )
         $cache->{func}->{$schema}->{$name} = $oid if( $row->{type} eq 'f' );
         $cache->{oid}->{$oid} = { schema => $schema, name => $name };
 
-        if( $OUTER_FALLBACK_TO_LARGEST && $row->{type} eq 'r' )
+        if( $outer_fallback_to_largest && $row->{type} eq 'r' )
         {
             $cache->{size}->{$schema}->{$name} = $size;
         }
@@ -2800,10 +2802,13 @@ sub generate_where_expressions($) :Export( :MANDATORY )
 {
     my( $map ) = validate_pos( @_, { type => HASHREF } );
 
-    my $filters       = $map->{filters};
-    my $table_mapping = $map->{table_mapping};
-    my $handle        = $map->{handle};
-    my $relcache      = $map->{relcache};
+    my $filters                   = $map->{filters};
+    my $table_mapping             = $map->{table_mapping};
+    my $handle                    = $map->{handle};
+    my $relcache                  = $map->{relcache};
+    my $outer_fallback_to_largest = $map->{outer_fallback_to_largest} // 1;
+    my $outer_grouped_rels_only   = $map->{outer_grouped_rels_only} // 1;
+
     my $where_expressions = {};
 
     foreach my $position( keys %{$table_mapping->{BINDS}} )
@@ -2867,7 +2872,7 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                         foreach my $result( @$results )
                         {
                             if(
-                                  $OUTER_GROUPED_RELS_ONLY
+                                  $outer_grouped_rels_only
                                && scalar( @$results ) > 1
                                && defined( $result->{col} )
                                && defined( $BINDS->{$position}->{has_group} )
@@ -2904,13 +2909,13 @@ sub generate_where_expressions($) :Export( :MANDATORY )
                                     _log(
                                         $LOG_LEVEL_DEBUG,
                                         "Skipping filtering of $name due to "
-                                      . 'OUTER_GROUPED_RELS_ONLY setting'
+                                      . 'outer_grouped_rels_only option'
                                     );
                                     next;
                                 }
                             }
                             elsif(
-                                      $OUTER_FALLBACK_TO_LARGEST
+                                      $outer_fallback_to_largest
                                    && scalar( @$results ) > 1
                                  )
                             {
@@ -3102,7 +3107,7 @@ sub apply_filters($) :Export( :MANDATORY )
     # Assmple where expressions structure keyed based on the bind position
     # for much easier substitution later
 
-    #print Dumper( $where_expressions ) if( $DEBUG );
+    #print Dumper( $where_expressions ) if( defined $CONFIG_MANAGER && $CONFIG_MANAGER->get_config_value( 'debug' ) );
     my $new_q = $definition;
     my $index = 0;
 

@@ -24,6 +24,7 @@ use FindBin;
 use lib "$FindBin::Bin/lib";
 
 use Util;
+use ConfigManager;
 use DB;
 use QueryParser;
 use Shm;
@@ -38,14 +39,10 @@ use Shm;
 # enables holding past transactions open for a trailing XID chain we can use
 # to lookup historic data
 
-Readonly my $REFRESH_ON_START   => 0;
 # Expressed in MS:
-Readonly my $XID_IDLE_TIMEOUT   => ( 1000 * $XID_BUCKET_TIMES[$XID_BUCKET_COUNT-1] ) + ( 1000 * 30 ); # XID_MAP_SPREAD + 30 seconds
-Readonly my $SLEEP_TIMER        => 0.25; # seconds for main loop
 Readonly my $XID_START_SIZE     => 768;
 Readonly my $WS_KEY             => 17783313;
 Readonly my $XID_KEY            => 17783314;
-Readonly my $TIMING             => 0;
 Readonly my $INT_MAX            => ( 2**53 );
 our $OUTPUT_AUTOFLUSH = 1;
 our $|                = 1;
@@ -55,7 +52,9 @@ $PARENT_PID    = $PROCESS_ID;
 $LOG_FILE      = '';
 $LOG_FH        = undef;
 $DAEMONIZE     = 0;
+
 my $got_sighup = 0;
+
 
 sub update_status($;$)
 {
@@ -109,8 +108,27 @@ sub update_status($;$)
 
 sub _handle_sighup()
 {
-    # dummy for now
+    my $process_name;
+
+    if( $PROCESS_ID == $PARENT_PID )
+    {
+        $process_name = 'Parent process';
+    }
+    else
+    {
+        $process_name = 'Worker process';
+    }
+
+    if( $got_sighup )
+    {
+        _log( $LOG_LEVEL_INFO, "$process_name received SIGHUP while still processing previous SIGHUP, ignoring" );
+        return;
+    }
+
     $got_sighup = 1;
+
+    _log( $LOG_LEVEL_INFO, "$process_name received SIGHUP" );
+
     return;
 }
 
@@ -316,13 +334,14 @@ sub _rollback_and_disconnect($)
     return;
 }
 
-sub new_xid_placeholder($$$)
+sub new_xid_placeholder($$$$)
 {
-    my( $new_handle, $new_xid, $new_snapshot ) = validate_pos(
+    my( $new_handle, $new_xid, $new_snapshot, $xid_idle_timeout ) = validate_pos(
         @_,
         { type => SCALARREF },
         { type => SCALARREF },
         { type => SCALARREF },
+        { type => SCALAR    },
     );
 
     if( !defined( $$new_handle ) )
@@ -331,8 +350,8 @@ sub new_xid_placeholder($$$)
         return 0 unless( $$new_handle );
     }
 
-    $$new_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" );
-    $$new_handle->do( "SET idle_in_transaction_session_timeout = $XID_IDLE_TIMEOUT" );
+    $$new_handle->do( "SET idle_session_timeout = ?", undef, $xid_idle_timeout );
+    $$new_handle->do( "SET idle_in_transaction_session_timeout = ?", undef, $xid_idle_timeout );
     $$new_handle->do( 'BEGIN' );
 
     my $sth = $$new_handle->prepare( 'SELECT txid_current() AS xid' );
@@ -386,11 +405,21 @@ sub new_xid_placeholder($$$)
 }
 
 ## PARENT
-sub parent_loop($)
+sub parent_loop($$$$$)
 {
-    my( $worker_mapping ) = validate_pos(
+    my(
+        $worker_mapping,
+        $enable_fast_delete,
+        $xid_bucket_times,
+        $xid_bucket_count,
+        $xid_idle_timeout,
+    ) = validate_pos(
         @_,
-        { type => HASHREF }, # local mapping of pk_maint_obj -> pid
+        { type => HASHREF  }, # local mapping of pk_maint_obj -> pid
+        { type => SCALAR   },
+        { type => ARRAYREF },
+        { type => SCALAR   },
+        { type => SCALAR   },
     );
 
     my $WORKER_STATUSES;
@@ -409,7 +438,7 @@ sub parent_loop($)
 
     # Stub out the local XID map
     my $bucket_id = 0;
-    for( $bucket_id = 0; $bucket_id < $XID_BUCKET_COUNT; $bucket_id++ )
+    for( $bucket_id = 0; $bucket_id < $xid_bucket_count; $bucket_id++ )
     {
         $local_xid_map->{$bucket_id} = {
             xid      => undef,
@@ -451,11 +480,19 @@ sub parent_loop($)
 
     while( 1 )
     {
+        if( $got_sighup )
+        {
+            # Reload configs at the beginning of the loop if we've received a SIGHUP
+            $CONFIG_MANAGER->load_configs( 1 );
+            $got_sighup = 0;
+        }
+
         $handle = db_connect( $handle );
+        
         ## XID CHAIN MANAGEMENT
         ##=====================
-        $xid_start = [ gettimeofday() ] if( $TIMING );
-        if( $ENABLE_FAST_DELETE )
+        $xid_start = [ gettimeofday() ] if( $CONFIG_MANAGER->get_config_value( 'timing' ) );
+        if( $enable_fast_delete )
         {
             ## Bucket management logic
             foreach my $bucket_id( sort { $a <=> $b } keys %$local_xid_map )
@@ -463,16 +500,16 @@ sub parent_loop($)
                 my $current_slot    = $local_xid_map->{$bucket_id};
                 my $next_slot;
 
-                if( $bucket_id + 1 < $XID_BUCKET_COUNT )
+                if( $bucket_id + 1 < $xid_bucket_count )
                 {
                     $next_slot = $local_xid_map->{$bucket_id + 1};
                 }
 
-                my $max_age_sec = ( $XID_BUCKET_TIMES[$bucket_id] * 2 );
+                my $max_age_sec = ( $xid_bucket_times->[$bucket_id] * 2 );
 
                 if( !$current_slot->{next}->{handle} )
                 {
-                    if( $current_slot->{handle} && tv_interval( $current_slot->{created}, [gettimeofday()] ) < $XID_BUCKET_TIMES[$bucket_id] )
+                    if( $current_slot->{handle} && tv_interval( $current_slot->{created}, [gettimeofday()] ) < $xid_bucket_times->[$bucket_id] )
                     {
                         my $curr = $current_slot->{handle};
                         if( !$curr || !$curr->ping() )
@@ -490,7 +527,7 @@ sub parent_loop($)
                     my $new_handle;
                     my $new_xid;
                     my $new_snapshot;
-                    if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot ) )
+                    if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot, $xid_idle_timeout ) )
                     {
                         _log( $LOG_LEVEL_ERROR, "Failed to create new XID snapshot" );
                     }
@@ -553,7 +590,7 @@ sub parent_loop($)
                             $current_slot->{xid}      = $current_slot->{next}->{xid};
                             $current_slot->{snapshot} = $current_slot->{next}->{snapshot};
                             $current_slot->{created}  = $current_slot->{next}->{created};
-                            if( !new_xid_placeholder( \$old_handle, \$new_xid, \$new_snapshot ) )
+                            if( !new_xid_placeholder( \$old_handle, \$new_xid, \$new_snapshot, $xid_idle_timeout ) )
                             {
                                 _log( $LOG_LEVEL_ERROR, "Failed to create new XID snapshot" );
                             }
@@ -593,13 +630,13 @@ sub parent_loop($)
             }
         }
 
-        if( $TIMING )
+        if( $CONFIG_MANAGER->get_config_value( 'timing' ) )
         {
             my $xid_delta = tv_interval( $xid_start, [ gettimeofday() ] );
             _log( $LOG_LEVEL_DEBUG, "XID management took $xid_delta seconds" );
         }
 
-        if( !$first_loop_done && $REFRESH_ON_START )
+        if( !$first_loop_done && $CONFIG_MANAGER->get_config_value( 'refresh_on_start' ) )
         {
             do_lock( $WS_KEY, $WRITE_LOCK );
             $WORKER_STATUSES = readmem( $WS_KEY );
@@ -614,7 +651,7 @@ sub parent_loop($)
         }
 
         ## CACHE TABLE MANAGEMENT
-        $worker_check_start = [ gettimeofday() ] if( $TIMING );
+        $worker_check_start = [ gettimeofday() ] if( $CONFIG_MANAGER->get_config_value( 'timing' ) );
         my $tmp_worker_data = {};
         $tmp_worker_data    = populate_worker_data(
             $handle,
@@ -727,7 +764,9 @@ sub parent_loop($)
                     {
                         &worker_entrypoint(
                             $filter_tables,
-                            $pk_maintenance_object
+                            $pk_maintenance_object,
+                            $enable_fast_delete,
+                            $xid_idle_timeout,
                         );
                         exit( 0 );
                     }
@@ -758,13 +797,13 @@ sub parent_loop($)
             }
         }
 
-        if( $TIMING )
+        if( $CONFIG_MANAGER->get_config_value( 'timing' ) )
         {
             my $worker_check_delta = tv_interval( $worker_check_start, [ gettimeofday() ] );
             _log( $LOG_LEVEL_DEBUG, "Worker check took $worker_check_delta seconds" );
         }
 
-        select( undef, undef, undef, $SLEEP_TIMER );
+        select( undef, undef, undef, $CONFIG_MANAGER->get_config_value( 'sleep_timer' ) );
         $first_loop_done = 1;
 
         ## WORKER HEALTH CHECKS
@@ -785,7 +824,7 @@ sub worker_cache_refresh($$$$)
         $handle,
         $pk_maintenance_object,
         $filter_tables,
-        $cache_hash
+        $cache_hash,
     ) = validate_pos(
         @_,
         { type => OBJECT },
@@ -800,7 +839,7 @@ sub worker_cache_refresh($$$$)
     }
 
     # TODO, we should filter the relcache based on our worker's filter tables to save RAM
-    $cache_hash->{relcache}      = &get_relcache( $handle );
+    $cache_hash->{relcache}      = &get_relcache( $handle, $CONFIG_MANAGER->get_config_value( 'outer_fallback_to_largest' ) );
     $cache_hash->{table_mapping} = {};
     $cache_hash->{parse_tree} = &find_table_aliases(
         $handle,
@@ -937,14 +976,18 @@ sub worker_cache_refresh($$$$)
 }
 
 ## WORKER
-sub worker_entrypoint($$)
+sub worker_entrypoint($$$$)
 {
     my(
         $filter_tables,
-        $pk_maintenance_object
+        $pk_maintenance_object,
+        $enable_fast_delete,
+        $xid_idle_timeout,
       ) = validate_pos(
         @_,
         { type => ARRAYREF },
+        { type => SCALAR },
+        { type => SCALAR },
         { type => SCALAR },
     );
 
@@ -957,7 +1000,7 @@ sub worker_entrypoint($$)
     my $worker_shm_err       = 0;
     $LOCAL_PK_MAINTENANCE_OBJECT = $pk_maintenance_object;
 
-    if( $ENABLE_FAST_DELETE )
+    if( $enable_fast_delete )
     {
         $worker_shm_err = 1 unless( get_or_create_shm( $XID_KEY ) );
     }
@@ -1026,7 +1069,7 @@ sub worker_entrypoint($$)
             $handle,
             $pk_maintenance_object,
             $filter_tables,
-            $CACHE_HASH
+            $CACHE_HASH,
         );
 
         my $BLOWOUT_FACTORS = {};
@@ -1128,7 +1171,7 @@ sub worker_entrypoint($$)
                         $handle,
                         $pk_maintenance_object,
                         $filter_tables,
-                        $CACHE_HASH
+                        $CACHE_HASH,
                     );
 
                     update_status( { status => $WORKER_STATUS_REPLACE } );
@@ -1197,10 +1240,14 @@ sub worker_entrypoint($$)
                 if( $got_sighup )
                 {
                     $got_sighup = 0;
-                    if( $CLEAR_STATS_ON_SIGHUP )
+
+                    # reload configs before exiting loop
+                    $CONFIG_MANAGER->load_configs( 1 );
+
+                    if( $CONFIG_MANAGER->get_config_value( 'clear_stats_on_sighup' ) )
                     {
                         _log( $LOG_LEVEL_INFO, "Worker received HUP, clearing count approximations" );
-                        print Dumper( $BLOWOUT_FACTORS ) if( $DEBUG );
+                        print Dumper( $BLOWOUT_FACTORS ) if( $CONFIG_MANAGER->get_config_value( 'debug' ) );
                         $BLOWOUT_FACTORS = {};
                     }
 
@@ -1299,12 +1346,14 @@ sub worker_entrypoint($$)
 
             next if( scalar( keys %{$changes} ) == 0 );
             my $map = {
-                handle        => $handle,
-                query_data    => $CACHE_HASH->{parse_tree},
-                table_mapping => $CACHE_HASH->{table_mapping},
-                definition    => $CACHE_HASH->{definition},
-                relcache      => $CACHE_HASH->{relcache},
-                filters       => $changes,
+                handle                    => $handle,
+                query_data                => $CACHE_HASH->{parse_tree},
+                table_mapping             => $CACHE_HASH->{table_mapping},
+                definition                => $CACHE_HASH->{definition},
+                relcache                  => $CACHE_HASH->{relcache},
+                filters                   => $changes,
+                outer_fallback_to_largest => $CONFIG_MANAGER->get_config_value( 'outer_fallback_to_largest' ),
+                outer_grouped_rels_only   => $CONFIG_MANAGER->get_config_value( 'outer_grouped_rels_only' ),
             };
 
             my $where_expressions = generate_where_expressions( $map );
@@ -1316,9 +1365,9 @@ sub worker_entrypoint($$)
             }
 
             $NO_TEMP_TABLES = 0;
-            if( !$ENABLE_BLOWOUT_APPROXIMATE )
+            if( !$CONFIG_MANAGER->get_config_value( 'enable_blowout_approximate' ) )
             {
-                $NO_TEMP_TABLES = 1 if( $change_count < $TEMP_TABLE_CUTOFF );
+                $NO_TEMP_TABLES = 1 if( $change_count < $CONFIG_MANAGER->get_config_value( 'temp_table_cutoff' ) );
             }
             # Note that we iterate over the different bind positions so that we do not accidentally logically ANDing
             # two disparate changes together:
@@ -1351,7 +1400,7 @@ sub worker_entrypoint($$)
             my $filtered = 0;
             foreach my $bind_position( keys %$where_expressions )
             {
-                if( $CONSERVATIVE_TABLE_FILTERING )
+                if( $CONFIG_MANAGER->get_config_value( 'conservative_table_filtering' ) )
                 {
                     $map->{where_expressions}->{$bind_position} = $where_expressions->{$bind_position};
                 }
@@ -1401,7 +1450,7 @@ sub worker_entrypoint($$)
                 my $total_blowout = 0;
                 my $unique_ft     = '';
                 my $force_average_update = 0;
-                if( $ENABLE_BLOWOUT_APPROXIMATE )
+                if( $CONFIG_MANAGER->get_config_value( 'enable_blowout_approximate' ) )
                 {
                     foreach my $filter_table( keys( %$change_metadata ) )
                     {
@@ -1417,7 +1466,7 @@ sub worker_entrypoint($$)
                           * ( $BLOWOUT_FACTORS->{$filter_table}->{approx} / $BLOWOUT_FACTORS->{$filter_table}->{count} );
                         $BLOWOUT_FACTORS->{$filter_table}->{updates} = $BLOWOUT_FACTORS->{$filter_table}->{updates} + 1;
 
-                        if( $BLOWOUT_FACTORS->{$filter_table}->{updates} >= $CHANGES_BETWEEN_REAVG )
+                        if( $BLOWOUT_FACTORS->{$filter_table}->{updates} >= $CONFIG_MANAGER->get_config_value( 'changes_between_reavg' ) )
                         {
                             $force_average_update = 1 if( scalar( keys %$change_metadata ) == 1 );
                         }
@@ -1427,7 +1476,7 @@ sub worker_entrypoint($$)
                     {
                         my $c_start = [ gettimeofday() ];
                         my $actual_change_count = get_change_volume( $handle, $query, $CACHE_HASH );
-                        $NO_TEMP_TABLES = 1 if( $actual_change_count <= $TEMP_TABLE_CUTOFF );
+                        $NO_TEMP_TABLES = 1 if( $actual_change_count <= $CONFIG_MANAGER->get_config_value( 'temp_table_cutoff' ) );
                         my $c_dur = tv_interval( $c_start, [ gettimeofday() ] );
                         _log(
                             $LOG_LEVEL_DEBUG,
@@ -1468,12 +1517,12 @@ sub worker_entrypoint($$)
                     else
                     {
                         # We have enough approximate data to not run the above count query
-                        $NO_TEMP_TABLES = 1 if( $total_blowout <= $TEMP_TABLE_CUTOFF );
+                        $NO_TEMP_TABLES = 1 if( $total_blowout <= $CONFIG_MANAGER->get_config_value( 'temp_table_cutoff' ) );
                         _log( $LOG_LEVEL_DEBUG, "Approx change count: $total_blowout, NTT: $NO_TEMP_TABLES for $CACHE_HASH->{name}" );
                     }
                 }
 RETRY_XID:
-                if( $ENABLE_FAST_DELETE )
+                if( $enable_fast_delete )
                 {
                     do_lock( $XID_KEY, $READ_LOCK );
                     $XID_MAP = readmem( $XID_KEY );
@@ -1565,7 +1614,7 @@ RETRY_XID:
                         goto FD_FALLBACK;
                     }
 
-                    unless( $aged_handle->do( "SET idle_session_timeout = $XID_IDLE_TIMEOUT" ) )
+                    unless( $aged_handle->do( "SET idle_session_timeout = ?", undef, $xid_idle_timeout ) )
                     {
                         $can_fast_delete = 0;
                         _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
@@ -1580,7 +1629,7 @@ RETRY_XID:
                     }
 
 
-                    unless( $aged_handle->do( "SET idle_in_transaction_session_timeout = $XID_IDLE_TIMEOUT" ) )
+                    unless( $aged_handle->do( "SET idle_in_transaction_session_timeout = ?", undef, $xid_idle_timeout ) )
                     {
                         $can_fast_delete = 0;
                         _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
@@ -1737,7 +1786,8 @@ FD_FALLBACK:
                     $handle,
                     $temp_table,
                     $query,
-                    $CACHE_HASH
+                    $CACHE_HASH,
+                    $CONFIG_MANAGER->get_config_value( 'bulk_action_cutoff' ),
                 );
 
                 unless( $update_result )
@@ -1752,7 +1802,7 @@ FD_FALLBACK:
                 $update_time = tv_interval( $update_start, [ gettimeofday() ] );
                 _log( $LOG_LEVEL_DEBUG, "Update ($CACHE_HASH->{name}) took $update_time seconds" );
 
-                if( $temp_table->{count} <= $BULK_ACTION_CUTOFF )
+                if( $temp_table->{count} <= $CONFIG_MANAGER->get_config_value( 'bulk_action_cutoff' ) )
                 {
                     # We perform insert/update action with one fell swoop in generage_update_statement iff
                     # the above condition is met.
@@ -1796,13 +1846,13 @@ FD_FALLBACK:
                     }
                 }
 
-                last unless( $CONSERVATIVE_TABLE_FILTERING );
+                last unless( $CONFIG_MANAGER->get_config_value( 'conservative_table_filtering' ) );
             }
 
             &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
             update_status( { status => $WORKER_STATUS_IDLE } );
 
-            select( undef, undef, undef, $SLEEP_TIMER );
+            select( undef, undef, undef, $CONFIG_MANAGER->get_config_value( 'sleep_timer' ) );
         } # postgres driver main loop
     }
     else
@@ -1818,15 +1868,16 @@ FD_FALLBACK:
 
 ## MAIN PROGRAM
 # Parse and validate arguments
-our( $opt_D, $opt_d, $opt_U, $opt_h, $opt_p );
+our( $opt_D, $opt_d, $opt_U, $opt_h, $opt_p, $opt_c );
 my @original_argv = @ARGV;
 
-usage( 'Invalid arguments' ) unless( getopts( 'd:U:h:p:D' ) );
+usage( 'Invalid arguments' ) unless( getopts( 'd:U:h:p:c:D' ) );
 
-my $dbname = $opt_d;
-my $host   = $opt_h;
-my $port   = $opt_p;
-my $user   = $opt_U;
+my $dbname      = $opt_d;
+my $host        = $opt_h;
+my $port        = $opt_p;
+my $user        = $opt_U;
+my $config_file = $opt_c;
 $DAEMONIZE = $opt_D;
 
 $port = 5432 unless( defined( $port ) );
@@ -1836,6 +1887,14 @@ usage( 'Port number out of rang' ) if( $port < 1 || $port > 65535 );
 usage( 'Invalid database name' ) if( !defined( $dbname ) || length( $dbname ) == 0 );
 usage( 'Invalid username' ) if( !defined( $user ) || length( $user ) == 0 );
 usage( 'Invalid host name' ) if( !defined( $host ) || length( $host ) == 0 );
+
+$CONFIG_MANAGER = ConfigManager->new( config_file => $config_file );
+
+# These configs that cannot be reloaded and only take effect on restart
+my $ENABLE_FAST_DELETE = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
+my $XID_BUCKET_TIMES   = $CONFIG_MANAGER->get_config_value( 'xid_bucket_times' );
+my $XID_BUCKET_COUNT   = $CONFIG_MANAGER->get_config_value( 'xid_bucket_count' ); # derived from XID_BUCKET_TIMES
+my $XID_IDLE_TIMEOUT   = $CONFIG_MANAGER->get_config_value( 'xid_idle_timeout' ); # derived from XID_BUCKET_TIMES
 
 my $conn_string = "dbi:Pg:dbname=${dbname};host=${host};port=${port}";
 my $pg_conn_string = "dbi:Pg:dbname=postgres;host=${host};port=${port}";
@@ -1934,7 +1993,9 @@ else
         {
             &worker_entrypoint(
                 $filter_tables,
-                $pk_maintenance_object
+                $pk_maintenance_object,
+                $ENABLE_FAST_DELETE,
+                $XID_IDLE_TIMEOUT,
             );
             exit( 0 );
         }
@@ -1962,7 +2023,13 @@ else
 }
 
 &set_program_name( undef, "parent process" );
-parent_loop( $worker_mapping );
+parent_loop(
+    $worker_mapping,
+    $ENABLE_FAST_DELETE,
+    $XID_BUCKET_TIMES,
+    $XID_BUCKET_COUNT,
+    $XID_IDLE_TIMEOUT,
+);
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
 if( defined $SKIP_SHM_CLEANUP && $SKIP_SHM_CLEANUP )
 {

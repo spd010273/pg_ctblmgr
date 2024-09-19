@@ -36,85 +36,14 @@ Readonly::Scalar our $SQL_STATE_ADMIN_TERM      :Export( :MANDATORY ) => '57P01'
 Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014';
 
 ###############################################################################
-################################ USER GLOBALS #################################
-
-# Enable verbose messaging related to process state
-Readonly::Scalar our $DEBUG                        :Export( :MANDATORY ) => 0;
-
-# In situations where we can normally perform a fast delete but the aged data set
-# contains no rows, we will fall back to a slow delete in cases where this flag
-# is set.
-Readonly::Scalar our $CONSERVATIVE_FAST_DELETE     :Export( :MANDATORY ) => 0;
-
-# Number of times to retry a query prior to giving up and going into an error
-# condition.
-Readonly::Scalar our $MAX_QUERY_RETRIES            :Export( :MANDATORY ) => 3;
-
-###############################################################################
-############################## QUERY PERFORMANCE ##############################
-
-# Enables logic that correlates changes to base tables to changes in cache table
-# output on a row-count basis. This helps pg_ctblmgr determine whether it should
-# use temp tables or common table expressions when performing its DML updates
-# to cache tables. If this is disabled, pg_ctblmgr will use the raw change count
-# to determine if temp tables should be used. This can result no costly count
-# queries, but also inefficient DML if a highly normalized table receives an
-# update, resulting in large changes in the cache table outputs. Because of this
-# if the blowout approximation logic is disabled, it's recommended to set
-# temp_table_cutoff to a smaller value
-Readonly::Scalar our $ENABLE_BLOWOUT_APPROXIMATE   :Export( :MANDATORY ) => 1;
-
-Readonly::Scalar our $CLEAR_STATS_ON_SIGHUP        :Export( :MANDATORY ) => 0;
-
-# Above this number of changes in a given worker, the worker will use temp tables
-# in the following situations:
-#  - Storing rows fast-forwarded from a historic timeline
-#  - Storing the changed rows of a dataset when doing UPDATE / INSERT ops
-# Below this threshold, workers will opt for CTE (Common Table Expressions) and
-# VALUES() statements. This will reduce the number of MATERIALIZE operations a
-# server experiences
-Readonly::Scalar our $TEMP_TABLE_CUTOFF            :Export( :MANDATORY ) => 100;
-
-# Number of changes that occur between updates to the blowout_factors of
-# varios base tables as they relate to cache table output.
-Readonly::Scalar our $CHANGES_BETWEEN_REAVG        :Export( :MANDATORY ) => 5;
-
-# Enable fast delete functionality - 1 is enable, 0 is disable
-Readonly::Scalar our $ENABLE_FAST_DELETE           :Export( :MANDATORY ) => 1;
-
-Readonly::Array  our @XID_BUCKET_TIMES             :Export( :MANDATORY ) => ( 3, 300 );
-Readonly::Scalar our $XID_BUCKET_COUNT             :Export( :MANDATORY ) => scalar( @XID_BUCKET_TIMES );
-
-# When creating cache tables, use LIMIT / OFFSET to populate the table rather
-# than one insert
-Readonly::Scalar our $BATCHED_CREATE               :Export( :MANDATORY ) => 0;
-
-# Batch size for the above batched create mode.
-Readonly::Scalar our $BATCH_SIZE                   :Export( :MANDATORY ) => 1000000;
-
-# Number of temp table tuple we toggle into a bulk update mode ( delete +
-# insert ) rather than doing update.
-Readonly::Scalar our $BULK_ACTION_CUTOFF           :Export( :MANDATORY ) => 100000;
-
-# In cases where multiple relations are involved in a single outer join, the
-# filter for the outer relation only goes to the grouped relation, if present.
-Readonly::Scalar our $OUTER_GROUPED_RELS_ONLY      :Export( :MANDATORY ) => 1;
-
-# In cases where multiple relations are involved in a single outer join, and no
-# group by is present we will only filter the largest relation.
-Readonly::Scalar our $OUTER_FALLBACK_TO_LARGEST    :Export( :MANDATORY ) => 1;
-
-# in cases where bulk changes would apply filters to different sections of the
-# query, do not attempt to combine those filters into the same query to avoid
-# accidentally logically ANDing them.
-Readonly::Scalar our $CONSERVATIVE_TABLE_FILTERING :Export( :MANDATORY ) => 1;
 
 # Globals initialized at runtime start
-our $PARENT_PID    :Export( :MANDATORY ) = 0;
-our $DAEMONIZE     :Export( :MANDATORY ) = 0;
-our $LOG_FH        :Export( :MANDATORY ) = undef;
-our $LOG_FILE      :Export( :MANDATORY ) = '';
-our $PID_LOCKSTATE :Export( :MANDATORY ) = '';
+our $PARENT_PID     :Export( :MANDATORY ) = 0;
+our $DAEMONIZE      :Export( :MANDATORY ) = 0;
+our $LOG_FH         :Export( :MANDATORY ) = undef;
+our $LOG_FILE       :Export( :MANDATORY ) = '';
+our $PID_LOCKSTATE  :Export( :MANDATORY ) = '';
+our $CONFIG_MANAGER :Export( :MANDATORY ) = undef;
 
 Readonly::Scalar my $USAGE => <<"USAGE";
     Usage:
@@ -122,6 +51,7 @@ Readonly::Scalar my $USAGE => <<"USAGE";
         -U <database user>
         -h <database host name>
         -d <database name>
+        [ -c <configuration file> ]
         [ -p <database port> ]
         [ -D ( do not daemonize ) ]
 USAGE
@@ -144,7 +74,9 @@ sub _log($$) :Export( :MANDATORY )
         }
     }
 
-    return if( $log_level == $LOG_LEVEL_DEBUG && !$DEBUG );
+    my $debug = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'debug' ) : 0;
+
+    return if( $log_level == $LOG_LEVEL_DEBUG && !$debug );
 
     if( $log_level == $LOG_LEVEL_DEBUG )
     {
