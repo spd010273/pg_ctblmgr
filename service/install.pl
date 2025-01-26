@@ -29,6 +29,7 @@ use Params::Validate qw( :all );
 use Getopt::Std;
 use File::Copy;
 use File::Path qw( make_path );
+use Cwd qw( abs_path );
 use IO::Interactive qw( is_interactive );
 
 Readonly my $LOG_DIR             => '/var/log/pg_ctblmgr/';
@@ -45,7 +46,7 @@ Readonly my $START_SH => <<BASH;
 #!/bin/bash
 #    This script will start the pg_ctblmgr daemons
 trap "" SIGHUP
-__INSTALL_DIR__/pg_ctblmgr -U __USERNAME__ -d __DBNAME__ -h __HOSTNAME__ -p __PORT__ -D
+__INSTALL_DIR__/pg_ctblmgr -U __USERNAME__ -d __DBNAME__ -h __HOSTNAME__ -p __PORT__ -c __CONFIG__ -D
 BASH
 
 Readonly my $STOP_SH => <<BASH;
@@ -66,6 +67,7 @@ my $hostname;
 my $username;
 my $port;
 my $dbname;
+my $config_file;
 
 sub get_user_input($)
 {
@@ -175,6 +177,21 @@ sub get_dbname()
     return;
 }
 
+sub get_config()
+{
+    if( is_interactive() )
+    {
+        $config_file = get_user_input( 'Please enter a path to a config file:' );
+
+    }
+
+    if( not defined $config_file or not -e $config_file )
+    {
+        croak 'No config file provided';
+    }
+
+    return;
+}
 
 ## Main Program
 if( $EFFECTIVE_USER_ID != 0 )
@@ -207,14 +224,15 @@ build_repo();
 my $install_dir = getcwd();
 chdir( $dir );
 
-our( $opt_d, $opt_U, $opt_p, $opt_h, $opt_E, $opt_W );
+our( $opt_d, $opt_U, $opt_p, $opt_h, $opt_c );
 
-unless( getopts( 'd:U:p:h:' ) )
+unless( getopts( 'd:U:p:h:c:' ) )
 {
     get_dbname();
     get_username();
     get_hostname();
     get_port();
+    get_config();
 }
 
 GET_ARGS:
@@ -254,6 +272,16 @@ else
     get_port();
 }
 
+if( defined $opt_c and -e $opt_c )
+{
+    $config_file = $opt_c;
+}
+else
+{
+    get_config();
+}
+
+$config_file = abs_path( $config_file );
 
 unless( test_connection() )
 {
@@ -262,6 +290,7 @@ unless( test_connection() )
 }
 
 my $start_shell_script = $START_SH;
+$start_shell_script    =~ s/__CONFIG__/$config_file/g;
 $start_shell_script    =~ s/__INSTALL_DIR__/$install_dir/g;
 $start_shell_script    =~ s/__USERNAME__/$username/g;
 $start_shell_script    =~ s/__DBNAME__/$dbname/g;
@@ -269,6 +298,7 @@ $start_shell_script    =~ s/__HOSTNAME__/$hostname/g;
 $start_shell_script    =~ s/__PORT__/$port/g;
 
 my $stop_shell_script  = $STOP_SH;
+$stop_shell_script     =~ s/__CONFIG__/$config_file/g;
 $stop_shell_script     =~ s/__INSTALL_DIR__/$install_dir/g;
 $stop_shell_script     =~ s/__USERNAME__/$username/g;
 $stop_shell_script     =~ s/__DBNAME__/$dbname/g;
@@ -276,6 +306,7 @@ $stop_shell_script     =~ s/__HOSTNAME__/$hostname/g;
 $stop_shell_script     =~ s/__PORT__/$port/g;
 
 my $reload_shell_script = $RELOAD_SH;
+$reload_shell_script    =~ s/__CONFIG__/$config_file/g;
 $reload_shell_script    =~ s/__INSTALL_DIR__/$install_dir/g;
 $reload_shell_script    =~ s/__USERNAME__/$username/g;
 $reload_shell_script    =~ s/__DBNAME__/$dbname/g;

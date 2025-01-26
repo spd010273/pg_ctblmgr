@@ -9,6 +9,8 @@ use Perl6::Export::Attrs;
 use FindBin;
 use English qw( -no_match_vars );
 use Params::Validate qw( :all );
+use Readonly;
+
 use JSON::XS;
 use IO::Select;
 use IO::Handle;
@@ -17,8 +19,20 @@ use Data::Dumper;
 
 use lib "$FindBin::Bin";
 use Util;
+use ConfigManager;
 
 my $PRINT_QUERIES = 0; # Debug only
+
+# Default configuration values from ConfigManager catalog
+# This is to allow the lib functions to be used without initializing the ConfigManager
+Readonly my $DEFAULT_BATCHED_CREATE           => $CONFIG_CATALOG{'batched_create'}->{value};
+Readonly my $DEFAULT_BATCH_SIZE               => $CONFIG_CATALOG{'batch_size'}->{value};
+Readonly my $DEFAULT_CONSERVATIVE_FAST_DELETE => $CONFIG_CATALOG{'conservative_fast_delete'}->{value};
+Readonly my $DEFAULT_MAX_QUERY_RETRIES        => $CONFIG_CATALOG{'max_query_retries'}->{value};
+Readonly my $DEFAULT_TCP_KEEPALIVES_IDLE      => $CONFIG_CATALOG{'db_conn_tcp_keepalives_idle'}->{value};
+Readonly my $DEFAULT_TCP_KEEPALIVES_INTERVAL  => $CONFIG_CATALOG{'db_conn_tcp_keepalives_interval'}->{value};
+Readonly my $DEFAULT_TCP_USER_TIMEOUT         => $CONFIG_CATALOG{'db_conn_tcp_user_timeout'}->{value};
+
 $OUTPUT_AUTOFLUSH = 1;
 our $CONNECTION_MAP :Export( :MANDATORY );
 our $LOCAL_PK_MAINTENANCE_OBJECT :Export( :MANDATORY );
@@ -30,9 +44,6 @@ our $SKIP_LOCK_CHECK             :Export( :MANDATORY ) = 0;
 our $BACKEND_PID                 :Export( :MANDATORY ) = 0;
 our $NO_TEMP_TABLES              :Export( :MANDATORY ) = 0;
 
-Readonly::Scalar my $TCP_KEEPALIVE          => 60;
-Readonly::Scalar my $TCP_KEEPALIVE_INTERVAL => 5; # seconds
-Readonly::Scalar my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 Readonly::Scalar my $GET_TABLE_COLUMNS_DATATYPES => <<END_SQL;
     SELECT a.attname AS column_name,
            t.typname AS datatype
@@ -216,31 +227,6 @@ FULL OUTER JOIN tt_requested r
         OR r.column_name IS NULL
 END_SQL
 
-my $CREATE_CACHE_TABLE;
-if( $BATCHED_CREATE )
-{
-    $CREATE_CACHE_TABLE = <<END_SQL;
-    CREATE TABLE IF NOT EXISTS __TABLE__ AS
-    (
-        WITH tt_foo AS
-        (
-            __DEFINITION__
-        )
-            SELECT *
-              FROM tt_foo
-             LIMIT 0
-    );
-END_SQL
-}
-else
-{
-    $CREATE_CACHE_TABLE = <<END_SQL;
-    CREATE TABLE IF NOT EXISTS __TABLE__ AS
-    (
-        __DEFINITION__
-    );
-END_SQL
-}
 
 Readonly::Scalar my $CREATE_POPULATE => <<END_SQL;
 WITH tt_def AS
@@ -684,6 +670,43 @@ sub try_lock($) :Export( :MANDATORY )
     }
 
     return 0;
+}
+
+sub _get_create_cache_table_query
+{
+    my ( $batched_create ) = validate_pos(
+        @_,
+        { type => SCALAR },
+    );
+
+    my $create_cache_table_query;
+
+    if( $batched_create )
+    {
+        $create_cache_table_query = <<END_SQL;
+        CREATE TABLE IF NOT EXISTS __TABLE__ AS
+        (
+            WITH tt_foo AS
+            (
+                __DEFINITION__
+            )
+                SELECT *
+                  FROM tt_foo
+                 LIMIT 0
+        );
+END_SQL
+    }
+    else
+    {
+        $create_cache_table_query = <<END_SQL;
+        CREATE TABLE IF NOT EXISTS __TABLE__ AS
+        (
+            __DEFINITION__
+        );
+END_SQL
+    }
+
+    return $create_cache_table_query;
 }
 
 sub get_ct_definition($$$) :Export( :MANDATORY )
@@ -1188,7 +1211,7 @@ sub db_connect(;$$) :Export( :MANDATORY )
 
     until( defined( $handle ) && $handle->ping() > 0 && $handle->pg_ping() > 0 )
     {
-        if( $DEBUG )
+        if( defined $CONFIG_MANAGER && $CONFIG_MANAGER->get_config_value( 'debug' ) )
         {
             _log( $LOG_LEVEL_INFO, 'Not connected to DB, reconnecting...' );
         }
@@ -1252,12 +1275,16 @@ sub db_connect(;$$) :Export( :MANDATORY )
         }
     }
 
-	_log( $LOG_LEVEL_INFO, 'Reconnected to database' ) if( $connect_count > 0 );
-	$handle->do( "SET tcp_keepalives_idle = $TCP_KEEPALIVE" );
-	$handle->do( "SET tcp_keepalives_interval = $TCP_KEEPALIVE_INTERVAL" );
-	$handle->do( "SET tcp_user_timeout = $TCP_USER_TIMEOUT" );
+    my $tcp_keepalives_idle     = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'db_conn_tcp_keepalives_idle' ) : $DEFAULT_TCP_KEEPALIVES_IDLE;
+    my $tcp_keepalives_interval = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'db_conn_tcp_keepalives_interval' ) : $DEFAULT_TCP_KEEPALIVES_INTERVAL;
+    my $tcp_user_timeout        = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'db_conn_tcp_user_timeout' ) : $DEFAULT_TCP_USER_TIMEOUT;
 
-#    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $DEBUG );
+	_log( $LOG_LEVEL_INFO, 'Reconnected to database' ) if( $connect_count > 0 );
+	$handle->do( "SET tcp_keepalives_idle = ?", undef, $tcp_keepalives_idle );
+	$handle->do( "SET tcp_keepalives_interval = ?", undef, $tcp_keepalives_interval );
+	$handle->do( "SET tcp_user_timeout = ?", undef, $tcp_user_timeout );
+
+#    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $CONFIG_MANAGER->get_config_value( 'debug' ) );
 
     if( !defined( $is_aged ) && $PROCESS_ID != $PARENT_PID )
     {
@@ -1332,11 +1359,12 @@ sub try_query($$;$) :Export( :MANDATORY )
     my $last_sql_state    = '';
     my $sleep_backoff     = 1;
     my $try_count         = 0;
+    my $max_query_retries = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'max_query_retries' ) : $DEFAULT_MAX_QUERY_RETRIES;
 
     #_log( $LOG_LEVEL_DEBUG, "Executing '$query'" );
     RETRY_CONN:
     $retry_counter++;
-    return undef if( $retry_counter > $MAX_QUERY_RETRIES );
+    return undef if( $retry_counter > $max_query_retries );
 
     $handle = &db_connect( $handle );
     
@@ -1394,7 +1422,7 @@ sub try_query($$;$) :Export( :MANDATORY )
 
     until( $sth->execute() )
     {
-        if( $DEBUG )
+        if( defined $CONFIG_MANAGER && $CONFIG_MANAGER->get_config_value( 'debug' ) )
         {
             _log(
                 $LOG_LEVEL_ERROR,
@@ -1427,7 +1455,7 @@ sub try_query($$;$) :Export( :MANDATORY )
         $last_backoff_time = $sleep_backoff;
         $sleep_backoff    += int( rand( 2 ** $try_count - 1 ) );
 
-        return undef if( $try_count >= $MAX_QUERY_RETRIES );
+        return undef if( $try_count >= $max_query_retries );
     }
 
     return $sth;
@@ -1666,8 +1694,11 @@ sub create_cache_table($$)
     my $schema       = $ct_hash->{schema};
     my $name         = $ct_hash->{name};
     my $definition   = $ct_hash->{definition};
+
+    my $batched_create = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'batched_create' ) : $DEFAULT_BATCHED_CREATE;
+
     $handle->do( "SET application_name = 'create: $name'" );
-    my $create_query = $CREATE_CACHE_TABLE;
+    my $create_query = _get_create_cache_table_query( $batched_create );
     $create_query    =~ s/__TABLE__/${schema}.${name}/;
     $create_query    =~ s/__DEFINITION__/$definition/;
 
@@ -1679,7 +1710,7 @@ sub create_cache_table($$)
         return;
     }
 
-    if( $BATCHED_CREATE )
+    if( $batched_create )
     {
         _log( $LOG_LEVEL_DEBUG, "Performing batch population of $name" );
         $handle->do( "SET application_name = 'batch populate: $name'" );
@@ -1691,7 +1722,10 @@ sub create_cache_table($$)
         $populate_q =~ s/__TABLE__/${schema}.${name}/;
         $populate_q =~ s/__DEFINITION__/$definition/;
         $populate_q =~ s/__ORDERBY__/$initial_orderby/;
-        $populate_q =~ s/__LIMIT__/$BATCH_SIZE/;
+
+        my $batch_size = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'batch_size' ) : $DEFAULT_BATCH_SIZE;
+
+        $populate_q =~ s/__LIMIT__/$batch_size/;
 
         while( !$done )
         {
@@ -1706,7 +1740,7 @@ sub create_cache_table($$)
             }
 
             $done = 1 if( $check_sth->rows() == 0 );
-            $offset += $BATCH_SIZE;
+            $offset += $batch_size;
         }
     }
 
@@ -2032,19 +2066,21 @@ sub get_cache_table_unique($$$) :Export( :MANDATORY )
     return $uniques;
 }
 
-sub generate_update_statement($$$$) :Export( :MANDATORY )
+sub generate_update_statement($$$$$) :Export( :MANDATORY )
 {
     my(
         $handle,
         $temp_table,
         $query,
-        $cache_hash
+        $cache_hash,
+        $bulk_action_cutoff,
       ) = validate_pos(
         @_,
         { type => OBJECT | UNDEF },
         { type => HASHREF },
         { type => SCALAR },
         { type => HASHREF },
+        { type => SCALAR },
     );
 
     my $cache_table_schema = $cache_hash->{schema};
@@ -2084,7 +2120,7 @@ sub generate_update_statement($$$$) :Export( :MANDATORY )
     }
 
 
-    if( $temp_table->{count} > $BULK_ACTION_CUTOFF )
+    if( $temp_table->{count} > $bulk_action_cutoff )
     {
         my $columns = join( ',', @$table_columns );
         _log(
@@ -2389,7 +2425,9 @@ END_SQL
 
     if( $aged_rows == 0 )
     {
-        if( $CONSERVATIVE_FAST_DELETE )
+        my $conservative_fast_delete = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'conservative_fast_delete' ) : $DEFAULT_CONSERVATIVE_FAST_DELETE;
+
+        if( $conservative_fast_delete )
         {
             _log( $LOG_LEVEL_DEBUG, "Insufficient data ( $aged_rows rows ) in aged handle" );
             $insert_sth->finish() if( $insert_sth );
