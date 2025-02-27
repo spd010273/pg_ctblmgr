@@ -153,7 +153,6 @@ static void IntoClause_out( StringInfo, IntoClause * );
 static void JoinExpr_out( StringInfo, JoinExpr * );
 static void JoinInfo_out( StringInfo, Join * ); // Supplemental info
 static void JoinPathInfo_out( StringInfo, JoinPath * ); // Supplemental info
-static void Join_out( StringInfo, Join * );
 static void Limit_out( StringInfo, Limit * );
 static void List_out( StringInfo, List * );
 static void LockingClause_out( StringInfo, LockingClause * );
@@ -190,7 +189,6 @@ static void PlannerGlobal_out( StringInfo, PlannerGlobal * );
 static void PlannerInfo_out( StringInfo, PlannerInfo * );
 static void PlannerParamItem_out( StringInfo, PlannerParamItem * );
 static void PlanRowMark_out( StringInfo, PlanRowMark * );
-static void Plan_out( StringInfo, Plan * );
 static void Query_out( StringInfo, Query * );
 static void RangeFunction_out( StringInfo, RangeFunction * );
 static void RangeSubselect_out( StringInfo, RangeSubselect * );
@@ -209,7 +207,6 @@ static void RowExpr_out( StringInfo, RowExpr * );
 static void RowMarkClause_out( StringInfo, RowMarkClause * );
 static void ScalarArrayOpExpr_out( StringInfo, ScalarArrayOpExpr * );
 static void ScanInfo_out( StringInfo, Scan * ); // Supplemental info
-static void Scan_out( StringInfo, Scan * );
 static void SelectStmt_out( StringInfo, SelectStmt * );
 static void SeqScan_out( StringInfo, SeqScan * );
 static void SetOperationStmt_out( StringInfo, SetOperationStmt * );
@@ -231,7 +228,14 @@ static void TypeName_out( StringInfo, TypeName * );
 static void UniquePath_out( StringInfo, UniquePath * );
 static void Unique_out( StringInfo, Unique * );
 static void ValuesScan_out( StringInfo, ValuesScan * );
+#if PG_VERSION_NUM >= 150000
+static void ValUnion_out( StringInfo, union ValUnion * );
+#else
 static void Value_out( StringInfo, Value * );
+static void Scan_out( StringInfo, Scan * );
+static void Plan_out( StringInfo, Plan * );
+static void Join_out( StringInfo, Join * );
+#endif // PG_VERSION_NUM
 static void Var_out( StringInfo, Var * );
 static void WindowAgg_out( StringInfo, WindowAgg * );
 static void WindowClause_out( StringInfo, WindowClause * );

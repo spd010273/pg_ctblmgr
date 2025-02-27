@@ -12,7 +12,7 @@ Datum get_parse_tree( PG_FUNCTION_ARGS )
 
     sql = text_to_cstring( sql_in );
     tree = raw_parser( sql
-    #if PG_VERSION_NUM >= 14000
+    #if PG_VERSION_NUM >= 140000
     , RAW_PARSE_DEFAULT
     #endif // PG_VERSION_NUM
     );
@@ -345,6 +345,20 @@ static char * enum_NodeTag( NodeTag nt )
 
     switch( nt )
     {
+#if PG_VERSION_NUM < 150000
+        case T_Null:
+            return "Null";
+        case T_Plan:
+            return "Plan";
+        case T_Join:
+            return "Join";
+        case T_Expr:
+            return "Expr";
+        case T_MemoryContext:
+            return "MemoryContext";
+        case T_Scan:
+            return "Scan";
+#endif // PG_VERSION_NUM
         case T_Invalid:
             return "INVALID";
         // Tags for executor nodes
@@ -365,8 +379,6 @@ static char * enum_NodeTag( NodeTag nt )
         case T_TupleTableSlot:
             return "TupleTableSlot";
         // Tags for plan nodes
-        case T_Plan:
-            return "Plan";
         case T_Result:
             return "Result";
         case T_ProjectSet:
@@ -383,8 +395,6 @@ static char * enum_NodeTag( NodeTag nt )
             return "BitmapAnd";
         case T_BitmapOr:
             return "BitmapOr";
-        case T_Scan:
-            return "Scan";
         case T_SeqScan:
             return "SeqScan";
         case T_SampleScan:
@@ -419,8 +429,6 @@ static char * enum_NodeTag( NodeTag nt )
             return "ForeignScan";
         case T_CustomScan:
             return "CustomScan";
-        case T_Join:
-            return "Join";
         case T_NestLoop:
             return "NestLoop";
         case T_MergeJoin:
@@ -477,8 +485,6 @@ static char * enum_NodeTag( NodeTag nt )
             return "RangeVar";
         case T_TableFunc:
             return "TableFunc";
-        case T_Expr:
-            return "Expr";
         case T_Var:
             return "Var";
         case T_Const:
@@ -702,8 +708,6 @@ static char * enum_NodeTag( NodeTag nt )
         case T_StatisticExtInfo:
             return "StatisticExtInfo";
         // Memory node tags
-        case T_MemoryContext:
-            return "MemoryContext";
         case T_AllocSetContext:
             return "AllocSetContext";
         case T_SlabContext:
@@ -711,8 +715,6 @@ static char * enum_NodeTag( NodeTag nt )
         case T_GenerationContext:
             return "GenerationContext";
         // Value nodes
-        case T_Value:
-            return "Value";
         case T_Integer:
             return "Integer";
         case T_Float:
@@ -721,8 +723,6 @@ static char * enum_NodeTag( NodeTag nt )
             return "String";
         case T_BitString:
             return "BitString";
-        case T_Null:
-            return "Null";
         // List nodes
         case T_List:
             return "List";
@@ -1104,6 +1104,29 @@ static char * enum_SetOperation( SetOperation so )
 }
 
 // Node -> JSON fragment helpers
+#if PG_VERSION_NUM < 150000
+static void Join_out( StringInfo str, Join * node )
+{
+    appendStringInfoString( str, "\"name\":\"JOIN\"" );
+    JoinInfo_out( str, ( Join * ) node );
+    return;
+}
+
+static void Plan_out( StringInfo str, Plan * node )
+{
+    appendStringInfoString( str, "\"name\":\"PLAN\"" );
+    PlanInfo_out( str, ( Plan * ) node );
+    return;
+}
+
+static void Scan_out( StringInfo str, Scan * node )
+{
+    appendStringInfoString( str, "\"name\":\"SCAN\"" );
+    ScanInfo_out( str, ( Scan * ) node );
+    return;
+}
+#endif // PG_VERSION_NUM
+
 static void Aggref_out( StringInfo str, Aggref * node )
 {
     appendStringInfoString( str, "\"name\":\"AGGREF\"" );
@@ -1256,7 +1279,14 @@ static void A_Const_out( StringInfo str, A_Const * node )
 {
     appendStringInfoString( str, "\"name\":\"A_CONST\"" );
     appendStringInfo(str, ",\"val\":");
+#if PG_VERSION_NUM >= 150000
+    if( node->isnull )
+        appendStringInfo( str, "null" );
+    else
+        ValUnion_out( str, &(node->val) );
+#else
     Value_out( str, &(node->val) );
+#endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"location\":%d", node->location );
     return;
 }
@@ -1426,6 +1456,31 @@ static void BitmapOr_out( StringInfo str, BitmapOr * node )
     return;
 }
 
+#if PG_VERSION_NUM >= 150000
+static void Bitmapset_out( StringInfo str, Bitmapset * bms )
+{
+    int x     = -1;
+    int first = 1;
+
+    appendStringInfoString( str, "{\"type\":\"Bitmapset\",\"value\":[" );
+
+    while( ( x = bms_next_member( bms, x ) ) >= 0 )
+    {
+        if( first )
+        {
+            appendStringInfo( str, "%d", x );
+            first = 0;
+        }
+        else
+        {
+            appendStringInfo( str, ",%d", x );
+        }
+    }
+
+    appendStringInfoString( str, "]}" );
+    return;
+}
+#else
 static void Bitmapset_out( StringInfo str, Bitmapset * bms )
 {
     Bitmapset * tmpset = NULL;
@@ -1434,7 +1489,7 @@ static void Bitmapset_out( StringInfo str, Bitmapset * bms )
 
     appendStringInfoString( str, "{\"type\":\"Bitmapset\",\"value\":[" );
     tmpset = bms_copy( bms );
-
+    
     while( ( x = bms_first_member( tmpset ) ) >= 0 )
     {
         if( first )
@@ -1452,6 +1507,7 @@ static void Bitmapset_out( StringInfo str, Bitmapset * bms )
     appendStringInfoString( str, "]}" );
     return;
 }
+#endif // PG_VERSION_NUM
 
 static void BooleanTest_out( StringInfo str, BooleanTest * node )
 {
@@ -1983,7 +2039,6 @@ static void EquivalenceClass_out( StringInfo str, EquivalenceClass * node )
     Bitmapset_out( str, node->ec_relids );
     appendStringInfo( str, ",\"ec_has_const\":%s", topmost->ec_has_const ? "true" : "false" );
     appendStringInfo( str, ",\"ec_has_volatile\":%s", topmost->ec_has_volatile ? "true" : "false" );
-    appendStringInfo( str, ",\"ec_below_outer_join\":%s", topmost->ec_below_outer_join ? "true" : "false" );
     appendStringInfo( str, ",\"ec_broken\":%s", topmost->ec_broken ? "true" : "false" );
     appendStringInfo( str, ",\"ec_sortref\":%u", topmost->ec_sortref );
     return;
@@ -2354,13 +2409,6 @@ static void JoinPathInfo_out( StringInfo str, JoinPath * node )
     Node_out( str, node->innerjoinpath );
     appendStringInfo( str, ",\"joinrestrictinfo\":" );
     Node_out( str, node->joinrestrictinfo );
-    return;
-}
-
-static void Join_out( StringInfo str, Join * node )
-{
-    appendStringInfoString( str, "\"name\":\"JOIN\"" );
-    JoinInfo_out( str, ( Join * ) node );
     return;
 }
 
@@ -2789,9 +2837,16 @@ static void Node_out( StringInfo string, void * object )
              || IsA( object, Float )
              || IsA( object, String )
              || IsA( object, BitString )
+#if PG_VERSION_NUM >= 150000
+             || IsA( object, Boolean )
+#endif // PG_VERSION_NUM
            )
     {
+#if PG_VERSION_NUM < 150000
         Value_out( string, object );
+#else
+        ValUnion_out( string, object );
+#endif
     }
     else
     {
@@ -2799,6 +2854,17 @@ static void Node_out( StringInfo string, void * object )
 
         switch( nodeTag( object ) )
         {
+#if PG_VERSION_NUM < 150000
+            case T_Scan:
+                Scan_out( string, object );
+                break;
+            case T_Join:
+                Join_out( string, object );
+                break;
+            case T_Plan:
+                Plan_out( string, object );
+                break;
+#endif
             case T_Aggref:
                 Aggref_out( string, object );
                 break;
@@ -3000,9 +3066,6 @@ static void Node_out( StringInfo string, void * object )
             case T_JoinExpr:
                 JoinExpr_out( string, object );
                 break;
-            case T_Join:
-                Join_out( string, object );
-                break;
             case T_Limit:
                 Limit_out( string, object );
                 break;
@@ -3099,9 +3162,6 @@ static void Node_out( StringInfo string, void * object )
             case T_PlanRowMark:
                 PlanRowMark_out( string, object );
                 break;
-            case T_Plan:
-                Plan_out( string, object );
-                break;
             case T_Query:
                 Query_out( string, object );
                 break;
@@ -3152,9 +3212,6 @@ static void Node_out( StringInfo string, void * object )
                 break;
             case T_ScalarArrayOpExpr:
                 ScalarArrayOpExpr_out( string, object );
-                break;
-            case T_Scan:
-                Scan_out( string, object );
                 break;
             case T_SelectStmt:
                 SelectStmt_out( string, object );
@@ -3425,7 +3482,7 @@ static void PlannedStmt_out( StringInfo str, PlannedStmt * node )
 {
     appendStringInfoString( str, "\"name\":\"PLANNEDSTMT\"" );
     appendStringInfo( str, ",\"commandType\":\"%s\"", enum_CmdType( node->commandType ) );
-#if PG_VERSION_NUM > 14000
+#if PG_VERSION_NUM > 140000
     appendStringInfo( str, ",\"queryId\":%lu", node->queryId );
 #endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"hasReturning\":%s", node->hasReturning ? "true" : "false" );
@@ -3434,7 +3491,7 @@ static void PlannedStmt_out( StringInfo str, PlannedStmt * node )
     appendStringInfo( str, ",\"transientPlan\":%s", node->transientPlan ? "true" : "false" );
     appendStringInfo( str, ",\"dependsOnRole\":%s", node->dependsOnRole ? "true" : "false" );
     appendStringInfo( str, ",\"parallelModeNeeded\":%s", node->parallelModeNeeded ? "true" : "false" );
-#if PG_VERSION_NUM > 11000
+#if PG_VERSION_NUM > 110000
     appendStringInfo( str, ",\"jitFlags\":%d", node->jitFlags );
 #endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"planTree\":" );
@@ -3535,19 +3592,12 @@ static void PlanRowMark_out( StringInfo str, PlanRowMark * node )
     return;
 }
 
-static void Plan_out( StringInfo str, Plan * node )
-{
-    appendStringInfoString( str, "\"name\":\"PLAN\"" );
-    PlanInfo_out( str, ( Plan * ) node );
-    return;
-}
-
 static void Query_out( StringInfo str, Query * node )
 {
     appendStringInfoString( str, "\"name\":\"QUERY\"" );
     appendStringInfo( str, ",\"commandType\":\"%s\"", enum_CmdType( node->commandType ) );
     appendStringInfo( str, ",\"querySource\":%d", node->querySource ); // enum - QuerySource
-#if PG_VERSION_NUM >= 14000
+#if PG_VERSION_NUM >= 140000
     appendStringInfo( str, ",\"queryId\":%lu", node->queryId );
 #endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"canSetTag\":%s", node->canSetTag ? "true" : "false" );
@@ -3699,16 +3749,6 @@ static void RangeTblEntry_out( StringInfo str, RangeTblEntry * node )
     appendStringInfo( str, ",\"inh\":%s", node->inh ? "true" : "false" );
     appendStringInfo( str, ",\"lateral\":%s", node->lateral ? "true" : "false" );
     appendStringInfo( str, ",\"inFromCl\":%s", node->inFromCl ? "true" : "false" );
-    appendStringInfo( str, ",\"requiredPerms\":%u", node->requiredPerms );
-    appendStringInfo( str, ",\"checkAsUser\":%u", node->checkAsUser );
-    appendStringInfo( str, ",\"selectedCols\":" );
-    Bitmapset_out( str, node->selectedCols );
-    appendStringInfo( str, ",\"insertedCols\":" );
-    Bitmapset_out( str, node->insertedCols );
-    appendStringInfo( str, ",\"updatedCols\":" );
-    Bitmapset_out( str, node->updatedCols );
-    appendStringInfo( str, ",\"extraUpdatedCols\":" );
-    Bitmapset_out( str, node->extraUpdatedCols );
     appendStringInfo( str, ",\"securityQuals\":" );
     Node_out( str, node->securityQuals );
     return;
@@ -3850,15 +3890,12 @@ static void RestrictInfo_out( StringInfo str, RestrictInfo * node )
     appendStringInfo( str, ",\"clause\":" );
     Node_out( str, node->clause );
     appendStringInfo( str, ",\"is_pushed_down\":%s", node->is_pushed_down ? "true" : "false" );
-    appendStringInfo( str, ",\"outerjoin_delayed\":%s", node->outerjoin_delayed ? "true" : "false" );
     appendStringInfo( str, ",\"can_join\":%s", node->can_join ? "true" : "false" );
     appendStringInfo( str, ",\"pseudoconstant\":%s", node->pseudoconstant ? "true" : "false" );
     appendStringInfo( str, ",\"clause_relids\":" );
     Bitmapset_out( str, node->clause_relids );
     appendStringInfo( str, ",\"required_relids\":" );
     Bitmapset_out( str, node->required_relids );
-    appendStringInfo( str, ",\"nullable_relids\":" );
-    Bitmapset_out( str, node->nullable_relids );
     appendStringInfo( str, ",\"left_relids\":" );
     Bitmapset_out( str, node->left_relids );
     appendStringInfo( str, ",\"right_relids\":" );
@@ -3969,13 +4006,6 @@ static void ScanInfo_out( StringInfo str, Scan * node )
     // and callee writing out specific information
     PlanInfo_out( str, ( Plan * ) node );
     appendStringInfo( str, ",\"scanrelid\":%u", node->scanrelid );
-    return;
-}
-
-static void Scan_out( StringInfo str, Scan * node )
-{
-    appendStringInfoString( str, "\"name\":\"SCAN\"" );
-    ScanInfo_out( str, ( Scan * ) node );
     return;
 }
 
@@ -4261,7 +4291,6 @@ static void SpecialJoinInfo_out( StringInfo str, SpecialJoinInfo * node )
     Bitmapset_out( str, node->syn_righthand );
     appendStringInfo( str, ",\"jointype\":\"%s\"", enum_JoinType( node->jointype ) );
     appendStringInfo( str, ",\"lhs_strict\":%s", node->lhs_strict ? "true" : "false" );
-    appendStringInfo( str, ",\"delay_upper_joins\":%s", node->delay_upper_joins ? "true" : "false" );
     appendStringInfo( str, ",\"semi_can_hash\":%s", node->semi_can_hash ? "true" : "false" );
     appendStringInfo( str, ",\"semi_can_btree\":%s", node->semi_can_btree ? "true" : "false" );
     appendStringInfo( str, ",\"semi_operators\":" );
@@ -4475,6 +4504,37 @@ static void ValuesScan_out( StringInfo str, ValuesScan * node )
     return;
 }
 
+#if PG_VERSION_NUM >= 150000
+static void ValUnion_out( StringInfo str, union ValUnion * value )
+{
+    switch( nodeTag( value ) )
+    {
+        case T_Integer:
+            appendStringInfo( str, "%d", ( value->ival ).ival );
+            break;
+        case T_Float:
+            // Will break if NaN / Inf / -Inf
+            appendStringInfoString( str, ( value->fval ).fval );
+            break;
+        case T_String:
+            Token_out( str, ( value->sval ).sval );
+            break;
+        case T_BitString:
+            appendStringInfoChar( str, '"' );
+            appendStringInfoString( str, ( value->bsval ).bsval );
+            appendStringInfoChar( str, '"' );
+            break;
+        case T_Boolean:
+            appendStringInfoString( str, ( value->boolval ).boolval ? "true" : "false" );
+            break;
+        default:
+            elog( ERROR, "unrecognized value type: %d", ( int ) nodeTag( value ) );
+            break;
+    }
+
+    return;
+}
+#else
 static void Value_out( StringInfo str, Value * value )
 {
     switch( value->type )
@@ -4504,6 +4564,7 @@ static void Value_out( StringInfo str, Value * value )
 
     return;
 }
+#endif // PG_VERSION_NUM
 
 static void Var_out( StringInfo str, Var * node )
 {
