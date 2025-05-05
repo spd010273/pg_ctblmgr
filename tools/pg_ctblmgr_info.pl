@@ -595,18 +595,10 @@ sub read_xid_map()
     $XID_MAP = readmem( $XID_KEY );
     do_lock( $XID_KEY, $READ_UNLOCK );
     my $xid_map = {};
-    foreach my $elem( @$XID_MAP )
+    foreach my $xid( keys %$XID_MAP )
     {
-        next unless( defined( $elem->{xid} ) );
-        $xid_map->{$elem->{xid}} = {
-            in_use   => [],
-            snapshot => $elem->{snapshot},
-        };
-
-        foreach my $pid( @{$elem->{in_use}} )
-        {
-            push( @{$xid_map->{$elem->{xid}}->{in_use}}, $pid );
-        }
+        next unless( defined( $XID_MAP->{$xid} ) );
+        $xid_map->{$xid} = { snapshot => $XID_MAP->{$xid} };
     }
 
     return $xid_map;
@@ -661,9 +653,7 @@ sub print_worker_table()
         "PID\n---", "|\n|",
         "Cache Table\n-----------", "|\n|",
         "Status\n------", "|\n|",
-        "Last LSN\n--------", "|\n|",
-        "Snapshot\n--------", "|\n|",
-        "XID\n---"
+        "Last LSN\n--------",
     );
 
     my @keys = sort { $a <=> $b } keys( %$xid_map );
@@ -685,27 +675,11 @@ sub print_worker_table()
         my $ct_name               = $worker_statuses->{$pid}->{name};
         my $status_text           = parse_worker_status( $status );
 
-        # Find held XIDs
-        my $held_xid;
-        my $held_snapshot;
-
-        foreach my $xid( keys %$xid_map )
-        {
-            if( grep /^$pid$/, @{$xid_map->{$xid}->{in_use}} )
-            {
-                $held_xid      = $xid;
-                $held_snapshot = $xid_map->{$xid}->{snapshot};
-                last;
-            }
-        }
-
         $table->add(
             $pid, '|',
             $ct_name, '|',
             $status_text, '|',
-            $last_lsn, '|',
-            $held_snapshot, '|',
-            $held_xid
+            $last_lsn,
         );
 
     }

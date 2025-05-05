@@ -344,10 +344,14 @@ sub new_xid_placeholder($$$$)
         { type => SCALAR    },
     );
 
-    if( !defined( $$new_handle ) )
+    if( !defined( $$new_handle ) || $$new_handle->pg_ping() < 0  )
     {
         $$new_handle = &db_connect( $$new_handle );
-        return 0 unless( $$new_handle );
+        unless( $$new_handle )
+        {
+            _log( $LOG_LEVEL_ERROR, "Failed to connect XID handle to database" );
+            return 0;
+        }
     }
 
     $$new_handle->do( "SET idle_session_timeout = ?", undef, $xid_idle_timeout );
@@ -387,6 +391,7 @@ sub new_xid_placeholder($$$$)
         unless( $sth->execute() )
         {
             _rollback_and_disconnect( $$new_handle );
+            _log( $LOG_LEVEL_ERROR, "Failed to export snapshot for xid $$new_xid" );
             return 0;
         }
 
@@ -401,6 +406,7 @@ sub new_xid_placeholder($$$$)
     }
 
     _rollback_and_disconnect( $$new_handle );
+    _log( $LOG_LEVEL_ERROR, "Invalid XID received from txid_current()" );
     return 0;
 }
 
@@ -488,7 +494,7 @@ sub parent_loop($$$$$)
         }
 
         $handle = db_connect( $handle );
-        
+
         ## XID CHAIN MANAGEMENT
         ##=====================
         $xid_start = [ gettimeofday() ] if( $CONFIG_MANAGER->get_config_value( 'timing' ) );
@@ -569,7 +575,7 @@ sub parent_loop($$$$$)
                             $XID_MAP = readmem( $XID_KEY );
                             # Age out current slot - upcycle or close
                             # TODO: swap out XID_MAP entry
-                            my $old_handle = $current_slot->{handle};
+                            my $old_handle  = $current_slot->{handle};
                             my $replace_xid = $current_slot->{xid};
                             my $new_xid     = $current_slot->{next}->{xid};
                             my $replace_snapshot = $current_slot->{snapshot};
@@ -788,7 +794,7 @@ sub parent_loop($$$$$)
                     }
                     else
                     {
-                        _log( $LOG_LEVEL_FATAL, 'Failed to fork worker process' );
+                        _log( $LOG_LEVEL_ERROR, 'Failed to fork worker process' );
                     }
                 }
 
@@ -808,9 +814,82 @@ sub parent_loop($$$$$)
 
         ## WORKER HEALTH CHECKS
         ##=====================
+        foreach my $pk_maintenance_object( keys %$worker_mapping )
+        {
+            my $child_pid = $worker_mapping->{$pk_maintenance_object};
+            my $w_result  = waitpid( $child_pid, WNOHANG );
 
-        # TODO
+            if(
+                   $w_result == $child_pid # Child reaped
+                || $w_result < 0           # Child does not exist
+              )
+            {
+                delete( $worker_mapping->{$pk_maintenance_object} );
+                # restart worker after a short pause
+                sleep( 1 );
+                do_lock( $WS_KEY, $WRITE_LOCK );
+                $WORKER_STATUSES = readmem( $WS_KEY );
+                delete( $WORKER_STATUSES->{$child_pid} );
+                writemem( $WS_KEY, $WORKER_STATUSES );
+                do_lock( $WS_KEY, $WRITE_UNLOCK );
+                _log(
+                    $LOG_LEVEL_DEBUG,
+                    "Restarting worker for pk $pk_maintenance_object"
+                );
 
+                $handle = &db_connect( $handle );
+                my $worker_data = get_worker_list(
+                    $handle,
+                    $pk_maintenance_object
+                );
+                $handle->disconnect();
+                undef( $handle );
+                unless( $worker_data )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        'Need to spin up new child but could not locate maintenance object'
+                    );
+                    next;
+                }
+
+                $worker_data      = $worker_data->[0];
+                my $filter_tables = $worker_data->{filter_tables};
+                my $ct_name       = $worker_data->{name};
+                $child_pid        = fork();
+
+                if( defined( $child_pid ) and $child_pid == 0 )
+                {
+                    &worker_entrypoint(
+                        $filter_tables,
+                        $pk_maintenance_object,
+                        $enable_fast_delete,
+                        $xid_idle_timeout,
+                    );
+                    exit( 0 );
+                }
+                elsif( defined( $child_pid ) and $child_pid > 0 )
+                {
+                    do_lock( $WS_KEY, $WRITE_LOCK );
+                    $WORKER_STATUSES = readmem( $WS_KEY );
+                    $WORKER_STATUSES->{$child_pid}->{status}             = $WORKER_STATUS_STARTUP;
+                    $WORKER_STATUSES->{$child_pid}->{shutdown}           = 0;
+                    $WORKER_STATUSES->{$child_pid}->{replace}            = 0;
+                    $WORKER_STATUSES->{$child_pid}->{maintenance_object} = $pk_maintenance_object;
+                    $WORKER_STATUSES->{$child_pid}->{name}               = $ct_name;
+                    $WORKER_STATUSES->{$child_pid}->{backend_pid}        = 0;
+                    writemem( $WS_KEY, $WORKER_STATUSES );
+                    do_lock( $WS_KEY, $WRITE_UNLOCK );
+
+                    $worker_mapping->{$pk_maintenance_object} = $child_pid;
+                    _log( $LOG_LEVEL_DEBUG, "Parent created child $child_pid" );
+                }
+                else
+                {
+                    _log( $LOG_LEVEL_ERROR, 'Failed to fork worker process' );
+                }
+            }
+        }
     }
 
     return;
@@ -1054,6 +1133,7 @@ sub worker_entrypoint($$$$)
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
     &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
     do_listen( $handle );
+
     if( $CACHE_HASH->{driver} eq 'postgresql' )
     {
         my $ct_check_start = [ gettimeofday() ];
@@ -1224,7 +1304,7 @@ sub worker_entrypoint($$$$)
                 }
 
                 $missed_notifs = $handle->func( 'pg_notifies' ) if( scalar( @$ret ) == 0 );
-                
+
                 if( defined $missed_notifs && ref( $missed_notifs ) eq 'ARRAY' && scalar( @$missed_notifs ) > 0 )
                 {
                     push( @$notifications_mat, $missed_notifs );
