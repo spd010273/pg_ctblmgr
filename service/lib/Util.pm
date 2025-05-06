@@ -74,7 +74,7 @@ sub _log($$) :Export( :MANDATORY )
         }
     }
 
-    my $debug = 1; #defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'debug' ) : 0;
+    my $debug = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'debug' ) : 0;
 
     return if( $log_level == $LOG_LEVEL_DEBUG && !$debug );
 

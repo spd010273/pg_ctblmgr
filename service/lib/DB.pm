@@ -566,6 +566,64 @@ Readonly::Scalar my $GET_DEPENDENT_INDEXES => <<"END_SQL";
            FROM tt_indexes;
 END_SQL
 
+Readonly::Scalar my $MANAGE_INDEXES => <<"END_SQL";
+WITH tt_mo AS
+(
+    SELECT mo.namespace,
+           mo.name,
+           mo.indexes,
+           'ix_' || mo.name AS unique_index,
+           'ix_null_' || mo.name AS nullable_index
+      FROM ${SCHEMA_NAME}.tb_maintenance_object mo
+     WHERE mo.maintenance_object = ?
+),
+tt_needed AS
+(
+    SELECT ( 'ix_' || mo.name || '_' || regexp_replace( x, '[^[:alnum:]]', '_', 'g' ) )::VARCHAR(63) AS needed_index,
+           'CREATE INDEX IF NOT EXISTS ' || ( 'ix_' || mo.name || '_' || regexp_replace( x, '[^[:alnum:]]', '_', 'g' ) )::VARCHAR(63) || ' ON ' || mo.namespace || '.' || mo.name || '( ' || x || ' )' AS statement
+      FROM tt_mo mo
+INNER JOIN unnest( mo.indexes ) x
+        ON TRUE
+),
+tt_existing_indexes AS
+(
+    SELECT ci.relname AS existing_index,
+           'DROP INDEX IF EXISTS ' || ci.relname AS statement
+      FROM tt_mo mo
+INNER JOIN pg_class c
+        ON c.relname = mo.name
+       AND c.relkind = 'r'
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname = mo.namespace
+INNER JOIN pg_index i
+        ON i.indrelid = c.oid
+INNER JOIN pg_class ci
+        ON ci.oid = i.indexrelid
+       AND ci.relkind = 'i'
+       AND ci.relname != mo.unique_index
+       AND ci.relname != mo.nullable_index
+),
+tt_create_drop AS
+(
+         SELECT COALESCE( ttn.needed_index, tte.existing_index ) AS index_name,
+                CASE WHEN tte.existing_index IS NULL AND ttn.needed_index IS NOT NULL
+                     THEN TRUE
+                     WHEN tte.existing_index IS NOT NULL AND ttn.needed_index IS NULL
+                     THEN FALSE
+                     ELSE NULL
+                      END AS create_drop,
+                COALESCE( ttn.statement, tte.statement ) AS statement
+           FROM tt_existing_indexes tte
+FULL OUTER JOIN tt_needed ttn
+             ON ttn.needed_index = tte.existing_index
+)
+    SELECT index_name,
+           statement
+      FROM tt_create_drop
+     WHERE create_drop IS NOT NULL
+END_SQL
+
 Readonly::Scalar my $UPDATE_FILTERS => <<"END_SQL";
     UPDATE ${SCHEMA_NAME}.__pgctblmgr_repl_slot
        SET filter = ?
@@ -627,6 +685,27 @@ INNER JOIN pg_type t
 INNER JOIN pg_namespace n
         ON n.oid = c.relnamespace
      WHERE n.nspname::VARCHAR || '.' || c.relname::VARCHAR = ?
+END_SQL
+
+Readonly::Scalar my $GET_CT_INDEX_SHA => <<"END_SQL";
+    SELECT regexp_replace(
+               digest(
+                   COALESCE(
+                       array_to_string(
+                           array_agg( x ORDER BY x ),
+                           ''
+                       ),
+                       ''
+                   ),
+                   'sha256'::VARCHAR
+               )::VARCHAR,
+               '\\\\x',
+               ''
+           ) AS hash
+      FROM ${SCHEMA_NAME}.tb_maintenance_object mo
+INNER JOIN unnest( mo.indexes ) x
+        ON TRUE
+     WHERE mo.maintenance_object = ?
 END_SQL
 
 sub try_lock($) :Export( :MANDATORY )
@@ -766,6 +845,11 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
         }
 
         $cache_hash->{digest} = get_ct_digest(
+            $handle,
+            $pk_maintenance_object
+        );
+
+        $cache_hash->{index_digest} = &get_ct_index_digest(
             $handle,
             $pk_maintenance_object
         );
@@ -1291,7 +1375,7 @@ sub db_connect(;$$) :Export( :MANDATORY )
         &do_listen( $handle );
         my $row = $handle->selectrow_hashref( 'SELECT pg_backend_pid() AS pid' );
         $BACKEND_PID = $row->{pid};
-    
+
         unless( &try_lock( $handle ) )
         {
             _log(
@@ -1367,7 +1451,7 @@ sub try_query($$;$) :Export( :MANDATORY )
     return undef if( $retry_counter > $max_query_retries );
 
     $handle = &db_connect( $handle );
-    
+
     # We're connected to the DB at this point
     if( $PARENT_PID == $PROCESS_ID )
     {
@@ -1470,6 +1554,27 @@ sub get_ct_digest($$) :Export( :MANDATORY )
     );
 
     my $sth = try_query( $handle, $GET_CT_SHA, [ $pk_maintenance_object ] );
+
+    if( $sth )
+    {
+        my $hash_row = $sth->fetchrow_hashref();
+        my $hash = $hash_row->{hash};
+        $sth->finish();
+        return $hash;
+    }
+
+    return;
+}
+
+sub get_ct_index_digest($$) :Export( :MANDATORY )
+{
+    my( $handle, $pk_maintenance_object ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $sth = try_query( $handle, $GET_CT_INDEX_SHA, [ $pk_maintenance_object ] );
 
     if( $sth )
     {
@@ -1594,6 +1699,38 @@ sub get_worker_list($;$) :Export( :MANDATORY )
 
     $sth->finish();
     return undef;
+}
+
+sub check_indexes($$) :Export( :MANDATORY )
+{
+    my( $handle, $pk_maintenance_object ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+    );
+
+    my $sth = $handle->prepare( $MANAGE_INDEXES );
+
+    return unless( $sth );
+
+    $sth->bind_param( 1, $pk_maintenance_object );
+
+    return unless( $sth->execute() );
+    return unless( $sth->rows() > 0 );
+
+    while( my $row = $sth->fetchrow_hashref() )
+    {
+        my $statement = $row->{statement};
+        my $indname   = $row->{index_name};
+        _log( $LOG_LEVEL_DEBUG, "Modifying index '$indname'" );
+
+        unless( $handle->do( $statement ) )
+        {
+            _log( $LOG_LEVEL_ERROR, "Failed to create supplimental index '$indname'" );
+        }
+    }
+
+    return;
 }
 
 sub check_ct_exists($$;$) :Export( :MANDATORY )

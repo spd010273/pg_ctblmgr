@@ -231,7 +231,6 @@ $SIG{HUP}     = \&_handle_sighup;
 $SIG{INT}     = \&_terminate_sigint;
 $SIG{__DIE__} = \&_terminate;
 
-
 sub shm_pre_cleanup()
 {
     do_cleanup_key( $WS_KEY );
@@ -920,7 +919,7 @@ sub worker_cache_refresh($$$$)
     # TODO, we should filter the relcache based on our worker's filter tables to save RAM
     $cache_hash->{relcache}      = &get_relcache( $handle, $CONFIG_MANAGER->get_config_value( 'outer_fallback_to_largest' ) );
     $cache_hash->{table_mapping} = {};
-    $cache_hash->{parse_tree} = &find_table_aliases(
+    $cache_hash->{parse_tree}    = &find_table_aliases(
         $handle,
         $cache_hash->{relcache},
         $cache_hash->{definition},
@@ -1152,6 +1151,8 @@ sub worker_entrypoint($$$$)
             $CACHE_HASH,
         );
 
+        check_indexes( $handle, $pk_maintenance_object );
+
         my $BLOWOUT_FACTORS = {};
         # MAIN LOOP
         my $l_counter = 0;
@@ -1220,57 +1221,9 @@ sub worker_entrypoint($$$$)
                 update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
             }
 
-            # check to see if definition has changed
-            my $test_hash = &get_ct_digest( $handle, $pk_maintenance_object );
-            if( !defined $test_hash )
-            {
-                _log(
-                    $LOG_LEVEL_ERROR,
-                    'Failed to check maintenance object '
-                  . 'for definition change (SHA256)'
-                );
-                # CT may have been removed, lets exit
-                do_lock( $WS_KEY, $WRITE_LOCK );
-                $WORKER_STATUSES = readmem( $WS_KEY );
-                $WORKER_STATUSES->{$worker_pid}->{shutdown} = 1;
-                writemem( $WS_KEY, $WORKER_STATUSES );
-                do_lock( $WS_KEY, $WRITE_UNLOCK );
-                next;
-            }
-            else
-            {
-                if( $test_hash ne $CACHE_HASH->{digest} )
-                {
-                    _log(
-                        $LOG_LEVEL_INFO,
-                        'Cache table definition has changed, replacing the '
-                      . 'cache table'
-                    );
-
-                    &worker_cache_refresh(
-                        $handle,
-                        $pk_maintenance_object,
-                        $filter_tables,
-                        $CACHE_HASH,
-                    );
-
-                    update_status( { status => $WORKER_STATUS_REPLACE } );
-
-                    unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
-                    {
-                        _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed" );
-                    }
-
-                    update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
-                }
-            }
-
             # Process changes
             my $changes  = {};
             my $WAL_DATA = {};
-
-            #TODO: Replace dequeue w/ listen here. WAL_DATA is structured as $WAL_DATA->{filter_table}->[ changes ]
-            # We block here waiting on data
 
             # Note: There's a strange behavior in DBI's control methods here for pg_notifies.
             # If notifications happen too closely, they can sometime pile up into the next notification
@@ -1341,6 +1294,74 @@ sub worker_entrypoint($$$$)
                     # May need to add a check for pg_restore here iff user uses this service in downstream
                     # environments
                     &check_ct_exists( $handle, $CACHE_HASH, 1 );
+
+                    # check to see if definition has changed
+                    my $test_hash = &get_ct_digest( $handle, $pk_maintenance_object );
+                    my $test_ind_hash = &get_ct_index_digest( $handle, $pk_maintenance_object );
+
+                    if( !defined $test_hash )
+                    {
+                        _log(
+                            $LOG_LEVEL_ERROR,
+                            'Failed to check maintenance object '
+                          . 'for definition change (SHA256)'
+                        );
+                        # CT may have been removed, lets exit
+                        do_lock( $WS_KEY, $WRITE_LOCK );
+                        $WORKER_STATUSES = readmem( $WS_KEY );
+                        $WORKER_STATUSES->{$worker_pid}->{shutdown} = 1;
+                        writemem( $WS_KEY, $WORKER_STATUSES );
+                        do_lock( $WS_KEY, $WRITE_UNLOCK );
+                        next;
+                    }
+                    else
+                    {
+                        if( $test_hash ne $CACHE_HASH->{digest} )
+                        {
+                            _log(
+                                $LOG_LEVEL_INFO,
+                                'Cache table definition has changed, replacing the '
+                              . 'cache table'
+                            );
+
+                            &worker_cache_refresh(
+                                $handle,
+                                $pk_maintenance_object,
+                                $filter_tables,
+                                $CACHE_HASH,
+                            );
+
+                            update_status( { status => $WORKER_STATUS_REPLACE } );
+
+                            unless( &replace_cache_table( $handle, $pk_maintenance_object ) )
+                            {
+                                _log( $LOG_LEVEL_FATAL, "Replacement of $CACHE_HASH->{name} failed" );
+                            }
+
+                            update_status( { status => $WORKER_STATUS_IDLE, replace => 0 } );
+                        }
+                    }
+
+                    if( !defined( $test_ind_hash ) )
+                    {
+                        _log(
+                            $LOG_LEVEL_ERROR,
+                            'Failed to check index definition changes'
+                        );
+                    }
+                    else
+                    {
+                        if( $test_ind_hash ne $CACHE_HASH->{index_digest} )
+                        {
+                            _log(
+                                $LOG_LEVEL_INFO,
+                                'Cache Table index changes detected'
+                            );
+                            check_indexes( $handle, $pk_maintenance_object );
+                            $CACHE_HASH->{index_digest} = $test_ind_hash;
+                        }
+                    }
+
                 }
 
                 $l_counter++;
@@ -1375,16 +1396,20 @@ sub worker_entrypoint($$$$)
 
             my $oldest_xid;
             my $change_metadata = {};
+
             foreach my $filter_table( keys %{$WAL_DATA} )
             {
                 my $change;
+
                 while( scalar( @{$WAL_DATA->{$filter_table}} ) > 0 )
                 {
                     $change = pop( @{$WAL_DATA->{$filter_table}} );
+
                     if( $change )
                     {
                         my $schema = $change->{data}->{schema_name};
                         my $table  = $change->{data}->{table_name};
+
                         if( !defined $oldest_xid || $change->{xid} < $oldest_xid )
                         {
                             $oldest_xid = $change->{xid};
@@ -1425,6 +1450,7 @@ sub worker_entrypoint($$$$)
             my $aged_snapshot;
 
             next if( scalar( keys %{$changes} ) == 0 );
+
             my $map = {
                 handle                    => $handle,
                 query_data                => $CACHE_HASH->{parse_tree},
