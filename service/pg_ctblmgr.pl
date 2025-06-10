@@ -13,10 +13,12 @@ use English qw( -no_match_vars );
 use JSON::XS;
 use IO::Select;
 use IO::Handle;
+use IO::Socket;
 use Getopt::Std;
 use Time::HiRes qw( gettimeofday tv_interval );
 use POSIX qw( strftime setsid :sys_wait_h );
 use Cwd qw( abs_path );
+use File::Basename;
 
 use Data::Dumper;
 
@@ -40,10 +42,8 @@ use Shm;
 # to lookup historic data
 
 # Expressed in MS:
-Readonly my $XID_START_SIZE     => 768;
-Readonly my $WS_KEY             => 17783313;
-Readonly my $XID_KEY            => 17783314;
-Readonly my $INT_MAX            => ( 2**53 );
+Readonly my $WS_KEY   => 17783313 + 1;
+Readonly my $INT_MAX  => ( 2**53 );
 our $OUTPUT_AUTOFLUSH = 1;
 our $|                = 1;
 
@@ -53,8 +53,64 @@ $LOG_FILE      = '';
 $LOG_FH        = undef;
 $DAEMONIZE     = 0;
 
+my $xid_service_port;
+my $xid_service_host;
 my $got_sighup = 0;
+my $path = abs_path( $0 );
+if( $path =~ m/pg_ctblmgr\.pl/ )
+{
+    $path =~ s/\/pg_ctblmgr\.pl$//;
+}
+else
+{
+    $path =~ s/\/pg_ctblmgr$//;
+}
 
+$path =~ s/\/service$//;
+my $XID_SERVICE_PATH = $path . '/' . $XID_SERVICE_LOCATION;
+my $xid_service_pid = 0;
+
+sub connect_to_xid_service($$)
+{
+    my( $handle, $xid_client ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => OBJECT | UNDEF },
+    );
+
+    if( defined( $xid_client ) )
+    {
+        $xid_client->shutdown( SHUT_RDWR );
+        $xid_client->close();
+    }
+
+    my $enable_fast_delete = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
+    return unless( $enable_fast_delete ); # no xid service
+
+    $xid_client = IO::Socket->new(
+        Domain   => AF_INET,
+        proto    => 'tcp',
+        PeerPort => $xid_service_port,
+        PeerHost => 'localhost'
+    );
+
+    if( !defined( $xid_client ) )
+    {
+        $xid_client = IO::Socket->new(
+            Domain => AF_INET,
+            proto  => 'tcp',
+            PeerPort => $xid_service_port,
+            PeerHost => $xid_service_host
+        );
+
+        if( !defined( $xid_client ) )
+        {
+            _log( $LOG_LEVEL_ERROR, "Failed to connect to xid service at $xid_service_host:$xid_service_port" );
+        }
+    }
+
+    return $xid_client;
+}
 
 sub update_status($;$)
 {
@@ -234,10 +290,36 @@ $SIG{__DIE__} = \&_terminate;
 sub shm_pre_cleanup()
 {
     do_cleanup_key( $WS_KEY );
-    do_cleanup_key( $XID_KEY );
     return 1;
 }
 
+sub start_xid_service()
+{
+    if( $xid_service_pid )
+    {
+        _log( $LOG_LEVEL_ERROR, "XID Service (pid $xid_service_pid) died!" );
+        waitpid( $xid_service_pid, WNOHANG );
+        $xid_service_pid = 0;
+    }
+    else
+    {
+        _log( $LOG_LEVEL_ERROR, "XID service does not seem to be running, launching..." );
+    }
+
+    $xid_service_pid = fork();
+    if( defined( $xid_service_pid ) && $xid_service_pid == 0 )
+    {
+        my $xid_service_launch_cmd = $XID_SERVICE_PATH . ' ' . join( ' ', @ORIGINAL_ARGV );
+        exec( $xid_service_launch_cmd );
+        exit( 0 );
+    }
+    elsif( defined( $xid_service_pid ) && $xid_service_pid > 0 )
+    {
+        _log( $LOG_LEVEL_INFO, "XID service launched with pid $xid_service_pid" );
+    }
+
+    return;
+}
 
 sub populate_worker_data($$)
 {
@@ -321,114 +403,19 @@ sub check_for_new_cache_tables($$)
     return $diff;
 }
 
-sub _rollback_and_disconnect($)
-{
-    my( $handle ) = validate_pos(
-        @_,
-        { type => OBJECT },
-    );
-
-    $handle->do( 'ROLLBACK' );
-    $handle->disconnect();
-    return;
-}
-
-sub new_xid_placeholder($$$$)
-{
-    my( $new_handle, $new_xid, $new_snapshot, $xid_idle_timeout ) = validate_pos(
-        @_,
-        { type => SCALARREF },
-        { type => SCALARREF },
-        { type => SCALARREF },
-        { type => SCALAR    },
-    );
-
-    if( !defined( $$new_handle ) || $$new_handle->pg_ping() < 0  )
-    {
-        $$new_handle = &db_connect( $$new_handle );
-        unless( $$new_handle )
-        {
-            _log( $LOG_LEVEL_ERROR, "Failed to connect XID handle to database" );
-            return 0;
-        }
-    }
-
-    $$new_handle->do( "SET idle_session_timeout = ?", undef, $xid_idle_timeout );
-    $$new_handle->do( "SET idle_in_transaction_session_timeout = ?", undef, $xid_idle_timeout );
-    $$new_handle->do( 'BEGIN' );
-
-    my $sth = $$new_handle->prepare( 'SELECT txid_current() AS xid' );
-
-    unless( $sth )
-    {
-        _rollback_and_disconnect( $$new_handle );
-        return 0;
-    }
-
-    unless( $sth->execute() )
-    {
-        _rollback_and_disconnect( $$new_handle );
-        return 0;
-    }
-
-    my $row = $sth->fetchrow_hashref();
-    $$new_xid = $row->{xid};
-    $sth->finish();
-
-    if( $$new_xid =~ m/^\d+$/ )
-    {
-        $sth = $$new_handle->prepare(
-            'SELECT pg_export_snapshot() AS snapshot'
-        );
-
-        unless( $sth )
-        {
-            _rollback_and_disconnect( $$new_handle );
-            return 0;
-        }
-
-        unless( $sth->execute() )
-        {
-            _rollback_and_disconnect( $$new_handle );
-            _log( $LOG_LEVEL_ERROR, "Failed to export snapshot for xid $$new_xid" );
-            return 0;
-        }
-
-        $row           = $sth->fetchrow_hashref();
-        $$new_snapshot = $row->{snapshot};
-        $sth->finish();
-        $$new_handle->do(
-            "SET application_name = '$EXTENSION_NAME snapshot for $$new_xid ($$new_snapshot)'"
-        );
-        $$new_handle->do( 'SELECT 1' );
-        return 1;
-    }
-
-    _rollback_and_disconnect( $$new_handle );
-    _log( $LOG_LEVEL_ERROR, "Invalid XID received from txid_current()" );
-    return 0;
-}
-
 ## PARENT
-sub parent_loop($$$$$)
+sub parent_loop($$)
 {
     my(
         $worker_mapping,
         $enable_fast_delete,
-        $xid_bucket_times,
-        $xid_bucket_count,
-        $xid_idle_timeout,
     ) = validate_pos(
         @_,
         { type => HASHREF  }, # local mapping of pk_maint_obj -> pid
         { type => SCALAR   },
-        { type => ARRAYREF },
-        { type => SCALAR   },
-        { type => SCALAR   },
     );
 
     my $WORKER_STATUSES;
-    my $XID_MAP = [];
     my $handle = &db_connect();
     my $first_loop_done = 0;
     if( !check_extension_running( $handle ) )
@@ -437,26 +424,6 @@ sub parent_loop($$$$$)
             $LOG_LEVEL_FATAL,
             'Failed to secure advisory lock in parent process'
         );
-    }
-
-    my $local_xid_map = {};
-
-    # Stub out the local XID map
-    my $bucket_id = 0;
-    for( $bucket_id = 0; $bucket_id < $xid_bucket_count; $bucket_id++ )
-    {
-        $local_xid_map->{$bucket_id} = {
-            xid      => undef,
-            handle   => undef,
-            created  => undef,
-            snapshot => undef,
-            next     => {
-                xid      => undef,
-                handle   => undef,
-                snapshot => undef,
-                created  => undef,
-            }
-        };
     }
 
     unless( $handle )
@@ -494,151 +461,47 @@ sub parent_loop($$$$$)
 
         $handle = db_connect( $handle );
 
-        ## XID CHAIN MANAGEMENT
-        ##=====================
-        $xid_start = [ gettimeofday() ] if( $CONFIG_MANAGER->get_config_value( 'timing' ) );
-        if( $enable_fast_delete )
+        ## XID SERVICE CHECKS
+        ##===================
+        if( xid_service_check( $handle ) )
         {
-            ## Bucket management logic
-            foreach my $bucket_id( sort { $a <=> $b } keys %$local_xid_map )
+            my $start_service = 0;
+
+            if( $xid_service_pid == 0 )
             {
-                my $current_slot    = $local_xid_map->{$bucket_id};
-                my $next_slot;
+                $start_service = 1;
+                _log( $LOG_LEVEL_INFO, "XID service is not running" );
+            }
+            elsif( $xid_service_pid > 0 )
+            {
+                my $waitpid_result = waitpid( $xid_service_pid, WNOHANG );
 
-                if( $bucket_id + 1 < $xid_bucket_count )
+                if( $waitpid_result > 0 )
                 {
-                    $next_slot = $local_xid_map->{$bucket_id + 1};
+                    _log( $LOG_LEVEL_DEBUG, "XID service has exited" );
+                    $xid_service_pid = 0;
+                    $start_service = 1;
                 }
-
-                my $max_age_sec = ( $xid_bucket_times->[$bucket_id] * 2 );
-
-                if( !$current_slot->{next}->{handle} )
+                elsif( $waitpid_result == -1 ) # does not exist
                 {
-                    if( $current_slot->{handle} && tv_interval( $current_slot->{created}, [gettimeofday()] ) < $xid_bucket_times->[$bucket_id] )
-                    {
-                        my $curr = $current_slot->{handle};
-                        if( !$curr || !$curr->ping() )
-                        {
-                            _log( $LOG_LEVEL_ERROR, "Bad snapshot $current_slot->{snapshot}" );
-                            $current_slot->{handle} = undef;
-                            do_lock( $XID_KEY, $WRITE_LOCK );
-                            $XID_MAP = readmem( $XID_KEY );
-                            delete( $XID_MAP->{$current_slot->{xid}} );
-                            writemem( $XID_KEY, $XID_MAP );
-                            do_lock( $XID_KEY, $WRITE_UNLOCK );
-                        }
-                        next;
-                    }
-                    my $new_handle;
-                    my $new_xid;
-                    my $new_snapshot;
-                    if( !new_xid_placeholder( \$new_handle, \$new_xid, \$new_snapshot, $xid_idle_timeout ) )
-                    {
-                        _log( $LOG_LEVEL_ERROR, "Failed to create new XID snapshot" );
-                    }
-                    else
-                    {
-                        $current_slot->{next} = {
-                            handle   => $new_handle,
-                            xid      => $new_xid,
-                            snapshot => $new_snapshot,
-                            created  => [ gettimeofday() ],
-                        };
-                    }
+                    _log( $LOG_LEVEL_ERROR, "XID service PID $xid_service_pid is invalid!" );
+                    $xid_service_pid = 0;
+                    $start_service = 1;
                 }
                 else
                 {
-                    if( !$current_slot->{handle} )
-                    {
-                        next if( !$current_slot->{next}->{handle} );
-                        $current_slot->{handle}   = $current_slot->{next}->{handle};
-                        $current_slot->{xid}      = $current_slot->{next}->{xid};
-                        $current_slot->{snapshot} = $current_slot->{next}->{snapshot};
-                        $current_slot->{created}  = $current_slot->{next}->{created};
-                        $current_slot->{next}->{handle}   = undef;
-                        $current_slot->{next}->{xid}      = undef;
-                        $current_slot->{next}->{snapshot} = undef;
-                        $current_slot->{next}->{created}  = undef;
-                        # TODO: CReate XID MAP entry
-                        do_lock( $XID_KEY, $WRITE_LOCK );
-                        $XID_MAP = readmem( $XID_KEY );
-                        $XID_MAP->{$current_slot->{xid}} = $current_slot->{snapshot};
-                        writemem( $XID_KEY, $XID_MAP );
-                        do_lock( $XID_KEY, $WRITE_UNLOCK );
-                    }
-                    else
-                    {
-                        if( tv_interval( $current_slot->{created}, [ gettimeofday() ] ) >= $max_age_sec )
-                        {
-                            do_lock( $XID_KEY, $WRITE_LOCK );
-                            $XID_MAP = readmem( $XID_KEY );
-                            # Age out current slot - upcycle or close
-                            # TODO: swap out XID_MAP entry
-                            my $old_handle  = $current_slot->{handle};
-                            my $replace_xid = $current_slot->{xid};
-                            my $new_xid     = $current_slot->{next}->{xid};
-                            my $replace_snapshot = $current_slot->{snapshot};
-                            my $new_snapshot     = $current_slot->{next}->{snapshot};
-                            if( !defined( $XID_MAP->{$replace_xid} ) )
-                            {
-                                _log( $LOG_LEVEL_ERROR, "XID map out of sync of parent copy" );
-                            }
-                            else
-                            {
-                                delete( $XID_MAP->{$replace_xid} );
-                                $XID_MAP->{$new_xid} = $new_snapshot;
-                            }
-                            writemem( $XID_KEY, $XID_MAP );
-                            do_lock( $XID_KEY, $WRITE_UNLOCK );
-                            $old_handle->do( 'ROLLBACK' );
-                            $current_slot->{handle}   = $current_slot->{next}->{handle};
-                            $current_slot->{xid}      = $current_slot->{next}->{xid};
-                            $current_slot->{snapshot} = $current_slot->{next}->{snapshot};
-                            $current_slot->{created}  = $current_slot->{next}->{created};
-                            if( !new_xid_placeholder( \$old_handle, \$new_xid, \$new_snapshot, $xid_idle_timeout ) )
-                            {
-                                _log( $LOG_LEVEL_ERROR, "Failed to create new XID snapshot" );
-                            }
-                            else
-                            {
-                                $current_slot->{next} = {
-                                    handle   => $old_handle,
-                                    xid      => $new_xid,
-                                    snapshot => $new_snapshot,
-                                    created  => [ gettimeofday() ],
-                                };
-                            }
-                        }
-                        else
-                        {
-                            my $curr = $current_slot->{handle};
-                            my $next = $current_slot->{next}->{handle};
-                            unless( defined( $curr ) && $curr->ping() )
-                            {
-                                _log( $LOG_LEVEL_ERROR, "Bad XID snapshot $current_slot->{snapshot}" );
-                                $current_slot->{handle} = undef;
-                                do_lock( $XID_KEY, $WRITE_LOCK );
-                                $XID_MAP = readmem( $XID_KEY );
-                                delete( $XID_MAP->{$current_slot->{xid}} );
-                                writemem( $XID_KEY, $XID_MAP );
-                                do_lock( $XID_KEY, $WRITE_UNLOCK );
-                            }
-
-                            unless( defined( $next ) && $next->ping() )
-                            {
-                                _log( $LOG_LEVEL_ERROR, "Bad next snapshot $current_slot->{next}->{snapshot}" );
-                                $current_slot->{next}->{handle} = undef;
-                            }
-                        }
-                    }
+                    _log( $LOG_LEVEL_DEBUG, "XID service has started but has not obtained locks" );
                 }
             }
-        }
 
-        if( $CONFIG_MANAGER->get_config_value( 'timing' ) )
-        {
-            my $xid_delta = tv_interval( $xid_start, [ gettimeofday() ] );
-            _log( $LOG_LEVEL_DEBUG, "XID management took $xid_delta seconds" );
+
+            if( $start_service )
+            {
+                _log( $LOG_LEVEL_INFO, "Starting XID Service" );
+                $handle->disconnect();
+                start_xid_service();
+                $handle = db_connect( $handle );
+            }
         }
 
         if( !$first_loop_done && $CONFIG_MANAGER->get_config_value( 'refresh_on_start' ) )
@@ -760,18 +623,15 @@ sub parent_loop($$$$$)
                         next;
                     }
 
-                    $worker_data            = $worker_data->[0];
-                    my $filter_tables       = $worker_data->{filter_tables};
-                    my $ct_name             = $worker_data->{name};
-                    my $child_pid           = fork();
-
+                    $worker_data      = $worker_data->[0];
+                    my $filter_tables = $worker_data->{filter_tables};
+                    my $ct_name       = $worker_data->{name};
+                    my $child_pid     = fork();
                     if( defined( $child_pid ) and $child_pid == 0 )
                     {
                         &worker_entrypoint(
                             $filter_tables,
-                            $pk_maintenance_object,
-                            $enable_fast_delete,
-                            $xid_idle_timeout,
+                            $pk_maintenance_object
                         );
                         exit( 0 );
                     }
@@ -861,9 +721,7 @@ sub parent_loop($$$$$)
                 {
                     &worker_entrypoint(
                         $filter_tables,
-                        $pk_maintenance_object,
-                        $enable_fast_delete,
-                        $xid_idle_timeout,
+                        $pk_maintenance_object
                     );
                     exit( 0 );
                 }
@@ -1054,34 +912,24 @@ sub worker_cache_refresh($$$$)
 }
 
 ## WORKER
-sub worker_entrypoint($$$$)
+sub worker_entrypoint($$)
 {
     my(
         $filter_tables,
         $pk_maintenance_object,
-        $enable_fast_delete,
-        $xid_idle_timeout,
       ) = validate_pos(
         @_,
         { type => ARRAYREF },
-        { type => SCALAR },
-        { type => SCALAR },
         { type => SCALAR },
     );
 
     &set_program_name( undef, "worker startup" );
     my $CACHE_HASH           = {};
     my $WORKER_STATUSES      = {};
-    my $XID_MAP              = {};
     my $backend_pid          = 0;
     my $worker_pid           = $PROCESS_ID;
     my $worker_shm_err       = 0;
     $LOCAL_PK_MAINTENANCE_OBJECT = $pk_maintenance_object;
-
-    if( $enable_fast_delete )
-    {
-        $worker_shm_err = 1 unless( get_or_create_shm( $XID_KEY ) );
-    }
 
     $worker_shm_err = 1 unless( get_or_create_shm( $WS_KEY ) );
 
@@ -1125,6 +973,8 @@ sub worker_entrypoint($$$$)
         );
     }
 
+    $xid_service_port = get_xid_service_port( $handle );
+    $xid_service_host = get_xid_service_host( $handle );
     $MAINTENANCE_CHANNEL = $CACHE_HASH->{maintenance_channel};
     # Table mapping and parse tree are (relatively) static and only change if
     # our query changes underneath us
@@ -1236,9 +1086,12 @@ sub worker_entrypoint($$$$)
             # with the $SELECTOR->can_read uncommented and the call to IO::SELECT commented
             #$SELECTOR->can_read;
 
-            my $ret               = [];
-            my $missed_notifs     = [];
-            my $notifications_mat = [];
+            my $ret                = [];
+            my $missed_notifs      = [];
+            my $notifications_mat  = [];
+            my $xid_idle_timeout   = $CONFIG_MANAGER->get_config_value( 'xid_idle_timeout' );
+            my $enable_fast_delete = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
+
             NOTIFY_LOOP: while( !defined( $ret->[0] ) )
             {
                 # This loop traps idle workers here. We can still jog them away
@@ -1284,6 +1137,8 @@ sub worker_entrypoint($$$$)
                         $BLOWOUT_FACTORS = {};
                     }
 
+                    $xid_service_host = get_xid_service_host( $handle );
+                    $xid_service_port = get_xid_service_port( $handle );
                     last NOTIFY_LOOP;
                 }
 
@@ -1528,7 +1383,6 @@ sub worker_entrypoint($$$$)
                 # Fast delete variables / flags
                 my $can_fast_delete = 0;
                 my $tried_fast_delete = 0;
-                my $using_xid;
 
                 update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
@@ -1627,41 +1481,40 @@ sub worker_entrypoint($$$$)
                         _log( $LOG_LEVEL_DEBUG, "Approx change count: $total_blowout, NTT: $NO_TEMP_TABLES for $CACHE_HASH->{name}" );
                     }
                 }
-RETRY_XID:
+
                 if( $enable_fast_delete )
                 {
-                    do_lock( $XID_KEY, $READ_LOCK );
-                    $XID_MAP = readmem( $XID_KEY );
-                    my $best_candidate;
-                    foreach my $xid_candidate( sort { $a <=> $b } keys %$XID_MAP )
-                    {
-                        next if( $xid_candidate >= $oldest_xid );
-                        $best_candidate = $xid_candidate;
-                    }
+                    my $xid_client = connect_to_xid_service( $handle, undef );
 
-                    # Add our PID to the list of PIDS using this XID/snapshot combo
-                    if( defined( $best_candidate ) )
+                    if( defined( $xid_client ) )
                     {
-                        $aged_snapshot   = $XID_MAP->{$best_candidate};
-                        $using_xid       = $best_candidate;
-                        $can_fast_delete = 1;
-                    }
-                    else
-                    {
-                        _log(
-                            $LOG_LEVEL_DEBUG,
-                            'Could not find candidate XID for fast delete '
-                          . "- looking for $oldest_xid. Candidates were:"
-                        );
+                        $xid_client->send( $oldest_xid );
+                        my $buffer;
+                        $xid_client->recv( $buffer, 1024 );
 
-                        foreach my $xid( keys %{$XID_MAP} )
+                        if(
+                                defined( $buffer )
+                             && length( $buffer ) > 0
+                          )
                         {
-                            _log( $LOG_LEVEL_DEBUG, "$xid ($XID_MAP->{$xid})" );
+                            if( $buffer =~ m/^[[:alnum:]]{8}-[[:alnum:]]{8}-[[:alnum:]]{1}$/ )
+                            {
+                                $aged_snapshot = $buffer;
+                                $can_fast_delete = 1;
+                            }
+                            else
+                            {
+                                _log( $LOG_LEVEL_INFO, "No candidate snapshot for xid $oldest_xid" );
+                            }
                         }
-                        _log( $LOG_LEVEL_DEBUG, "Change is for:" . Dumper( $changes ) );
+                        else
+                        {
+                            _log( $LOG_LEVEL_ERROR, 'No response using XID service' );
+                        }
+
+                        $xid_client->shutdown( SHUT_RDWR );
+                        $xid_client->close();
                     }
-                    do_lock( $XID_KEY, $READ_UNLOCK );
-                    # Note - to narrow the locking gap here we dont import the snapshot, but we can pull that logic up if needed
                 }
 
                 # Generate temp table containing state of rows relevent to the keys that have changed
@@ -1744,7 +1597,7 @@ RETRY_XID:
                     _log(
                         $LOG_LEVEL_DEBUG,
                         "Established aged handle at snapshot $aged_snapshot "
-                      . "with XID $using_xid, target $oldest_xid"
+                      . "with XID target $oldest_xid"
                     );
                 }
 
@@ -1758,7 +1611,6 @@ FD_FALLBACK:
                         $aged_handle->disconnect();
                         undef( $aged_handle );
                     }
-                    # OLD XID RELEASE
                 }
 
                 my $aged_temp_table;
@@ -1827,11 +1679,10 @@ FD_FALLBACK:
 
                     $fast_delete_time = tv_interval( $fast_delete_start, [ gettimeofday() ] );
                     _log( $LOG_LEVEL_DEBUG, "Fast delete ($CACHE_HASH->{name}) took $fast_delete_time seconds" );
-                    #OLD XID RELEASE
                     _log( $LOG_LEVEL_DEBUG, "Worker released snapshot $aged_snapshot" );
                 }
 
-                if( defined( $using_xid ) )
+                if( defined( $aged_snapshot ) )
                 {
                     if( $aged_handle && $aged_handle->ping() > 0 )
                     {
@@ -1975,7 +1826,7 @@ FD_FALLBACK:
 ## MAIN PROGRAM
 # Parse and validate arguments
 our( $opt_D, $opt_d, $opt_U, $opt_h, $opt_p, $opt_c );
-my @original_argv = @ARGV;
+our @ORIGINAL_ARGV = @ARGV;
 
 usage( 'Invalid arguments' ) unless( getopts( 'd:U:h:p:c:D' ) );
 
@@ -1998,9 +1849,6 @@ $CONFIG_MANAGER = ConfigManager->new( config_file => $config_file );
 
 # These configs that cannot be reloaded and only take effect on restart
 my $ENABLE_FAST_DELETE = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
-my $XID_BUCKET_TIMES   = $CONFIG_MANAGER->get_config_value( 'xid_bucket_times' );
-my $XID_BUCKET_COUNT   = $CONFIG_MANAGER->get_config_value( 'xid_bucket_count' ); # derived from XID_BUCKET_TIMES
-my $XID_IDLE_TIMEOUT   = $CONFIG_MANAGER->get_config_value( 'xid_idle_timeout' ); # derived from XID_BUCKET_TIMES
 
 my $conn_string = "dbi:Pg:dbname=${dbname};host=${host};port=${port}";
 my $pg_conn_string = "dbi:Pg:dbname=postgres;host=${host};port=${port}";
@@ -2047,7 +1895,6 @@ undef( $handle );
 
 ## GLOBAL SHM VARIABLES
 my $WORKER_STATUSES      = {};
-my $XID_MAP              = [];
 my $shm_init_err         = 0;
 
 unless( get_or_create_shm( $WS_KEY ) )
@@ -2059,20 +1906,6 @@ unless( get_or_create_shm( $WS_KEY ) )
         $shm_init_err = 1;
     }
     do_lock( $WS_KEY, $WRITE_UNLOCK );
-}
-
-if( $ENABLE_FAST_DELETE )
-{
-    unless( get_or_create_shm( $XID_KEY, $XID_START_SIZE ) )
-    {
-        do_lock( $XID_KEY, $WRITE_LOCK );
-        unless( writemem( $XID_KEY, $XID_MAP ) )
-        {
-            warn "Failed to write empty xid map\n";
-            $shm_init_err = 1;
-        }
-        do_lock( $XID_KEY, $WRITE_UNLOCK );
-    }
 }
 
 # Wipe and start fresh if we crashed previously
@@ -2099,9 +1932,7 @@ else
         {
             &worker_entrypoint(
                 $filter_tables,
-                $pk_maintenance_object,
-                $ENABLE_FAST_DELETE,
-                $XID_IDLE_TIMEOUT,
+                $pk_maintenance_object
             );
             exit( 0 );
         }
@@ -2131,10 +1962,7 @@ else
 &set_program_name( undef, "parent process" );
 parent_loop(
     $worker_mapping,
-    $ENABLE_FAST_DELETE,
-    $XID_BUCKET_TIMES,
-    $XID_BUCKET_COUNT,
-    $XID_IDLE_TIMEOUT,
+    $ENABLE_FAST_DELETE
 );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
 if( defined $SKIP_SHM_CLEANUP && $SKIP_SHM_CLEANUP )

@@ -30,6 +30,7 @@ Readonly::Scalar our $WORKER_STATUS_UPDATE      :Export( :MANDATORY ) => 8;
 Readonly::Scalar our $WORKER_STATUS_TEMP_TABLE  :Export( :MANDATORY ) => 9;
 Readonly::Scalar our $WORKER_STATUS_QUERY_PARSE :Export( :MANDATORY ) => 10;
 Readonly::Scalar our $WORKER_STATUS_REPLACE     :Export( :MANDATORY ) => 11;
+Readonly::Scalar our $XID_SERVICE_LOCATION      :Export( :MANDATORY ) => 'service/xid_service.pl';
 Readonly::Scalar our $EXTENSION_NAME            :Export( :MANDATORY ) => 'pg_ctblmgr';
 Readonly::Scalar our $SCHEMA_NAME               :Export( :MANDATORY ) => 'pgctblmgr';
 Readonly::Scalar our $SQL_STATE_ADMIN_TERM      :Export( :MANDATORY ) => '57P01';
@@ -38,6 +39,7 @@ Readonly::Scalar our $SQL_STATE_ADMIN_CANC      :Export( :MANDATORY ) => '57014'
 ###############################################################################
 
 # Globals initialized at runtime start
+our @ORIGINAL_ARGV  :Export( :MANDATORY );
 our $PARENT_PID     :Export( :MANDATORY ) = 0;
 our $DAEMONIZE      :Export( :MANDATORY ) = 0;
 our $LOG_FH         :Export( :MANDATORY ) = undef;
@@ -75,7 +77,6 @@ sub _log($$) :Export( :MANDATORY )
     }
 
     my $debug = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'debug' ) : 0;
-
     return if( $log_level == $LOG_LEVEL_DEBUG && !$debug );
 
     if( $log_level == $LOG_LEVEL_DEBUG )

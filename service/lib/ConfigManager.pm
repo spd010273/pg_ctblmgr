@@ -26,6 +26,21 @@ Readonly::Scalar my $T_ARRAY_OF_INTEGERS => 5;
 
 # load_only_on_start is a flag that indicates that a configuration can only be set on start and not reloadable
 Readonly::Hash our %CONFIG_CATALOG :Export( :MANDATORY ) => (
+    xid_service_port => {
+        value       => 5522,
+        type        => $T_INTEGER,
+        description => 'Port used when accessing the XID reservation service',
+    },
+    xid_service_host => {
+        value       => 'localhost',
+        type        => $T_STRING,
+        description => 'Host running the XID service',
+    },
+    xid_max_reservation_time => {
+        value       => 10,
+        type        => $T_INTEGER,
+        description => 'How long an XID reservation is held when requested by pg_ctblmgr'
+    },
     debug => {
         value       => 0,
         type        => $T_BOOLEAN,
@@ -214,9 +229,7 @@ sub get_config_value
 
     if( !exists( $self->{_configs}->{$config_name} ) )
     {
-        _log( $LOG_LEVEL_FATAL, "ConfigManager::get_config_value: unrecognized config: $config_name" );
-
-        # unreachable unless log level changes to non-fatal
+        _log( $LOG_LEVEL_ERROR, "ConfigManager::get_config_value: unrecognized config: $config_name" );
         return;
     }
 

@@ -44,6 +44,10 @@ our $SKIP_LOCK_CHECK             :Export( :MANDATORY ) = 0;
 our $BACKEND_PID                 :Export( :MANDATORY ) = 0;
 our $NO_TEMP_TABLES              :Export( :MANDATORY ) = 0;
 
+# Only use global locking when global snapshots are enabled. Currently cross db snapshot imports are not allowed
+#our $PGCTBLMGR_XID_MAGIC_1       :Export( :MANDATORY ) = 82163684;
+#our $PGCTBLMGR_XID_MAGIC_2       :Export( :MANDATORY ) = 33128049;
+
 Readonly::Scalar my $GET_TABLE_COLUMNS_DATATYPES => <<END_SQL;
     SELECT a.attname AS column_name,
            t.typname AS datatype
@@ -57,6 +61,34 @@ Readonly::Scalar my $GET_TABLE_COLUMNS_DATATYPES => <<END_SQL;
         ON t.oid = a.atttypid
      WHERE n.nspname = ?
        AND c.relname = ?
+END_SQL
+
+#    SELECT pg_try_advisory_lock( ?::INTEGER, ?::INTEGER ) AS locked
+Readonly::Scalar my $XID_SERVICE_LOCK => <<"END_SQL";
+    SELECT pg_try_advisory_lock( c.oid::INTEGER, -1::INTEGER ) AS locked
+      FROM pg_class c
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+       AND n.nspname = '${SCHEMA_NAME}'
+     WHERE c.relname = '__pgctblmgr_repl_slot'
+END_SQL
+
+# old global query
+#Readonly::Scalar my $XID_SERVICE_CHECK => <<"END_SQL";
+#    SELECT l.*
+#      FROM pg_locks l
+#     WHERE l.classid = ?::INTEGER -- magic 1
+#       AND l.pid != pg_backend_pid()
+#       AND l.objid = ?::INTEGER -- magic 2
+#END_SQL
+#
+Readonly::Scalar my $XID_SERVICE_CHECK => <<"END_SQL";
+    SELECT l.*
+      FROM pg_locks l
+INNER JOIN pg_class c
+        ON c.oid = l.classid
+       AND l.pid != pg_backend_pid()
+     WHERE l.objid = -1::INTEGER
 END_SQL
 
 Readonly::Scalar my $CHECK_EXTENSION_RUNNING_QUERY => <<"END_SQL";
@@ -708,6 +740,117 @@ INNER JOIN unnest( mo.indexes ) x
      WHERE mo.maintenance_object = ?
 END_SQL
 
+Readonly::Scalar my $GET_XID_SERVICE_HOST => <<"END_SQL";
+    SELECT host
+      FROM ${SCHEMA_NAME}.tb_location
+     WHERE namespace = 'XID_SERVICE'
+       AND location = 0
+END_SQL
+
+Readonly::Scalar my $GET_XID_SERVICE_PORT => <<"END_SQL";
+    SELECT port
+      FROM ${SCHEMA_NAME}.tb_location
+     WHERE namespace = 'XID_SERVICE'
+       AND location = 0
+END_SQL
+
+sub get_xid_service_host($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    if( defined( $CONFIG_MANAGER ) )
+    {
+        my $potential_host = $CONFIG_MANAGER->get_config_value( 'xid_service_host' );
+
+        if( defined( $potential_host ) && length( $potential_host ) > 0 )
+        {
+            return $potential_host;
+        }
+    }
+
+    my $sth = $handle->prepare( $GET_XID_SERVICE_HOST );
+
+    return unless( $sth && $sth->execute() );
+    my $host_row = $sth->fetchrow_hashref();
+    my $host = $host_row->{host};
+    return $host;
+}
+
+sub get_xid_service_port($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    if( defined( $CONFIG_MANAGER ) )
+    {
+        my $potential_port = $CONFIG_MANAGER->get_config_value( 'xid_service_port' );
+
+        if( defined( $potential_port ) && $potential_port =~ m/^\d+$/ && $potential_port > 0 && $potential_port < 65536 )
+        {
+            return $potential_port;
+        }
+    }
+
+    my $sth = $handle->prepare( $GET_XID_SERVICE_PORT );
+
+    return unless( $sth && $sth->execute() );
+    my $port_row = $sth->fetchrow_hashref();
+    my $port = $port_row->{port};
+    return $port;
+}
+
+# Note: This routine returns 1 if we /should/ start the XID service,
+#  IE the DB lock is missing
+sub xid_service_check($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $lock_check_sth = $handle->prepare( $XID_SERVICE_CHECK );
+
+    return 0 unless( defined( $lock_check_sth ) );
+    #$lock_check_sth->bind_param( 1, $PGCTBLMGR_XID_MAGIC_1 );
+    #$lock_check_sth->bind_param( 2, $PGCTBLMGR_XID_MAGIC_2 );
+    return 0 unless( $lock_check_sth->execute() );
+    return 0 unless( $lock_check_sth->rows() == 0 );
+
+    $lock_check_sth->finish();
+}
+
+sub xid_service_lock($) :Export( :MANDATORY )
+{
+    my( $handle ) = validate_pos(
+        @_,
+        { type => OBJECT },
+    );
+
+    my $lock_sth = $handle->prepare( $XID_SERVICE_LOCK );
+
+    return 0 unless( defined( $lock_sth ) );
+    #$lock_sth->bind_param( 1, $PGCTBLMGR_XID_MAGIC_1 );
+    #$lock_sth->bind_param( 2, $PGCTBLMGR_XID_MAGIC_2 );
+    return 0 unless( $lock_sth->execute() );
+    return 0 unless( $lock_sth->rows() > 0 );
+
+    my $lock_row = $lock_sth->fetchrow_hashref();
+    my $locked   = $lock_row->{locked};
+    $lock_sth->finish();
+
+    unless( $locked && ( $locked =~ m/t/i || $locked =~ m/1/ ) )
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
 sub try_lock($) :Export( :MANDATORY )
 {
     #NOTE: Using try_query here will lead to deep recursion
@@ -1251,7 +1394,7 @@ sub db_connect(;$$) :Export( :MANDATORY )
     }
     else
     {
-        _log( $LOG_LEVEL_INFO, "P: " . $handle->ping() . " PGP: " . $handle->pg_ping() ) if( defined( $handle ) );
+        _log( $LOG_LEVEL_DEBUG, "P: " . $handle->ping() . " PGP: " . $handle->pg_ping() ) if( defined( $handle ) );
         if( defined( $handle ) )
         {
             $handle->disconnect();
@@ -1282,11 +1425,26 @@ sub db_connect(;$$) :Export( :MANDATORY )
             return undef;
         }
 
-        $handle = DBI->connect(
-            $CONNECTION_MAP->{connection_string},
-            $CONNECTION_MAP->{user_name},
-            undef
-        );
+        my $old_warn = local $SIG{__WARN__};
+        local $SIG{__WARN__} = sub { };
+
+        eval {
+            $handle = DBI->connect(
+                $CONNECTION_MAP->{connection_string},
+                $CONNECTION_MAP->{user_name},
+                undef
+            );
+        };
+
+        if( $EVAL_ERROR || !defined( $handle ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to connect to database '$CONNECTION_MAP->{connection_string}'"
+            );
+        }
+
+        local $SIG{__WARN__} = $old_warn;
     }
 
     # We're hitting this section iff initial connection does not succeed
@@ -1307,11 +1465,26 @@ sub db_connect(;$$) :Export( :MANDATORY )
         sleep( $sleep_backoff );
         $sleep_backoff += int( rand( 2 ** $connect_count - 1 ) );
 
-        $handle = DBI->connect(
-            $CONNECTION_MAP->{connection_string},
-            $CONNECTION_MAP->{user_name},
-            undef
-        );
+        my $old_warn = local $SIG{__WARN__};
+        local $SIG{__WARN__} = sub { };
+
+        eval {
+            $handle = DBI->connect(
+                $CONNECTION_MAP->{connection_string},
+                $CONNECTION_MAP->{user_name},
+                undef
+            );
+        };
+
+        if( $EVAL_ERROR || !defined( $handle ) )
+        {
+            _log(
+                $LOG_LEVEL_ERROR,
+                "Failed to connect to database '$CONNECTION_MAP->{connection_string}'"
+            );
+        }
+
+        local $SIG{__WARN__} = $old_warn;
 
         if( $connect_count > 5 )
         {
@@ -1321,12 +1494,28 @@ sub db_connect(;$$) :Export( :MANDATORY )
 
         if( $connect_count == 3 )
         {
+            my $old_warn = local $SIG{__WARN__};
+            local $SIG{__WARN__} = sub { };
             # Sanity check - does the DB exist?
-            my $pg_handle = DBI->connect(
-                $CONNECTION_MAP->{pg_connection_string},
-                $CONNECTION_MAP->{user_name},
-                undef
-            );
+            my $pg_handle;
+
+            eval {
+                $pg_handle = DBI->connect(
+                    $CONNECTION_MAP->{pg_connection_string},
+                    $CONNECTION_MAP->{user_name},
+                    undef
+                );
+            };
+
+            if( $EVAL_ERROR || !defined( $pg_handle ) )
+            {
+                _log(
+                    $LOG_LEVEL_ERROR,
+                    "Failed to connect to database '$CONNECTION_MAP->{pg_connection_string}'"
+                );
+            }
+
+            local $SIG{__WARN__} = $old_warn;
 
             next unless( $pg_handle );
             my $check_sth = $pg_handle->prepare( 'SELECT datallowconn FROM pg_database WHERE datname = ?' );
