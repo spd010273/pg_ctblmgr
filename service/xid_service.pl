@@ -361,6 +361,7 @@ unless( defined( $DAEMONIZE ) && $DAEMONIZE )
 
 $handle = &db_connect();
 xid_service_register();
+set_program_name( $handle, 'pg_ctblmgr XID Reservation Service' );
 
 my $listen = IO::Socket::INET->new(
     LocalPort => $XID_SERVICE_PORT,
