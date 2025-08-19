@@ -226,7 +226,8 @@ END_SQL
 Readonly::Scalar my $CHECK_CACHE_TABLE_COLUMNS => <<END_SQL;
 WITH tt_existing AS
 (
-    SELECT a.attname::VARCHAR as column_name
+    SELECT a.attname::VARCHAR as column_name,
+           a.atttypid AS data_type
       FROM pg_catalog.pg_class c
 INNER JOIN pg_catalog.pg_namespace n
         ON n.oid = c.relnamespace
@@ -239,7 +240,8 @@ INNER JOIN pg_catalog.pg_attribute a
 ),
 tt_requested AS
 (
-    SELECT a.attname::VARCHAR AS column_name
+    SELECT a.attname::VARCHAR AS column_name,
+           a.atttypid AS data_type
       FROM pg_catalog.pg_class c
 INNER JOIN pg_catalog.pg_namespace n
         ON n.oid = c.relnamespace
@@ -255,6 +257,7 @@ INNER JOIN pg_attribute a
       FROM tt_existing e
 FULL OUTER JOIN tt_requested r
         ON e.column_name = r.column_name
+       AND e.data_type = r.data_type
      WHERE e.column_name IS NULL
         OR r.column_name IS NULL
 END_SQL
