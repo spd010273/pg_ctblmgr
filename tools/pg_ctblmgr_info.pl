@@ -25,9 +25,7 @@ Readonly my $TCP_KEEPALIVE_COUNT    => 200;
 Readonly my $TCP_USER_TIMEOUT       => 1000 * 60 * 5;
 Readonly::Scalar my $EXTENSION_NAME => 'pg_ctblmgr';
 Readonly::Scalar my $SCHEMA_NAME    => 'pgctblmgr';
-Readonly my $WFT_KEY => 17783312;
-Readonly my $WS_KEY  => 17783313;
-Readonly my $XID_KEY => 17783314;
+Readonly my $WS_KEY  => 17783313 + 1;
 
 Readonly::Scalar my $USAGE          => <<USAGE;
 USAGE:
@@ -582,28 +580,6 @@ sub parse_command($$;$)
     return;
 }
 
-sub read_xid_map()
-{
-    my $XID_MAP = [];
-    unless( get_or_create_shm( $XID_KEY ) )
-    {
-        warn( "Could not tie XID_MAP - is $EXTENSION_NAME running?\n" );
-        return undef;
-    }
-
-    do_lock( $XID_KEY, $READ_LOCK );
-    $XID_MAP = readmem( $XID_KEY );
-    do_lock( $XID_KEY, $READ_UNLOCK );
-    my $xid_map = {};
-    foreach my $xid( keys %$XID_MAP )
-    {
-        next unless( defined( $XID_MAP->{$xid} ) );
-        $xid_map->{$xid} = { snapshot => $XID_MAP->{$xid} };
-    }
-
-    return $xid_map;
-}
-
 sub read_worker_statuses()
 {
     my $WORKER_STATUSES = {};
@@ -642,10 +618,9 @@ sub read_worker_statuses()
 
 sub print_worker_table()
 {
-    my $xid_map = read_xid_map();
     my $worker_statuses = read_worker_statuses();
 
-    if( !defined $xid_map || !defined( $worker_statuses ) )
+    if( !defined( $worker_statuses ) )
     {
         return;
     }
@@ -655,16 +630,6 @@ sub print_worker_table()
         "Status\n------", "|\n|",
         "Last LSN\n--------",
     );
-
-    my @keys = sort { $a <=> $b } keys( %$xid_map );
-    my $min_xid = shift( @keys );
-    my $min_snapshot = $xid_map->{$min_xid}->{snapshot};
-    my $max_xid = pop( @keys );
-    my $max_snapshot = $xid_map->{$max_xid}->{snapshot};
-
-    print "XID Mapping ranges:\n";
-    print "Min: $min_xid ( $min_snapshot )\n" if( $min_xid && $min_snapshot );
-    print "Max: $max_xid ( $max_snapshot )\n" if( $max_xid && $max_snapshot );
 
     foreach my $pid( sort { $a <=> $b } keys %$worker_statuses )
     {
