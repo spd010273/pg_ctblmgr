@@ -23,6 +23,9 @@ BEGIN
     IF( TG_OP = 'INSERT' ) THEN
         my_record := NEW;
     ELSIF( TG_OP = 'UPDATE' ) THEN
+        IF( NEW::VARCHAR IS NOT DISTINCT FROM OLD::VARCHAR ) THEN
+            RETURN NEW;
+        END IF;
         my_record := NEW;
     ELSE
         my_record := OLD;
