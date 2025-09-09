@@ -1515,6 +1515,10 @@ sub worker_entrypoint($$)
                         $xid_client->shutdown( SHUT_RDWR );
                         $xid_client->close();
                     }
+                    else
+                    {
+                        _log( $LOG_LEVEL_ERROR, "No XID service running, defaulting to slow delete\n" );
+                    }
                 }
 
                 # Generate temp table containing state of rows relevent to the keys that have changed
@@ -1560,7 +1564,7 @@ sub worker_entrypoint($$)
                     unless( $aged_handle )
                     {
                         $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not connect aged handle' );
+                        _log( $LOG_LEVEL_ERROR, 'Fast delete failed - could not connect aged handle' );
                         goto FD_FALLBACK;
                     }
 
@@ -1569,21 +1573,21 @@ sub worker_entrypoint($$)
                     unless( $aged_handle->do( 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ' ) )
                     {
                         $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not begin repeatable read transaction' );
+                        _log( $LOG_LEVEL_ERROR, 'Fast delete failed - could not begin repeatable read transaction' );
                         goto FD_FALLBACK;
                     }
 
                     unless( $aged_handle->do( "SET idle_session_timeout = ?", undef, $xid_idle_timeout ) )
                     {
                         $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
+                        _log( $LOG_LEVEL_ERROR, 'Fast delete failed - could not set idle session timeout' );
                         goto FD_FALLBACK;
                     }
 
                     unless( $aged_handle->do( "SET TRANSACTION SNAPSHOT '$aged_snapshot'" ) )
                     {
                         $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not import aged snapshot' );
+                        _log( $LOG_LEVEL_ERROR, 'Fast delete failed - could not import aged snapshot' );
                         goto FD_FALLBACK;
                     }
 
@@ -1591,9 +1595,10 @@ sub worker_entrypoint($$)
                     unless( $aged_handle->do( "SET idle_in_transaction_session_timeout = ?", undef, $xid_idle_timeout ) )
                     {
                         $can_fast_delete = 0;
-                        _log( $LOG_LEVEL_DEBUG, 'Fast delete failed - could not set idle session timeout' );
+                        _log( $LOG_LEVEL_ERROR, 'Fast delete failed - could not set idle session timeout' );
                         goto FD_FALLBACK;
                     }
+
                     _log(
                         $LOG_LEVEL_DEBUG,
                         "Established aged handle at snapshot $aged_snapshot "
@@ -1615,6 +1620,7 @@ FD_FALLBACK:
 
                 my $aged_temp_table;
                 my $aged_data = [];
+
                 if( $can_fast_delete && $tried_fast_delete && defined( $aged_handle ) )
                 {
                     $SKIP_LOCK_CHECK = 1;
