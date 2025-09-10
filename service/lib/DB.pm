@@ -88,6 +88,9 @@ Readonly::Scalar my $XID_SERVICE_CHECK => <<"END_SQL";
 INNER JOIN pg_class c
         ON c.oid = l.classid
        AND l.pid != pg_backend_pid()
+INNER JOIN pg_database d
+        ON d.oid = l.database
+       AND d.datname = current_database()
      WHERE l.objid = -1::INTEGER
 END_SQL
 
@@ -2954,13 +2957,15 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     $DELETE_Q = <<"END_SQL";
 WITH tt_rows_to_delete AS
 (
+    WITH tt_del AS MATERIALIZED
+    (
+        $definition
+    )
     SELECT $vw_sel
       FROM $cache_table_schema.$cache_table_name vw
     EXCEPT
     SELECT $tt_sel
-      FROM (
-               $definition
-           ) tt
+      FROM tt_del tt
 )
     DELETE FROM $cache_table_schema.$cache_table_name vw
           USING tt_rows_to_delete tt

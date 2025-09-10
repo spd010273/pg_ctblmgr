@@ -85,7 +85,10 @@ sub connect_to_xid_service($$)
     }
 
     my $enable_fast_delete = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
-    return unless( $enable_fast_delete ); # no xid service
+    unless( $enable_fast_delete )
+    {
+        _log( $LOG_LEVEL_INFO, "Xid service is disabled because fast delete is not enabled" );
+    } # no xid service
 
     $xid_client = IO::Socket->new(
         Domain   => AF_INET,
@@ -808,9 +811,23 @@ sub worker_cache_refresh($$$$)
                     $filter_tables_hash->{$bind_schema}->{$bind_table} = 1;
                     my $rel = "${bind_schema}.${bind_table}";
                     push( @$new_filter_tables, $rel );
-                    $ft_needs_fixup = 1 unless( grep /^$rel$/, @$filter_tables );
+                    unless( grep /^$rel$/, @$filter_tables )
+                    {
+                        $ft_needs_fixup = 1;
+                        _log( $LOG_LEVEL_DEBUG, "Relation $rel detected in query but not present in filter set" );
+                    }
+
                 }
             }
+        }
+    }
+
+    foreach my $rel( @$filter_tables )
+    {
+        unless( grep /^$rel$/, @$new_filter_tables )
+        {
+            _log( $LOG_LEVEL_DEBUG, "Relation $rel is in filter set but not detected in query" );
+            $ft_needs_fixup = 1;
         }
     }
 
@@ -1323,6 +1340,8 @@ sub worker_entrypoint($$)
             {
                 _log( $LOG_LEVEL_ERROR, "No bind positions generated for $CACHE_HASH->{name} with the following changes:" );
                 _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
+                _log( $LOG_LEVEL_ERROR, "This is likely a bogus update. If it is not, add this table(s) to filter_tables" );
+                next;
             }
 
             $NO_TEMP_TABLES = 0;
@@ -1387,8 +1406,8 @@ sub worker_entrypoint($$)
                 update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
                 my $query_parse_start = [ gettimeofday() ];
-
-                my $query = &apply_filters( $map );
+                my $bind_count = 0;
+                my $query = &apply_filters( $map, \$bind_count );
 
                 if( !&test_query( $handle, $query ) )
                 {
@@ -1397,6 +1416,14 @@ sub worker_entrypoint($$)
                         'Failed to apply filters to query for cache '
                       . "table '$CACHE_HASH->{name}'"
                     );
+                    next;
+                }
+
+                if( $bind_count == 0 )
+                {
+                    _log( $LOG_LEVEL_ERROR, "Made no substitutions into query for $CACHE_HASH->{name} with the following changes:" );
+                    _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
+                    _log( $LOG_LEVEL_ERROR, "This is likely a bogus update, please fix filter_tables" );
                     next;
                 }
 

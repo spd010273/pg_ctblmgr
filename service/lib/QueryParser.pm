@@ -3087,11 +3087,12 @@ sub generate_where_expressions($) :Export( :MANDATORY )
     return $where_expressions;
 }
 
-sub apply_filters($) :Export( :MANDATORY )
+sub apply_filters($$) :Export( :MANDATORY )
 {
-    my( $map ) = validate_pos(
+    my( $map, $bind_count ) = validate_pos(
         @_,
-        { type => HASHREF }
+        { type => HASHREF },
+        { type => SCALARREF },
     );
 
     my $table_mapping     = $map->{table_mapping};
@@ -3109,6 +3110,7 @@ sub apply_filters($) :Export( :MANDATORY )
 
     #print Dumper( $where_expressions ) if( defined $CONFIG_MANAGER && $CONFIG_MANAGER->get_config_value( 'debug' ) );
     my $new_q = $definition;
+    my $last_q = $definition;
     my $index = 0;
 
     foreach my $bind_start( @starts )
@@ -3298,7 +3300,12 @@ sub apply_filters($) :Export( :MANDATORY )
         $new_q = $preceeding_query
                . $substituted_where
                . $proceeding_query;
+        if( $new_q ne $last_q )
+        {
+            $$bind_count++;
+        }
 
+        $last_q = $new_q;
         $index++;
     }
 
