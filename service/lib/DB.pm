@@ -2955,7 +2955,7 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     }
 
     $DELETE_Q = <<"END_SQL";
-WITH tt_rows_to_delete AS
+WITH tt_rows_to_delete AS MATERIALIZED
 (
     WITH tt_del AS MATERIALIZED
     (
