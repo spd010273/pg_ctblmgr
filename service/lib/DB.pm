@@ -34,7 +34,7 @@ Readonly my $DEFAULT_TCP_KEEPALIVES_INTERVAL  => $CONFIG_CATALOG{'db_conn_tcp_ke
 Readonly my $DEFAULT_TCP_USER_TIMEOUT         => $CONFIG_CATALOG{'db_conn_tcp_user_timeout'}->{value};
 
 $OUTPUT_AUTOFLUSH = 1;
-our $CONNECTION_MAP :Export( :MANDATORY );
+our $CONNECTION_MAP              :Export( :MANDATORY );
 our $LOCAL_PK_MAINTENANCE_OBJECT :Export( :MANDATORY );
 our $SKIP_SHM_CLEANUP            :Export( :MANDATORY ) = 0;
 our $MAINTENANCE_CHANNEL         :Export( :MANDATORY ) = '';
@@ -43,6 +43,8 @@ our $FILE_DESCRIPTOR             :Export( :MANDATORY );
 our $SKIP_LOCK_CHECK             :Export( :MANDATORY ) = 0;
 our $BACKEND_PID                 :Export( :MANDATORY ) = 0;
 our $NO_TEMP_TABLES              :Export( :MANDATORY ) = 0;
+our $FORCE_MATERIALIZE           :Export( :MANDATORY ) = 0;
+our $ENABLE_FAST_DELETE          :Export( :MANDATORY ) = 0;
 
 # Only use global locking when global snapshots are enabled. Currently cross db snapshot imports are not allowed
 #our $PGCTBLMGR_XID_MAGIC_1       :Export( :MANDATORY ) = 82163684;
@@ -819,6 +821,7 @@ sub xid_service_check($) :Export( :MANDATORY )
         { type => OBJECT },
     );
 
+    return 0 unless( $ENABLE_FAST_DELETE );
     my $lock_check_sth = $handle->prepare( $XID_SERVICE_CHECK );
 
     return 0 unless( defined( $lock_check_sth ) );
@@ -828,6 +831,7 @@ sub xid_service_check($) :Export( :MANDATORY )
     return 0 unless( $lock_check_sth->rows() == 0 );
 
     $lock_check_sth->finish();
+    return 1;
 }
 
 sub xid_service_lock($) :Export( :MANDATORY )
@@ -1275,7 +1279,7 @@ sub replace_cache_table($$) :Export( :MANDATORY )
         return 0;
     }
 
-    $handle->do( "SET application_name = 'replace $ct_hash->{name}'" );
+    $handle->do( "SET application_name = 'Replace $ct_hash->{name}'" );
 
     my $name          = $ct_hash->{name};
     my $schema        = $ct_hash->{schema};
@@ -1562,7 +1566,7 @@ sub db_connect(;$$) :Export( :MANDATORY )
 	$handle->do( "SET tcp_keepalives_idle = ?", undef, $tcp_keepalives_idle );
 	$handle->do( "SET tcp_keepalives_interval = ?", undef, $tcp_keepalives_interval );
 	$handle->do( "SET tcp_user_timeout = ?", undef, $tcp_user_timeout );
-
+    $handle->{PrintError} = 1;
 #    $handle->do( "SET client_min_messages = 'DEBUG1'" ) if( $CONFIG_MANAGER->get_config_value( 'debug' ) );
 
     if( !defined( $is_aged ) && $PROCESS_ID != $PARENT_PID )
@@ -2029,7 +2033,7 @@ sub create_cache_table($$)
 
     my $batched_create = defined( $CONFIG_MANAGER ) ? $CONFIG_MANAGER->get_config_value( 'batched_create' ) : $DEFAULT_BATCHED_CREATE;
 
-    $handle->do( "SET application_name = 'create: $name'" );
+    $handle->do( "SET application_name = 'Create: $name'" );
     my $create_query = _get_create_cache_table_query( $batched_create );
     $create_query    =~ s/__TABLE__/${schema}.${name}/;
     $create_query    =~ s/__DEFINITION__/$definition/;
@@ -2045,7 +2049,7 @@ sub create_cache_table($$)
     if( $batched_create )
     {
         _log( $LOG_LEVEL_DEBUG, "Performing batch population of $name" );
-        $handle->do( "SET application_name = 'batch populate: $name'" );
+        $handle->do( "SET application_name = 'Batch populate: $name'" );
         my $done            = 0;
         my $offset          = 0;
         my $populate_q      = $CREATE_POPULATE;
@@ -2263,26 +2267,42 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
     $handle->do( "DROP TABLE IF EXISTS $temp_table_name" );
     $handle->do( "SET client_min_messages TO DEFAULT" );
 
-    my $sth             = try_query( $handle, $tt_query );
+    my $sth  = try_query( $handle, $tt_query );
+    return unless( $sth );
+    $sth->finish();
 
-    if( $sth )
+    my $tt_count = get_table_count( $handle, $temp_table_name );
+    return undef if( $tt_count < 0 );
+
+    my $return_data = {
+        count => $tt_count,
+        name  => $temp_table_name,
+        index => "ix_$temp_table_name"
+    };
+    my $uniques = join( ',', @{$ct_hash->{unique_index}} );
+
+    $sth = try_query(
+        $handle,
+        "CREATE UNIQUE INDEX ix_$temp_table_name "
+      . "ON $temp_table_name( $uniques )"
+    );
+
+    unless( $sth )
     {
-        $sth->finish();
+        _log(
+            $LOG_LEVEL_WARNING,
+            'Failed to create unique index on comparrison table. '
+          . 'Please verify the cardinality of this index provided!'
+        );
+    }
 
-        my $tt_count = get_table_count( $handle, $temp_table_name );
-        return undef if( $tt_count < 0 );
+    $sth->finish();
 
-        my $return_data = {
-            count => $tt_count,
-            name  => $temp_table_name,
-            index => "ix_$temp_table_name"
-        };
-        my $uniques = join( ',', @{$ct_hash->{unique_index}} );
-
+    if( $ct_hash->{null_unique} && scalar( @{$ct_hash->{null_unique}} ) > 0 )
+    {
         $sth = try_query(
             $handle,
-            "CREATE UNIQUE INDEX ix_$temp_table_name "
-          . "ON $temp_table_name( $uniques )"
+            "CREATE INDEX ix_null_${temp_table_name} ON $temp_table_name( " . join( ',', @{$ct_hash->{null_unique}} ) . ' )'
         );
 
         if( $sth )
@@ -2291,34 +2311,11 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
         }
         else
         {
-            _log(
-                $LOG_LEVEL_WARNING,
-                'Failed to create unique index on comparrison table. '
-              . 'Please verify the cardinality of this index provided!'
-            );
+            _log( $LOG_LEVEL_WARNING, "Failed to generate complementary null index on ${temp_table_name}" );
         }
-
-        if( $ct_hash->{null_unique} && scalar( @{$ct_hash->{null_unique}} ) > 0 )
-        {
-            $sth = try_query(
-                $handle,
-                "CREATE INDEX ix_null_${temp_table_name} ON $temp_table_name( " . join( ',', @{$ct_hash->{null_unique}} ) . ' )'
-            );
-
-            if( $sth )
-            {
-                $sth->finish();
-            }
-            else
-            {
-                _log( $LOG_LEVEL_WARNING, "Failed to generate complementary null index on ${temp_table_name}" );
-            }
-        }
-
-        return $return_data;
     }
 
-    return undef;
+    return $return_data;
 }
 
 sub drop_temp_table($$) :Export( :MANDATORY )
@@ -2424,7 +2421,7 @@ sub generate_update_statement($$$$$) :Export( :MANDATORY )
     my $null_unique     = $cache_hash->{null_unique};
 
     $handle = &db_connect( $handle );
-    $handle->do( "SET application_name = 'update: $cache_table_name'" );
+    $handle->do( "SET application_name = 'Update: $cache_table_name'" );
     my $join_clauses       = [];
     my $where_clauses      = [];
     my $distinct_uniques   = [];
@@ -2442,15 +2439,25 @@ sub generate_update_statement($$$$$) :Export( :MANDATORY )
     }
 
     my $tt;
+    my $materialized_cte = '';
+
     if( $NO_TEMP_TABLES )
     {
         $tt = "( $query )";
     }
     else
     {
+        # use of a temp table may have been dictated elsewhere
         $tt = $temp_table->{name};
     }
 
+    if( $FORCE_MATERIALIZE && ( $NO_TEMP_TABLES || defined( $temp_table->{virtual} ) ) )
+    {
+        # if we definitely aren't using a temp table, use a materialized CTE to
+        # stabilize the query runtimes
+        $tt               = 'tt_update';
+        $materialized_cte = "WITH $tt AS MATERIALIZED ( $query )"
+    }
 
     if( $temp_table->{count} > $bulk_action_cutoff )
     {
@@ -2524,6 +2531,7 @@ END_SQL
                             . ' )';
 
         my $UPDATE_Q        = <<END_SQL;
+        $materialized_cte
         UPDATE $cache_table_schema.$cache_table_name ct
            SET $update_fragment
           FROM $tt tt
@@ -2565,7 +2573,7 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
     my $null_unique     = $cache_hash->{null_unique};
 
     $handle = &db_connect( $handle );
-    $handle->do( "SET application_name = 'insert: $cache_table_name'" );
+    $handle->do( "SET application_name = 'Insert: $cache_table_name'" );
 
     my $join_clauses  = [];
     my $where_clauses = [];
@@ -2576,11 +2584,15 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
     push( @$join_clauses, map { "( ( tt.$_ = vw.$_ ) OR ( tt.$_ IS NULL AND vw.$_ IS NULL ) )" } @$null_unique );
     push( @$where_clauses, map { "tt.$_ IS NULL" } @$uniques );
 
-    my $ins_columns    = join( ', ', @$table_columns );
-    my $columns        = join( ', ', map { "vw.$_" } @$table_columns );
-    my $join_predicate = join( ' AND ', @$join_clauses );
-    my $where_clause   = join( ' AND ', @$where_clauses );
-    my $tt;
+    my $ins_columns      = join( ', ', @$table_columns );
+    my $columns          = join( ', ', map { "vw.$_" } @$table_columns );
+    my $join_predicate   = join( ' AND ', @$join_clauses );
+    my $where_clause     = join( ' AND ', @$where_clauses );
+    my $tt               = '';
+    my $materialized_cte = '';
+    my $materialize      = '';
+    $materialize         = 'MATERIALIZED' if( $FORCE_MATERIALIZE );
+
     if( $NO_TEMP_TABLES )
     {
         $tt = "( $query )";
@@ -2590,9 +2602,18 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
         $tt = $temp_table->{name};
     }
 
+    if( $FORCE_MATERIALIZE && ( $NO_TEMP_TABLES || defined( $temp_table->{virtual} ) ) )
+    {
+        # if we definitely aren't using a temp table, use a materialized CTE to
+        # stabilize the query runtimes
+        $tt = 'tt_insert';
+        $materialized_cte = "WITH $tt AS MATERIALIZED ( $query )"
+    }
+
     my $INSERT_Q = <<END_SQL;
-    WITH tt_records_to_insert AS
+    WITH tt_records_to_insert AS $materialize
     (
+        $materialized_cte
         SELECT $columns
           FROM $tt vw
      LEFT JOIN $cache_table_schema.$cache_table_name tt
@@ -2621,8 +2642,11 @@ sub get_change_volume($$$) :Export( :MANDATORY )
         { type => HASHREF },
     );
 
+    my $materialize = '';
+    $materialize    = 'MATERIALIZED' if( $FORCE_MATERIALIZE );
+
     my $q = <<"END_SQL";
-    WITH tt_count AS
+    WITH tt_count AS $materialize
     (
         $query
     )
@@ -2853,6 +2877,8 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
     # at this point, past_temp_table contains data from a historic timeline but
     # is in the present timeline
     my $past_temp_table = "tt_past_data_${PROCESS_ID}";
+    my $materialize     = '';
+    $materialize        = 'MATERIALIZED' if( $FORCE_MATERIALIZE );
 
     if( $NO_TEMP_TABLES )
     {
@@ -2896,7 +2922,7 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
 
     $past_temp_table .= ' tt' unless( $NO_TEMP_TABLES );;
     my $delete_query = <<END_SQL;
-    WITH tt_rows_to_delete AS
+    WITH tt_rows_to_delete AS $materialize
     (
         SELECT $unique_column_select
           FROM $past_temp_table
@@ -2938,7 +2964,7 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     my $not_null_uniques = $cache_hash->{not_null_unique};
     my $uniques          = $cache_hash->{unique_index};
 
-    $handle->do( "SET application_name = 'delete: $cache_table_name'" );
+    $handle->do( "SET application_name = 'Slow delete: $cache_table_name'" );
     my $DELETE_Q;
     my $join_preds = [];
 
@@ -2948,6 +2974,8 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     my $tt_sel         = join( ',', map { "tt.$_" } @$uniques );
     my $vw_sel         = join( ',', map { "vw.$_" } @$uniques );
     my $join_predicate = join( ' AND ', @$join_preds );
+    my $materialize    = '';
+    $materialize       = 'MATERIALIZED' if( $FORCE_MATERIALIZE );
 
     if( scalar( @$join_preds ) > 1 )
     {
@@ -2955,9 +2983,9 @@ sub generate_delete_statement($$) :Export( :MANDATORY )
     }
 
     $DELETE_Q = <<"END_SQL";
-WITH tt_rows_to_delete AS MATERIALIZED
+WITH tt_rows_to_delete AS $materialize
 (
-    WITH tt_del AS MATERIALIZED
+    WITH tt_del AS $materialize
     (
         $definition
     )

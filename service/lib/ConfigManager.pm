@@ -147,6 +147,11 @@ Readonly::Hash our %CONFIG_CATALOG :Export( :MANDATORY ) => (
         type        => $T_INTEGER,
         description => 'tcp_user_timeout setting for database connections',
     },
+    explicit_materialize_ops => {
+        value       => 1,
+        type        => $T_BOOLEAN,
+        description => 'Force addition of MATERIALIZE operand in CTEs used to generate tuple updates by pg_ctblmgr. This can improve or stabilize performance',
+    },
 );
 
 sub _derive_xid_bucket_count

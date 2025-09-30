@@ -84,8 +84,7 @@ sub connect_to_xid_service($$)
         $xid_client->close();
     }
 
-    my $enable_fast_delete = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
-    unless( $enable_fast_delete )
+    unless( $ENABLE_FAST_DELETE )
     {
         _log( $LOG_LEVEL_INFO, "Xid service is disabled because fast delete is not enabled" );
     } # no xid service
@@ -407,15 +406,13 @@ sub check_for_new_cache_tables($$)
 }
 
 ## PARENT
-sub parent_loop($$)
+sub parent_loop($)
 {
     my(
         $worker_mapping,
-        $enable_fast_delete,
     ) = validate_pos(
         @_,
         { type => HASHREF  }, # local mapping of pk_maint_obj -> pid
-        { type => SCALAR   },
     );
 
     my $WORKER_STATUSES;
@@ -997,7 +994,7 @@ sub worker_entrypoint($$)
     # our query changes underneath us
     # TODO: Add detection and correction for the above
     _log( $LOG_LEVEL_DEBUG, "Worker $worker_pid running" );
-    &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
+    &set_program_name( $handle, "Idle: $CACHE_HASH->{name}" );
     do_listen( $handle );
 
     if( $CACHE_HASH->{driver} eq 'postgresql' )
@@ -1107,7 +1104,7 @@ sub worker_entrypoint($$)
             my $missed_notifs      = [];
             my $notifications_mat  = [];
             my $xid_idle_timeout   = $CONFIG_MANAGER->get_config_value( 'xid_idle_timeout' );
-            my $enable_fast_delete = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
+            $ENABLE_FAST_DELETE    = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
 
             NOTIFY_LOOP: while( !defined( $ret->[0] ) )
             {
@@ -1378,6 +1375,8 @@ sub worker_entrypoint($$)
             #         ON b.bar = a.bar
             #      WHERE a.baz = '1'::INT
             my $filtered = 0;
+            $FORCE_MATERIALIZE = $CONFIG_MANAGER->get_config_value( 'explicit_materialize_ops' );
+
             foreach my $bind_position( keys %$where_expressions )
             {
                 if( $CONFIG_MANAGER->get_config_value( 'conservative_table_filtering' ) )
@@ -1509,7 +1508,7 @@ sub worker_entrypoint($$)
                     }
                 }
 
-                if( $enable_fast_delete )
+                if( $ENABLE_FAST_DELETE )
                 {
                     my $xid_client = connect_to_xid_service( $handle, undef );
 
@@ -1550,7 +1549,7 @@ sub worker_entrypoint($$)
 
                 # Generate temp table containing state of rows relevent to the keys that have changed
                 update_status( { status => $WORKER_STATUS_TEMP_TABLE } );
-                &set_program_name( $handle, "temp table $CACHE_HASH->{name}" );
+                &set_program_name( $handle, "Temp table: $CACHE_HASH->{name}" );
                 my $temp_table_start = [ gettimeofday() ];
                 my $temp_table = {};
 
@@ -1559,6 +1558,7 @@ sub worker_entrypoint($$)
                     # Instead of passing around the temp table name, let's use a nested from clause select
                     $temp_table->{name}  = "( $query )";
                     $temp_table->{count} = 0;
+                    $temp_table->{virtual} = 1;
                 }
                 else
                 {
@@ -1652,8 +1652,8 @@ FD_FALLBACK:
                 {
                     $SKIP_LOCK_CHECK = 1;
                     update_status( { status => $WORKER_STATUS_FAST_DELETE } );
-                    &set_program_name( $handle, "fast delete $CACHE_HASH->{name}" );
-                    &set_program_name( $aged_handle, "fast delete $CACHE_HASH->{name}" );
+                    &set_program_name( $handle, "Fast delete: $CACHE_HASH->{name}" );
+                    &set_program_name( $aged_handle, "Lookback: $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using fast delete" );
                     # Create temp table in aged handle && perform fast delete
                     if( $NO_TEMP_TABLES )
@@ -1748,7 +1748,7 @@ FD_FALLBACK:
                 {
                     update_status( { status => $WORKER_STATUS_SLOW_DELETE } );
 
-                    &set_program_name( $handle, "slow delete $CACHE_HASH->{name}" );
+                    &set_program_name( $handle, "Slow delete: $CACHE_HASH->{name}" );
                     _log( $LOG_LEVEL_DEBUG, "Using slow delete" );
                     my $slow_delete_start = [ gettimeofday() ];
                     my $delete_result = generate_delete_statement(
@@ -1770,7 +1770,7 @@ FD_FALLBACK:
                 }
 
                 update_status( { status => $WORKER_STATUS_UPDATE } );
-                &set_program_name( $handle, "update $CACHE_HASH->{name}" );
+                &set_program_name( $handle, "Update: $CACHE_HASH->{name}" );
                 my $update_start = [ gettimeofday() ];
                 my $update_result = generate_update_statement(
                     $handle,
@@ -1797,7 +1797,7 @@ FD_FALLBACK:
                     # We perform insert/update action with one fell swoop in generage_update_statement iff
                     # the above condition is met.
                     update_status( { status => $WORKER_STATUS_INSERT } );
-                    &set_program_name( $handle, "insert $CACHE_HASH->{name}" );
+                    &set_program_name( $handle, "Insert: $CACHE_HASH->{name}" );
                     my $insert_start = [ gettimeofday() ];
                     my $insert_result = generate_insert_statement(
                         $handle,
@@ -1839,7 +1839,7 @@ FD_FALLBACK:
                 last unless( $CONFIG_MANAGER->get_config_value( 'conservative_table_filtering' ) );
             }
 
-            &set_program_name( $handle, "idle $CACHE_HASH->{name}" );
+            &set_program_name( $handle, "Idle: $CACHE_HASH->{name}" );
             update_status( { status => $WORKER_STATUS_IDLE } );
 
             select( undef, undef, undef, $CONFIG_MANAGER->get_config_value( 'sleep_timer' ) );
@@ -1881,7 +1881,7 @@ usage( 'Invalid host name' ) if( !defined( $host ) || length( $host ) == 0 );
 $CONFIG_MANAGER = ConfigManager->new( config_file => $config_file );
 
 # These configs that cannot be reloaded and only take effect on restart
-my $ENABLE_FAST_DELETE = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
+$ENABLE_FAST_DELETE = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
 
 my $conn_string = "dbi:Pg:dbname=${dbname};host=${host};port=${port}";
 my $pg_conn_string = "dbi:Pg:dbname=postgres;host=${host};port=${port}";
@@ -1994,8 +1994,7 @@ else
 
 &set_program_name( undef, "parent process" );
 parent_loop(
-    $worker_mapping,
-    $ENABLE_FAST_DELETE
+    $worker_mapping
 );
 _log( $LOG_LEVEL_ERROR, "Parent exited main loop" );
 if( defined $SKIP_SHM_CLEANUP && $SKIP_SHM_CLEANUP )
