@@ -1320,6 +1320,8 @@ sub worker_entrypoint($$)
 
             next if( scalar( keys %{$changes} ) == 0 );
 
+            # Lets check if the stuff in changes exists and if it is outer joined
+            #print Dumper( $changes );
             my $map = {
                 handle                    => $handle,
                 query_data                => $CACHE_HASH->{parse_tree},
@@ -1331,11 +1333,14 @@ sub worker_entrypoint($$)
                 outer_grouped_rels_only   => $CONFIG_MANAGER->get_config_value( 'outer_grouped_rels_only' ),
             };
 
-            my $where_expressions = generate_where_expressions( $map );
-
+            my $where_expression_map        = generate_where_expressions( $map );
+            my $where_expressions           = $where_expression_map->{where};
+            my $alternate_where_expressions = $where_expression_map->{alternate};
+            # Alternate and where are very close but contain slight variations of how filtering occurs
+            # for when outer relations are being filtered
             if( scalar( keys %$where_expressions ) == 0 )
             {
-                _log( $LOG_LEVEL_ERROR, "No bind positions generated for $CACHE_HASH->{name} with the following changes:" );
+                _log( $LOG_LEVEL_ERROR, "No where clause fragments generated for $CACHE_HASH->{name} with the following changes:" );
                 _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
                 _log( $LOG_LEVEL_ERROR, "This is likely a bogus update. If it is not, add this table(s) to filter_tables" );
                 next;
@@ -1376,10 +1381,11 @@ sub worker_entrypoint($$)
             #      WHERE a.baz = '1'::INT
             my $filtered = 0;
             $FORCE_MATERIALIZE = $CONFIG_MANAGER->get_config_value( 'explicit_materialize_ops' );
+            my $conservative_table_filtering = $CONFIG_MANAGER->get_config_value( 'conservative_table_filtering' );
 
             foreach my $bind_position( keys %$where_expressions )
             {
-                if( $CONFIG_MANAGER->get_config_value( 'conservative_table_filtering' ) )
+                if( $conservative_table_filtering )
                 {
                     $map->{where_expressions}->{$bind_position} = $where_expressions->{$bind_position};
                 }
@@ -1399,21 +1405,45 @@ sub worker_entrypoint($$)
                 my $insert_time;
 
                 # Fast delete variables / flags
-                my $can_fast_delete = 0;
+                my $can_fast_delete   = 0;
                 my $tried_fast_delete = 0;
 
                 update_status( { status => $WORKER_STATUS_QUERY_PARSE } );
                 _log( $LOG_LEVEL_DEBUG, "Applying changes" );
-                my $query_parse_start = [ gettimeofday() ];
-                my $bind_count = 0;
-                my $query = &apply_filters( $map, \$bind_count );
 
+                my $query_parse_start = [ gettimeofday() ];
+                my $bind_count        = 0;
+                my $query             = &apply_filters( $map, \$bind_count );
+
+                if( $conservative_table_filtering )
+                {
+                    $map->{where_expressions}->{$bind_position} = $alternate_where_expressions->{$bind_position};
+                }
+                else
+                {
+                    last if( $filtered );
+                    $map->{where_expressions} = $alternate_where_expressions;
+                    $filtered = 1;
+                }
+
+                my $alternate_query = &apply_filters( $map );
+                # The queries are similar but in the case of outer joins, query contains an XOR'd operand.
                 if( !&test_query( $handle, $query ) )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
                         'Failed to apply filters to query for cache '
                       . "table '$CACHE_HASH->{name}'"
+                    );
+                    next;
+                }
+
+                if( !&test_query( $handle, $alternate_query ) )
+                {
+                    _log(
+                        $LOG_LEVEL_ERROR,
+                        'Failed to apply alternate filters to query for '
+                      . "cache table '$CACHE_HASH->{name}'"
                     );
                     next;
                 }
@@ -1433,9 +1463,10 @@ sub worker_entrypoint($$)
                 # When we buildup the BLOWOUT_FACTORS lookup table, we can approximate how many
                 # actual output rows change and can make a better decision whether to use
                 # temp tables or not in our DML statements
-                my $total_blowout = 0;
-                my $unique_ft     = '';
+                my $total_blowout        = 0;
+                my $unique_ft            = '';
                 my $force_average_update = 0;
+
                 if( $CONFIG_MANAGER->get_config_value( 'enable_blowout_approximate' ) )
                 {
                     foreach my $filter_table( keys( %$change_metadata ) )
@@ -1552,12 +1583,15 @@ sub worker_entrypoint($$)
                 &set_program_name( $handle, "Temp table: $CACHE_HASH->{name}" );
                 my $temp_table_start = [ gettimeofday() ];
                 my $temp_table = {};
+                #print "===================== QUERY =================================\n";
+                #print "$query\n";
+                #print "=============================================================\n";
 
                 if( $NO_TEMP_TABLES )
                 {
                     # Instead of passing around the temp table name, let's use a nested from clause select
-                    $temp_table->{name}  = "( $query )";
-                    $temp_table->{count} = 0;
+                    $temp_table->{name}    = "( $query )";
+                    $temp_table->{count}   = 0;
                     $temp_table->{virtual} = 1;
                 }
                 else
@@ -1658,11 +1692,11 @@ FD_FALLBACK:
                     # Create temp table in aged handle && perform fast delete
                     if( $NO_TEMP_TABLES )
                     {
-                        $aged_temp_table->{name} = "( $query )";
+                        $aged_temp_table->{name} = "( $alternate_query )";
                     }
                     else
                     {
-                        $aged_temp_table = generate_temp_table( $aged_handle, $query, $CACHE_HASH );
+                        $aged_temp_table = generate_temp_table( $aged_handle, $alternate_query, $CACHE_HASH );
                     }
 
                     unless( $aged_temp_table )
@@ -1724,7 +1758,7 @@ FD_FALLBACK:
                     }
                 }
 
-                $aged_temp_table->{name} = "( $query )" if( $NO_TEMP_TABLES );
+                $aged_temp_table->{name} = "( $alternate_query )" if( $NO_TEMP_TABLES );
                 if( $can_fast_delete && $tried_fast_delete )
                 {
                     $SKIP_LOCK_CHECK = 1;

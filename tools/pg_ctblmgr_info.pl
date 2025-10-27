@@ -172,7 +172,7 @@ sub command_rebuild($)
     my $WORKER_STATUSES = {};
 
     unless( get_or_create_shm( $WS_KEY ) )
-    {   
+    {
         warn( "Failed to attach to shared memory - is $EXTENSION_NAME running?\n" );
         return undef;
     }
@@ -227,7 +227,8 @@ sub get_cache_table_definition($$$$$)
     parse_cache_table( $cache_table, \$namespace, \$name );
 
     my $get_def_query = <<END_SQL;
-    SELECT definition
+    SELECT definition,
+           namespace
       FROM $SCHEMA_NAME.tb_maintenance_object
      WHERE ( ?::VARCHAR IS NULL OR ?::VARCHAR = namespace::VARCHAR )
        AND ?::VARCHAR = name::VARCHAR
@@ -253,8 +254,9 @@ END_SQL
 
     $sth->finish();
 
-    $$def = $row->{definition};
-    $sth = $handle->prepare( $CACHE_TABLE_COLUMNS );
+    $$def      = $row->{definition};
+    $namespace = $row->{namespace};
+    $sth       = $handle->prepare( $CACHE_TABLE_COLUMNS );
 
 	return undef unless( $sth );
 
@@ -319,7 +321,7 @@ sub command_check($$)
 
     unless( get_cache_table_definition( $handle, $cache_table, \$def, $columns, $uniques ) )
     {
-        warn( "Cache table '$cache_table' appears to no exist\n" );
+        warn( "Cache table '$cache_table' appears to not exist\n" );
         return undef;
     }
 
@@ -387,7 +389,7 @@ END_SQL
     }
 
     my $cast_cols = [];
-    my $ind_cols = []; 
+    my $ind_cols = [];
 
     foreach my $column( @$columns )
     {
@@ -398,8 +400,8 @@ END_SQL
             warn( "Type check of column $column failed" );
             return undef;
         }
-   
-        my $type_row = $col_type_sth->fetchrow_hashref(); 
+
+        my $type_row = $col_type_sth->fetchrow_hashref();
         my $type = $type_row->{typname};
 
         if( $type eq 'json' || $type eq 'jsonb' )
@@ -413,11 +415,11 @@ END_SQL
             push( @$ind_cols, $column );
         }
     }
- 
+
     $create_ind_ct .= join( ',', @$ind_cols ) . ')';
     $create_ind_cur .= join( ',', @$ind_cols ) . ')';
-    $handle->do( $create_ind_ct );
-    $handle->do( $create_ind_cur );
+    $handle->do( $create_ind_ct ) if( scalar( @$ind_cols ) > 0 && scalar( @$ind_cols ) <= 32 );
+    $handle->do( $create_ind_cur ) if( scalar( @$ind_cols ) > 0 && scalar( @$ind_cols ) <= 32 );
     my $join_predicate = '( ( '
                        . join(
                              ' ) AND ( ',
@@ -472,8 +474,8 @@ END_SQL
          WHERE $es_where
     )
 END_SQL
-    print "$check_query_left\n";
-    print "$check_query_right\n";
+    #print "$check_query_left\n";
+    #print "$check_query_right\n";
     print "Checking table validity, this may take some time.\n";
     unless( $handle->do( $check_query_left ) )
     {
@@ -584,7 +586,7 @@ sub read_worker_statuses()
 {
     my $WORKER_STATUSES = {};
 
-    unless( get_or_create_shm( $WS_KEY ) ) 
+    unless( get_or_create_shm( $WS_KEY ) )
     {
         warn( "Could not tie WORKER_STATUSES - is $EXTENSION_NAME running?\n" );
         return undef;

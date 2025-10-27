@@ -958,7 +958,7 @@ sub get_ct_definition($$$) :Export( :MANDATORY )
 
     if( $ct_sth )
     {
-        my $row = $ct_sth->fetchrow_hashref();
+        my $row                            = $ct_sth->fetchrow_hashref();
         $cache_hash->{schema}              = $row->{namespace};
         $cache_hash->{driver}              = $row->{driver_name};
         $cache_hash->{name}                = $row->{name};
@@ -2262,7 +2262,9 @@ sub generate_temp_table($$$) :Export( :MANDATORY )
 
     $handle = &db_connect( $handle );
     my $temp_table_name = 'tt_' . $ct_hash->{name};
+    _log( $LOG_LEVEL_DEBUG, "Generating TT $temp_table_name" );
     my $tt_query        = "CREATE TEMP TABLE $temp_table_name AS( $query );";
+    print "$tt_query\n" if( $PRINT_QUERIES );
     $handle->do( "SET client_min_messages = 'ERROR'" );
     $handle->do( "DROP TABLE IF EXISTS $temp_table_name" );
     $handle->do( "SET client_min_messages TO DEFAULT" );
@@ -2475,6 +2477,7 @@ sub generate_update_statement($$$$$) :Export( :MANDATORY )
               USING $tt tt
               WHERE $delete_where
 END_SQL
+        print "======================== BULK UPDATE - DELETE QUERY ===========================\n" if( $PRINT_QUERIES );
         print "$DELETE_Q\n" if( $PRINT_QUERIES );
         unless( &try_query( $handle, $DELETE_Q, [] ) )
         {
@@ -2494,6 +2497,7 @@ END_SQL
              SELECT $columns
                FROM $tt
 END_SQL
+        print "======================== BULK UPDATE - INSERT QUERY ===========================\n" if( $PRINT_QUERIES );
         print "$INSERT_Q\n" if( $PRINT_QUERIES );
         unless( &try_query( $handle, $INSERT_Q ) )
         {
@@ -2538,6 +2542,7 @@ END_SQL
          WHERE $where_clause
            AND $diff_distinct
 END_SQL
+        print "======================== UPDATE QUERY ===========================\n" if( $PRINT_QUERIES );
         print "$UPDATE_Q\n" if( $PRINT_QUERIES );
         my $sth = &try_query( $handle, $UPDATE_Q, [] );
 
@@ -2606,7 +2611,7 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
     {
         # if we definitely aren't using a temp table, use a materialized CTE to
         # stabilize the query runtimes
-        $tt = 'tt_insert';
+        $tt               = 'tt_insert';
         $materialized_cte = "WITH $tt AS MATERIALIZED ( $query )"
     }
 
@@ -2624,6 +2629,7 @@ sub generate_insert_statement($$$$) :Export( :MANDATORY )
          SELECT $columns
            FROM tt_records_to_insert vw
 END_SQL
+    print "======================== INSERT QUERY ===========================\n" if( $PRINT_QUERIES );
     print "$INSERT_Q\n" if( $PRINT_QUERIES );
     my $sth = &try_query( $handle, $INSERT_Q, [] );
 
@@ -2934,6 +2940,7 @@ sub generate_aged_delete_statement($$$$$$) :Export( :MANDATORY )
               USING tt_rows_to_delete tt
               WHERE $left_join_predicate
 END_SQL
+    print "========================= FAST DELETE QUERY ===========================\n" if( $PRINT_QUERIES );
     print "$delete_query\n" if( $PRINT_QUERIES );
     unless( $current_handle->do( $delete_query ) )
     {
@@ -3000,6 +3007,7 @@ WITH tt_rows_to_delete AS $materialize
           WHERE $join_predicate
 END_SQL
 
+    print "======================== SLOW DELETE QUERY ===========================\n" if( $PRINT_QUERIES );
     print "$DELETE_Q\n" if( $PRINT_QUERIES );
     $sth = &try_query( $handle, $DELETE_Q, [] );
     return 0 unless( $sth );
