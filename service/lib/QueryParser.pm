@@ -2848,7 +2848,6 @@ sub recursive_bind_helper($$)
 
     foreach my $bind_info( @$next_bind )
     {
-        print Dumper( $bind_info );
         my $outer_schema    = $bind_info->{outer_schema};
         my $outer_relation  = $bind_info->{outer_relation};
         my $outer_column    = $bind_info->{outer_column};
