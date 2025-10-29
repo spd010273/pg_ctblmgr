@@ -1347,8 +1347,7 @@ sub worker_entrypoint($$)
             {
                 _log( $LOG_LEVEL_ERROR, "No where clause fragments generated for $CACHE_HASH->{name} with the following changes:" );
                 _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
-                _log( $LOG_LEVEL_ERROR, "This is likely a bogus update. If it is not, add this table(s) to filter_tables" );
-                next;
+                _log( $LOG_LEVEL_ERROR, "This is likely a bogus update (or a bug). If it is not, add this table(s) to filter_tables. pg_ctblmgr will continue and run the unfiltered query to maintain data integrity." );
             }
 
             $NO_TEMP_TABLES = 0;
@@ -1457,8 +1456,7 @@ sub worker_entrypoint($$)
                 {
                     _log( $LOG_LEVEL_ERROR, "Made no substitutions into query for $CACHE_HASH->{name} with the following changes:" );
                     _log( $LOG_LEVEL_ERROR, Dumper( $changes ) );
-                    _log( $LOG_LEVEL_ERROR, "This is likely a bogus update, please fix filter_tables" );
-                    next;
+                    _log( $LOG_LEVEL_ERROR, "This is likely a bogus update or a bug, please fix filter_tables. pg_ctblmgr will continue with the full update to maintain data integrity." );
                 }
 
                 $query_parse_time = tv_interval( $query_parse_start, [ gettimeofday() ] );
