@@ -58,6 +58,24 @@ Readonly::Scalar my $USAGE => <<"USAGE";
         [ -D ( do not daemonize ) ]
 USAGE
 
+sub check_parent_is_running() :Export( :MANDATORY )
+{
+    my $ppid = getppid();
+
+    if( $ppid == 0 || $ppid == 1 ) # init owns me
+    {
+        _log( $LOG_LEVEL_FATAL, 'My process has been orphaned, exiting' );
+    }
+
+    my $ret = kill( 0, $PARENT_PID );
+    if( $ret == 0 )
+    {
+        _log( $LOG_LEVEL_FATAL, 'Parent process no longer exists, exiting' . " got $ret for $PARENT_PID" );
+    }
+
+    return;
+}
+
 sub _log($$) :Export( :MANDATORY )
 {
     my( $log_level, $message ) = validate_pos(

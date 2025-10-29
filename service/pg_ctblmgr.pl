@@ -30,6 +30,7 @@ use ConfigManager;
 use DB;
 use QueryParser;
 use Shm;
+use XidService;
 
 # DEV NOTES:
 # - This can read queries but is relatively untested against all the possible
@@ -308,16 +309,18 @@ sub start_xid_service()
         _log( $LOG_LEVEL_ERROR, "XID service does not seem to be running, launching..." );
     }
 
+    #my $parent_pid = $PROCESS_ID;
+
     $xid_service_pid = fork();
     if( defined( $xid_service_pid ) && $xid_service_pid == 0 )
     {
-        my $xid_service_launch_cmd = $XID_SERVICE_PATH . ' ' . join( ' ', @ORIGINAL_ARGV );
-        exec( $xid_service_launch_cmd );
+        xid_service_entry();
         exit( 0 );
     }
     elsif( defined( $xid_service_pid ) && $xid_service_pid > 0 )
     {
         _log( $LOG_LEVEL_INFO, "XID service launched with pid $xid_service_pid" );
+        sleep( 1 );
     }
 
     return;
@@ -332,13 +335,11 @@ sub populate_worker_data($$)
     );
 
     my $worker_data = get_worker_list( $handle );
-
     if( $worker_data )
     {
         foreach my $worker_entry( @$worker_data )
         {
             my $pk_maintenance_object = $worker_entry->{maintenance_object};
-
             $WORKER_DATA->{$pk_maintenance_object}->{hash} = $worker_entry->{hash};
             $WORKER_DATA->{$pk_maintenance_object}->{name} = $worker_entry->{name};
         }
@@ -379,21 +380,20 @@ sub check_for_new_cache_tables($$)
             }
 
             #indicate a change to a CT
-            $diff->{change}->{$pk_mo}  = $new_workers->{$pk_mo}->{name};
-            $current_workers->{$pk_mo} = $new_workers->{$pk_mo}->{name};
+            $diff->{change}->{$pk_mo}          = $new_workers->{$pk_mo}->{name};
+            $current_workers->{$pk_mo}->{name} = $new_workers->{$pk_mo}->{name};
         }
         else
         {
             #indicate a new CT has been added
-            $diff->{new}->{$pk_mo}     = $new_workers->{$pk_mo}->{name};
-            $current_workers->{$pk_mo} = $new_workers->{$pk_mo}->{name};
+            $diff->{new}->{$pk_mo}             = $new_workers->{$pk_mo}->{name};
+            $current_workers->{$pk_mo}->{name} = $new_workers->{$pk_mo}->{name};
         }
     }
 
     foreach my $pk_mo( keys %$current_workers )
     {
         next if( defined( $new_workers->{$pk_mo} ) );
-        #indicate a removed CT
         $diff->{old}->{$pk_mo} = $current_workers->{$pk_mo}->{name};
     }
 
@@ -579,6 +579,7 @@ sub parent_loop($)
                 # Remove old children
                 foreach my $pk_maintenance_object( keys %{$diff->{old}} )
                 {
+                    _log( $LOG_LEVEL_DEBUG, "Attempting to shut down PID for $pk_maintenance_object" );
                     my $target_pid = $worker_mapping->{$pk_maintenance_object};
                     if( update_status( { shutdown => 1 }, $target_pid ) )
                     {
@@ -608,13 +609,14 @@ sub parent_loop($)
                     );
 
                     $handle = &db_connect( $handle );
-                    my $worker_data = get_worker_list(
+                    my $new_worker_data = get_worker_list(
                         $handle,
                         $pk_maintenance_object
                     );
+                    $WORKER_DATA = populate_worker_data( $handle, $WORKER_DATA );
                     $handle->disconnect();
                     undef( $handle );
-                    unless( $worker_data )
+                    unless( $new_worker_data )
                     {
                         _log(
                             $LOG_LEVEL_ERROR,
@@ -623,9 +625,9 @@ sub parent_loop($)
                         next;
                     }
 
-                    $worker_data      = $worker_data->[0];
-                    my $filter_tables = $worker_data->{filter_tables};
-                    my $ct_name       = $worker_data->{name};
+                    $new_worker_data      = $new_worker_data->[0];
+                    my $filter_tables = $new_worker_data->{filter_tables};
+                    my $ct_name       = $new_worker_data->{name};
                     my $child_pid     = fork();
                     if( defined( $child_pid ) and $child_pid == 0 )
                     {
@@ -697,13 +699,13 @@ sub parent_loop($)
                 );
 
                 $handle = &db_connect( $handle );
-                my $worker_data = get_worker_list(
+                my $check_worker_data = get_worker_list(
                     $handle,
                     $pk_maintenance_object
                 );
                 $handle->disconnect();
                 undef( $handle );
-                unless( $worker_data )
+                unless( $check_worker_data )
                 {
                     _log(
                         $LOG_LEVEL_ERROR,
@@ -712,9 +714,9 @@ sub parent_loop($)
                     next;
                 }
 
-                $worker_data      = $worker_data->[0];
-                my $filter_tables = $worker_data->{filter_tables};
-                my $ct_name       = $worker_data->{name};
+                $check_worker_data      = $check_worker_data->[0];
+                my $filter_tables = $check_worker_data->{filter_tables};
+                my $ct_name       = $check_worker_data->{name};
                 $child_pid        = fork();
 
                 if( defined( $child_pid ) and $child_pid == 0 )
@@ -1029,6 +1031,7 @@ sub worker_entrypoint($$)
 
             do_lock( $WS_KEY, $READ_LOCK );
             $WORKER_STATUSES = readmem( $WS_KEY );
+
             if( defined( $WORKER_STATUSES ) && defined( $WORKER_STATUSES->{$worker_pid} ) )
             {
                 if( defined( $WORKER_STATUSES->{$worker_pid}->{shutdown} ) )
@@ -1156,7 +1159,7 @@ sub worker_entrypoint($$)
                     last NOTIFY_LOOP;
                 }
 
-                if( $l_counter > 100 )
+                if( $l_counter > 10 )
                 {
                     $l_counter = 0;
                     _log( $LOG_LEVEL_DEBUG, "Validating $CACHE_HASH->{name} exists" );
@@ -1181,7 +1184,7 @@ sub worker_entrypoint($$)
                         $WORKER_STATUSES->{$worker_pid}->{shutdown} = 1;
                         writemem( $WS_KEY, $WORKER_STATUSES );
                         do_lock( $WS_KEY, $WRITE_UNLOCK );
-                        next;
+                        last NOTIFY_LOOP;
                     }
                     else
                     {
@@ -1231,6 +1234,8 @@ sub worker_entrypoint($$)
                         }
                     }
 
+                    # Check on parent
+                    check_parent_is_running();
                 }
 
                 $l_counter++;
