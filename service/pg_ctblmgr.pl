@@ -1159,7 +1159,7 @@ sub worker_entrypoint($$)
                     last NOTIFY_LOOP;
                 }
 
-                if( $l_counter > 10 )
+                if( $l_counter > 100 )
                 {
                     $l_counter = 0;
                     _log( $LOG_LEVEL_DEBUG, "Validating $CACHE_HASH->{name} exists" );
