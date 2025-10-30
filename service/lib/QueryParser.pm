@@ -3317,18 +3317,18 @@ sub apply_filters($;$) :Export( :MANDATORY )
     my $where_expressions = $map->{where_expressions};
     # Lets use the filters we've received and search for the tables, their
     # aliases, and the objects they are present in within the query, then
-    # attempt to modify the query such that we habe a filtered query
+    # attempt to modify the query such that we have a filtered query
     # Phase I will result in a keyed array telling us which CTE or query will
     # need a filter applied
 
-    my @starts = sort { $b <=> $a } keys( %{$table_mapping->{BINDS}} );
-    # Assmple where expressions structure keyed based on the bind position
+    # Assemble where expressions structure keyed based on the bind position
     # for much easier substitution later
-
     #print Dumper( $where_expressions ) if( defined $CONFIG_MANAGER && $CONFIG_MANAGER->get_config_value( 'debug' ) );
-    my $new_q  = $definition;
-    my $last_q = $definition;
-    my $index  = 0;
+    my @starts     = sort { $b <=> $a } keys( %{$table_mapping->{BINDS}} );
+    my $new_q      = $definition;
+    my $last_q     = $definition;
+    my $index      = 0;
+    my $last_start = $starts[0];
 
     foreach my $bind_start( @starts )
     {
@@ -3423,6 +3423,12 @@ sub apply_filters($;$) :Export( :MANDATORY )
         my $where_proceeding_clause_mark;
         my $BS_HASH = $table_mapping->{BINDS}->{$bind_start};
         my $replace_where = 0;
+
+        # this is a fixup where a union member is actually the last statement - just treat is like a regular query
+        if( defined( $BS_HASH->{is_union} ) && $BS_HASH->{is_union} eq 'NONE' && $bind_start == $last_start )
+        {
+            $BS_HASH->{is_union} = undef;
+        }
 
         if( $BS_HASH->{has_group} )
         {
