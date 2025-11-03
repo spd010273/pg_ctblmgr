@@ -313,7 +313,7 @@ sub xid_service_entry() :Export( :MANDATORY )
         print( 'Fast delete is not enabled!' );
         exit( 0 );
     }
-        
+
 #    unless( defined( $DAEMONIZE ) && $DAEMONIZE )
 #    {
 #        daemonize();
@@ -347,7 +347,19 @@ sub xid_service_entry() :Export( :MANDATORY )
         if( $got_sighup )
         {
             $CONFIG_MANAGER->load_configs( 1 );
-            $got_sighup = 0;
+            $got_sighup           = 0;
+            $ENABLE_FAST_DELETE   = $CONFIG_MANAGER->get_config_value( 'enable_fast_delete' );
+            $XID_BUCKET_TIMES     = $CONFIG_MANAGER->get_config_value( 'xid_bucket_times' );
+            $XID_BUCKET_COUNT     = $CONFIG_MANAGER->get_config_value( 'xid_bucket_count' );
+            $XID_IDLE_TIMEOUT     = $CONFIG_MANAGER->get_config_value( 'xid_idle_timeout' );
+            $XID_SERVICE_PORT     = $CONFIG_MANAGER->get_config_value( 'xid_service_port' );
+            $MAX_RESERVATION_TIME = $CONFIG_MANAGER->get_config_value( 'xid_max_reservation_time' );
+
+            unless( $ENABLE_FAST_DELETE )
+            {
+                _log( $LOG_LEVEL_INFO, 'Fast delete has been disabled, XID service is exitint' );
+                exit( 0 );
+            }
         }
 
         ## Bucket management logic
@@ -381,7 +393,7 @@ sub xid_service_entry() :Export( :MANDATORY )
                          || tv_interval( $current_slot->{reserved}, [gettimeofday()] ) >= $MAX_RESERVATION_TIME
                         )
                      && defined( $current_slot->{handle} )
-                     && tv_interval( $current_slot->{created}, [gettimeofday()] ) < $XID_BUCKET_TIMES->[$bucket_id]
+                     && tv_interval( $current_slot->{created}, [ gettimeofday()] ) < $XID_BUCKET_TIMES->[$bucket_id]
                   )
                 {
                     my $curr = $current_slot->{handle};
@@ -431,13 +443,7 @@ sub xid_service_entry() :Export( :MANDATORY )
                 }
                 else
                 {
-                    if(
-                            (
-                                !defined( $current_slot->{reserved} )
-                             || tv_interval( $current_slot->{reserved}, [gettimeofday()] ) >= $MAX_RESERVATION_TIME
-                            )
-                         && tv_interval( $current_slot->{created}, [ gettimeofday() ] ) >= $max_age_sec
-                      )
+                    if( tv_interval( $current_slot->{created}, [ gettimeofday() ] ) >= $max_age_sec )
                     {
                         my $old_handle       = $current_slot->{handle};
                         my $replace_xid      = $current_slot->{xid};
@@ -580,7 +586,7 @@ sub xid_service_entry() :Export( :MANDATORY )
             xid_service_register();
         }
     }
-    
+
     return;
 }
 
