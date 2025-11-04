@@ -49,6 +49,22 @@ our $ENABLE_FAST_DELETE          :Export( :MANDATORY ) = 0;
 # Only use global locking when global snapshots are enabled. Currently cross db snapshot imports are not allowed
 #our $PGCTBLMGR_XID_MAGIC_1       :Export( :MANDATORY ) = 82163684;
 #our $PGCTBLMGR_XID_MAGIC_2       :Export( :MANDATORY ) = 33128049;
+Readonly::Scalar my $IS_TABLE_BEING_AUTOVACUUMED => <<END_SQL;
+    SELECT n.nspname,
+           c.relname
+      FROM pg_locks l
+INNER JOIN pg_stat_activity a
+        ON a.pid = l.pid
+       AND a.backend_type = 'autovacuum worker'
+INNER JOIN pg_class c
+        ON c.oid = l.relation
+INNER JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+INNER JOIN ${SCHEMA_NAME}.tb_maintenance_object mo
+        ON mo.name = c.relname::VARCHAR
+       AND mo.namespace = n.nspname::VARCHAR
+     WHERE mo.maintenance_object = ?
+END_SQL
 
 Readonly::Scalar my $GET_TABLE_COLUMNS_DATATYPES => <<END_SQL;
     SELECT a.attname AS column_name,
@@ -761,6 +777,63 @@ Readonly::Scalar my $GET_XID_SERVICE_PORT => <<"END_SQL";
      WHERE namespace = 'XID_SERVICE'
        AND location = 0
 END_SQL
+
+sub vacuum_freeze_relation($$$$) :Export( :MANDATORY )
+{
+    my( $handle, $pk_maintenance_object, $relation, $short_name ) = validate_pos(
+        @_,
+        { type => OBJECT },
+        { type => SCALAR },
+        { type => SCALAR },
+        { type => SCALAR },
+    );
+
+    my $sth = $handle->prepare( $IS_TABLE_BEING_AUTOVACUUMED );
+
+    unless( $sth )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to check in maintenance object is being vacuumed' );
+        return 0;
+    }
+
+    $sth->bind_param( 1, $pk_maintenance_object );
+
+    unless( $sth->execute() )
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to execute maintenance object vacuum check query' );
+        return 0;
+    }
+
+    my $rows = $sth->rows();
+    $sth->finish();
+
+    return 1 if( $rows > 0 );
+    my $vacuum_pid = fork();
+
+    if( defined( $vacuum_pid ) and $vacuum_pid == 0 )
+    {
+        $handle->{InactiveDestroy} = 1; # This child will not destroy the handle
+        undef( $handle );
+        my $child_handle = db_connect( undef, 1 );
+        set_program_name( $child_handle, "vacuum worker $short_name" );
+        $child_handle->do( "VACUUM FREEZE $relation" );
+        #$child_handle->do( 'SELECT pg_sleep( 60 )' );
+        _log( $LOG_LEVEL_INFO, "Successfully vacuumed $short_name" );
+        $child_handle->disconnect();
+        # child
+        exit( 0 );
+    }
+    elsif( defined( $vacuum_pid ) and $vacuum_pid > 0 )
+    {
+        _log( $LOG_LEVEL_DEBUG, "Started vacuum process $vacuum_pid" );
+    }
+    else
+    {
+        _log( $LOG_LEVEL_ERROR, 'Failed to fork vacuum process' );
+    }
+
+    return $vacuum_pid;
+}
 
 sub get_xid_service_host($) :Export( :MANDATORY )
 {
@@ -1602,7 +1675,6 @@ sub do_listen($) :Export( :MANDATORY )
              || defined( $FILE_DESCRIPTOR )
           )
         {
-            print( "Cleaning up selector\n" );
             $SELECTOR->remove( $FILE_DESCRIPTOR ) if( defined( $SELECTOR ) );
             undef( $SELECTOR );
             if(

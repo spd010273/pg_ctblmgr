@@ -17,7 +17,6 @@ use IO::Socket;
 use Getopt::Std;
 use Time::HiRes qw( gettimeofday tv_interval );
 use POSIX qw( strftime setsid :sys_wait_h );
-use Cwd qw( abs_path );
 use File::Basename;
 
 use Data::Dumper;
@@ -57,19 +56,8 @@ $DAEMONIZE     = 0;
 my $xid_service_port;
 my $xid_service_host;
 my $got_sighup = 0;
-my $path = abs_path( $0 );
-if( $path =~ m/pg_ctblmgr\.pl/ )
-{
-    $path =~ s/\/pg_ctblmgr\.pl$//;
-}
-else
-{
-    $path =~ s/\/pg_ctblmgr$//;
-}
-
-$path =~ s/\/service$//;
-my $XID_SERVICE_PATH = $path . '/' . $XID_SERVICE_LOCATION;
 my $xid_service_pid = 0;
+my $TIME_BETWEEN_VACUUM = 86400;
 
 sub connect_to_xid_service($$)
 {
@@ -1022,6 +1010,9 @@ sub worker_entrypoint($$)
         my $BLOWOUT_FACTORS = {};
         # MAIN LOOP
         my $l_counter = 0;
+        my $idle_loops = 0;
+        my $last_vacuum;
+        my $vacuum_worker_pid;
 
         while( 1 )
         {
@@ -1120,6 +1111,7 @@ sub worker_entrypoint($$)
                 our $SELECTOR;
                 our $FILE_DESCRIPTOR;
                 @$ret = IO::Select::select( $SELECTOR, undef, undef, 2.5 );
+
                 if( $OS_ERROR && !$got_sighup )
                 {
                     _log( $LOG_LEVEL_ERROR, "Error reading file handle: $OS_ERROR. Resetting selector..." );
@@ -1157,6 +1149,45 @@ sub worker_entrypoint($$)
                     $xid_service_host = get_xid_service_host( $handle );
                     $xid_service_port = get_xid_service_port( $handle );
                     last NOTIFY_LOOP;
+                }
+
+                if( defined( $vacuum_worker_pid ) )
+                {
+                    if( waitpid( $vacuum_worker_pid, WNOHANG ) != 0 )
+                    {
+                        _log( $LOG_LEVEL_DEBUG, "vacuum worker $vacuum_worker_pid exited!" );
+                        waitpid( $vacuum_worker_pid, 0 );
+                        $vacuum_worker_pid = undef;
+                    }
+                }
+
+                if( $idle_loops >= 10 )
+                {
+                    $idle_loops = 0;
+                    _log( $LOG_LEVEL_DEBUG, "Checking vacuum state" );
+                    if(
+                           !defined( $vacuum_worker_pid )
+                        && (
+                                 !defined( $last_vacuum )
+                              || tv_interval( $last_vacuum, [ gettimeofday() ] ) > $TIME_BETWEEN_VACUUM
+                           )
+                      )
+                    {
+                        my $quoted_relname = "\"$CACHE_HASH->{schema}\".\"$CACHE_HASH->{name}\"";
+                        # Vacuum Freeze
+                        my $pid = vacuum_freeze_relation(
+                            $handle,
+                            $pk_maintenance_object,
+                            $quoted_relname,
+                            $CACHE_HASH->{name}
+                        );
+
+                        if( $pid > 0 )
+                        {
+                            $last_vacuum = [gettimeofday()];
+                            $vacuum_worker_pid = $pid if( $pid > 1 );
+                        }
+                    }
                 }
 
                 if( $l_counter > 100 )
@@ -1239,6 +1270,7 @@ sub worker_entrypoint($$)
                 }
 
                 $l_counter++;
+                $idle_loops++;
             }
 
             while( my $notification = $handle->func( 'pg_notifies' ) )
@@ -1258,7 +1290,7 @@ sub worker_entrypoint($$)
 
                 eval { $data = decode_json( $notify_data ); };
 
-                if( $@ || !defined( $data ) )
+                if( $@ || !defined( $data ) || ref( $data ) ne 'HASH' || scalar( keys( %$data ) ) == 0 )
                 {
                     _log( $LOG_LEVEL_INFO, "Got spurious or corrupt data '$notify_data' from PID $notify_pid" );
                     next;
@@ -1324,7 +1356,7 @@ sub worker_entrypoint($$)
             my $aged_snapshot;
 
             next if( scalar( keys %{$changes} ) == 0 );
-
+            $idle_loops = 0;
             # Lets check if the stuff in changes exists and if it is outer joined
             #print Dumper( $changes );
             my $map = {
