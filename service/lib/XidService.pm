@@ -37,6 +37,7 @@ my $LOG_FH          = undef;
 my $handle;
 my $DAEOMONIZE      = 0;
 our $PARENT_PID      = getppid() || $PROCESS_ID;
+our $XID_SERVICE_PID;
 my $XID_SERVICE_PORT;
 my $MAX_RESERVATION_TIME;
 my $CACHE_AGE_DEFAULT = 5;
@@ -44,8 +45,8 @@ my $CACHE_AGE_DEFAULT = 5;
 # DB lib globals
 our $CONFIG_MANAGER;
 our $CONNECTION_MAP              = {};
-our $SKIP_LOCK_CHECK             = 1;
-our $LOCAL_PK_MAINTENANCE_OBJECT = 0;
+our $SKIP_LOCK_CHECK             = 0;
+our $LOCAL_PK_MAINTENANCE_OBJECT = -1;
 
 # There are some commented out sections that should stay in-place
 # related to the XID service in DB.pm and parts of this file.
@@ -314,16 +315,15 @@ sub xid_service_entry() :Export( :MANDATORY )
         exit( 0 );
     }
 
-#    unless( defined( $DAEMONIZE ) && $DAEMONIZE )
-#    {
-#        daemonize();
-#    }
+    set_xid_service_pid( $PROCESS_ID );
 
     $handle = &db_connect();
+
     unless( xid_service_register() )
     {
         print "Could not register!\n";
     }
+
     set_program_name( $handle, 'pg_ctblmgr XID Reservation Service' );
 
     my $listen = IO::Socket::INET->new(
@@ -357,7 +357,7 @@ sub xid_service_entry() :Export( :MANDATORY )
 
             unless( $ENABLE_FAST_DELETE )
             {
-                _log( $LOG_LEVEL_INFO, 'Fast delete has been disabled, XID service is exitint' );
+                _log( $LOG_LEVEL_INFO, 'Fast delete has been disabled, XID service is exiting' );
                 exit( 0 );
             }
         }

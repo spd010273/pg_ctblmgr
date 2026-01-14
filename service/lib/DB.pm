@@ -46,6 +46,7 @@ our $NO_TEMP_TABLES              :Export( :MANDATORY ) = 0;
 our $FORCE_MATERIALIZE           :Export( :MANDATORY ) = 0;
 our $ENABLE_FAST_DELETE          :Export( :MANDATORY ) = 0;
 
+my $XID_SERVICE_PID = 0;
 # Only use global locking when global snapshots are enabled. Currently cross db snapshot imports are not allowed
 #our $PGCTBLMGR_XID_MAGIC_1       :Export( :MANDATORY ) = 82163684;
 #our $PGCTBLMGR_XID_MAGIC_2       :Export( :MANDATORY ) = 33128049;
@@ -942,7 +943,7 @@ sub try_lock($) :Export( :MANDATORY )
         { type => OBJECT },
     );
 
-    return 1 if( defined $SKIP_LOCK_CHECK && $SKIP_LOCK_CHECK );
+    return 1 if( ( defined $SKIP_LOCK_CHECK && $SKIP_LOCK_CHECK ) || $XID_SERVICE_PID == $PROCESS_ID );
     my $sth = $handle->prepare( $CHECK_WORKER_LOCK );
     return 0 unless( $sth );
 
@@ -3085,6 +3086,18 @@ END_SQL
     return 0 unless( $sth );
     $sth->finish();
     return 1;
+}
+
+sub get_xid_service_pid() :Export( :MANDATORY )
+{
+    return $XID_SERVICE_PID;
+}
+
+sub set_xid_service_pid($) :Export( :MANDATORY )
+{
+    my( $pid ) = @_;
+    $XID_SERVICE_PID = $pid;
+    return;
 }
 
 1;

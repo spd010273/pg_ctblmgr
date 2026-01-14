@@ -46,6 +46,7 @@ Readonly my $WS_KEY   => 17783313 + 1;
 Readonly my $INT_MAX  => ( 2**53 );
 our $OUTPUT_AUTOFLUSH = 1;
 our $|                = 1;
+our $SKIP_LOCK_CHECK  = 0;
 
 ## GLOBAL VARIABLES
 $PARENT_PID    = $PROCESS_ID;
@@ -1838,6 +1839,7 @@ FD_FALLBACK:
                     _log( $LOG_LEVEL_DEBUG, "Slow delete ($CACHE_HASH->{name}) took $slow_delete_time seconds" );
                 }
 
+                $SKIP_LOCK_CHECK = 0;
                 update_status( { status => $WORKER_STATUS_UPDATE } );
                 &set_program_name( $handle, "Update: $CACHE_HASH->{name}" );
                 my $update_start = [ gettimeofday() ];
