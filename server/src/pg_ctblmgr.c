@@ -2033,8 +2033,10 @@ static void EquivalenceClass_out( StringInfo str, EquivalenceClass * node )
     Node_out( str, topmost->ec_members );
     appendStringInfo( str, ",\"ec_sources\":" );
     Node_out( str, topmost->ec_sources );
+#if PG_VERSION_NUM < 180000
     appendStringInfo( str, ",\"ec_derives\":" );
     Node_out( str, topmost->ec_derives );
+#endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"ec_relids\":" );
     Bitmapset_out( str, node->ec_relids );
     appendStringInfo( str, ",\"ec_has_const\":%s", topmost->ec_has_const ? "true" : "false" );
@@ -2677,6 +2679,7 @@ static void MergeJoin_out( StringInfo str, MergeJoin * node )
         appendStringInfo( str, "%u", node->mergeCollations[i] );
     }
 
+#if PG_VERSION_NUM < 180000
     appendStringInfo( str, "],\"mergeStrategies\":[" );
     first = 1;
 
@@ -2689,7 +2692,7 @@ static void MergeJoin_out( StringInfo str, MergeJoin * node )
 
         appendStringInfo( str, "%d", node->mergeStrategies[i] );
     }
-
+#endif //PG_VERSION_NUM
     appendStringInfo( str, "],\"mergeNullsFirst\":[" );
     first = 1;
 
@@ -3406,7 +3409,9 @@ static void PathKey_out( StringInfo str, PathKey * node )
     appendStringInfo( str, ",\"pk_eclass\":" );
     Node_out( str, node->pk_eclass );
     appendStringInfo( str, ",\"pk_opfamily\":%u", node->pk_opfamily );
+#if PG_VERSION_NUM < 180000
     appendStringInfo( str, ",\"pk_strategy\":%d", node->pk_strategy );
+#endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"pk_nulls_first\":%s", node->pk_nulls_first ? "true" : "false" );
     return;
 }
@@ -3951,7 +3956,9 @@ static void Result_out( StringInfo str, Result * node )
 static void RowCompareExpr_out( StringInfo str, RowCompareExpr * node )
 {
     appendStringInfoString( str, "\"name\":\"ROWCOMPARE\"" );
+#if PG_VERSION_NUM < 180000
     appendStringInfo( str, ",\"rctype\":%d", node->rctype ); // enum - RowCompareType
+#endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"opnos\":" );
     Node_out( str, node->opnos );
     appendStringInfo( str, ",\"opfamilies\":" );
@@ -4142,14 +4149,17 @@ static void SetOperationStmt_out( StringInfo str, SetOperationStmt * node )
 
 static void SetOp_out( StringInfo str, SetOp * node )
 {
+#if PG_VERSION_NUM < 180000
     int     i = 0;
     int first = 1;
+#endif // PG_VERSION_NUM
 
     appendStringInfoString( str, "\"name\":\"SETOP\"" );
     PlanInfo_out( str, ( Plan * ) node );
     appendStringInfo( str, ",\"cmd\":%d", node->cmd ); // enum - SetOpCmd
     appendStringInfo( str, ",\"strategy\":%d", node->strategy ); // enum - SetOpStrategy
     appendStringInfo( str, ",\"numCols\":%d", node->numCols );
+#if PG_VERSION_NUM < 180000
     appendStringInfo( str, ",\"dupColIdx\":[" );
 
     for( i = 0; i < node->numCols; i++ )
@@ -4177,6 +4187,7 @@ static void SetOp_out( StringInfo str, SetOp * node )
 
     appendStringInfo( str, "],\"flagColIdx\":%d", node->flagColIdx );
     appendStringInfo( str, ",\"firstFlag\":%d", node->firstFlag );
+#endif // PG_VERSION_NUM
     appendStringInfo( str, ",\"numGroups\":%ld", node->numGroups );
     return;
 }
